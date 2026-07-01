@@ -14,7 +14,7 @@ def expand_user_path(value: str) -> Path:
 class ModelConfig:
     provider: str = "fake"
     base_url: str = "https://api.openai.com/v1"
-    model: str = "fake-cardputer-model"
+    model: str = "fake-colibri-model"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: int = 60
     max_output_tokens: int = 1024
@@ -46,13 +46,13 @@ class ShellConfig:
 
 @dataclass(frozen=True)
 class FilesConfig:
-    roots: list[Path] = field(default_factory=lambda: [expand_user_path("~/.cardputer-agent"), Path("/tmp")])
+    roots: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri"), Path("/tmp")])
     confirm_write: bool = True
 
 
 @dataclass(frozen=True)
 class SkillsConfig:
-    dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.cardputer-agent/skills")])
+    dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri/skills")])
     max_loaded: int = 20
 
 

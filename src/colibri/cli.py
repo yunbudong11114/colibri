@@ -4,13 +4,13 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.model.fake import FakeModelClient
-from cardputer_agent.session import AgentSession
+from colibri.config import AgentConfig
+from colibri.model.fake import FakeModelClient
+from colibri.session import AgentSession
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cardputer-agent")
+    parser = argparse.ArgumentParser(prog="colibri")
     parser.add_argument("--config", type=Path, default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -39,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run_repl(session: AgentSession) -> int:
     while True:
         try:
-            user_text = input("cardputer> ")
+            user_text = input("colibri> ")
         except EOFError:
             print()
             return 0

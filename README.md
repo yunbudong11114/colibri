@@ -1,4 +1,4 @@
-# Cardputer Agent
+# Colibri
 
 Lightweight Python agent runtime for CardputerZero-class Linux devices.
 
@@ -17,8 +17,8 @@ Milestone 1 provides:
 
 ```bash
 python -m pytest
-PYTHONPATH=src python -m cardputer_agent.cli ask "hello"
-PYTHONPATH=src python -m cardputer_agent.cli repl
+PYTHONPATH=src python -m colibri.cli ask "hello"
+PYTHONPATH=src python -m colibri.cli repl
 ```
 
 The runtime is standard-library only. `pytest` is only needed for development tests.

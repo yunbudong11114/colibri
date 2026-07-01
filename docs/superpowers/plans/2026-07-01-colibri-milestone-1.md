@@ -1,4 +1,4 @@
-# Cardputer Agent Milestone 1 Implementation Plan
+# Colibri Milestone 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -25,13 +25,13 @@
 - Create `pyproject.toml`: project metadata and pytest configuration.
 - Create `README.md`: concise local development and CLI usage notes.
 - Create `configs/agent.example.toml`: example config matching the approved design defaults.
-- Create `src/cardputer_agent/__init__.py`: package version export.
-- Create `src/cardputer_agent/config.py`: config dataclasses, TOML loading, path expansion, defaults.
-- Create `src/cardputer_agent/messages.py`: model-facing message and response dataclasses.
-- Create `src/cardputer_agent/model/base.py`: `ModelClient` protocol.
-- Create `src/cardputer_agent/model/fake.py`: deterministic model for tests and local smoke runs.
-- Create `src/cardputer_agent/session.py`: `AgentSession`, bounded message handling, simple submit flow.
-- Create `src/cardputer_agent/cli.py`: `argparse` CLI with `ask` and `repl`.
+- Create `src/colibri/__init__.py`: package version export.
+- Create `src/colibri/config.py`: config dataclasses, TOML loading, path expansion, defaults.
+- Create `src/colibri/messages.py`: model-facing message and response dataclasses.
+- Create `src/colibri/model/base.py`: `ModelClient` protocol.
+- Create `src/colibri/model/fake.py`: deterministic model for tests and local smoke runs.
+- Create `src/colibri/session.py`: `AgentSession`, bounded message handling, simple submit flow.
+- Create `src/colibri/cli.py`: `argparse` CLI with `ask` and `repl`.
 - Create `tests/unit/test_config.py`: config behavior.
 - Create `tests/unit/test_session.py`: session behavior with fake model.
 - Create `tests/unit/test_cli.py`: CLI smoke tests.
@@ -42,8 +42,8 @@
 - Create: `pyproject.toml`
 - Create: `README.md`
 - Create: `configs/agent.example.toml`
-- Create: `src/cardputer_agent/__init__.py`
-- Create: `src/cardputer_agent/config.py`
+- Create: `src/colibri/__init__.py`
+- Create: `src/colibri/config.py`
 - Test: `tests/unit/test_config.py`
 
 **Interfaces:**
@@ -57,14 +57,14 @@
 ```python
 from pathlib import Path
 
-from cardputer_agent.config import AgentConfig, expand_user_path
+from colibri.config import AgentConfig, expand_user_path
 
 
 def test_default_config_uses_small_device_limits():
     config = AgentConfig.default()
 
     assert config.model.provider == "fake"
-    assert config.model.model == "fake-cardputer-model"
+    assert config.model.model == "fake-colibri-model"
     assert config.session.max_tool_rounds == 6
     assert config.session.recent_message_limit == 16
     assert config.session.compact_trigger_chars == 36000
@@ -101,17 +101,17 @@ roots = ["~/notes", "/tmp"]
 
 
 def test_expand_user_path_expands_home():
-    expanded = expand_user_path("~/.cardputer-agent")
+    expanded = expand_user_path("~/.colibri")
 
     assert expanded.is_absolute()
-    assert expanded.name == ".cardputer-agent"
+    assert expanded.name == ".colibri"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/unit/test_config.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'cardputer_agent'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'colibri'`.
 
 - [ ] **Step 3: Implement project metadata and config code**
 
@@ -123,7 +123,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cardputer-agent"
+name = "colibri"
 version = "0.1.0"
 description = "Lightweight Python agent runtime for CardputerZero"
 readme = "README.md"
@@ -131,7 +131,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-cardputer-agent = "cardputer_agent.cli:main"
+colibri = "colibri.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -144,7 +144,7 @@ pythonpath = ["src"]
 Create `README.md`:
 
 ```markdown
-# Cardputer Agent
+# Colibri
 
 Lightweight Python agent runtime for CardputerZero-class Linux devices.
 
@@ -152,8 +152,8 @@ Milestone 1 includes a package skeleton, config loader, fake model session, and 
 
 ```bash
 python -m pytest
-python -m cardputer_agent.cli ask "hello"
-python -m cardputer_agent.cli repl
+python -m colibri.cli ask "hello"
+python -m colibri.cli repl
 ```
 ```
 
@@ -187,11 +187,11 @@ allow = ["ls", "cat", "sed", "rg", "python", "git status"]
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 [files]
-roots = ["~/.cardputer-agent", "/tmp"]
+roots = ["~/.colibri", "/tmp"]
 confirm_write = true
 
 [skills]
-dirs = ["~/.cardputer-agent/skills"]
+dirs = ["~/.colibri/skills"]
 max_loaded = 20
 
 [mcp]
@@ -200,13 +200,13 @@ startup = "lazy"
 max_active_servers = 1
 ```
 
-Create `src/cardputer_agent/__init__.py`:
+Create `src/colibri/__init__.py`:
 
 ```python
 __version__ = "0.1.0"
 ```
 
-Create `src/cardputer_agent/config.py`:
+Create `src/colibri/config.py`:
 
 ```python
 from __future__ import annotations
@@ -225,7 +225,7 @@ def expand_user_path(value: str) -> Path:
 class ModelConfig:
     provider: str = "fake"
     base_url: str = "https://api.openai.com/v1"
-    model: str = "fake-cardputer-model"
+    model: str = "fake-colibri-model"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: int = 60
     max_output_tokens: int = 1024
@@ -257,13 +257,13 @@ class ShellConfig:
 
 @dataclass(frozen=True)
 class FilesConfig:
-    roots: list[Path] = field(default_factory=lambda: [expand_user_path("~/.cardputer-agent"), Path("/tmp")])
+    roots: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri"), Path("/tmp")])
     confirm_write: bool = True
 
 
 @dataclass(frozen=True)
 class SkillsConfig:
-    dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.cardputer-agent/skills")])
+    dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri/skills")])
     max_loaded: int = 20
 
 
@@ -330,11 +330,11 @@ Expected: 3 passed.
 ### Task 2: Messages, Fake Model, and Agent Session
 
 **Files:**
-- Create: `src/cardputer_agent/messages.py`
-- Create: `src/cardputer_agent/model/__init__.py`
-- Create: `src/cardputer_agent/model/base.py`
-- Create: `src/cardputer_agent/model/fake.py`
-- Create: `src/cardputer_agent/session.py`
+- Create: `src/colibri/messages.py`
+- Create: `src/colibri/model/__init__.py`
+- Create: `src/colibri/model/base.py`
+- Create: `src/colibri/model/fake.py`
+- Create: `src/colibri/session.py`
 - Test: `tests/unit/test_session.py`
 
 **Interfaces:**
@@ -349,9 +349,9 @@ Expected: 3 passed.
 - [ ] **Step 1: Write the failing session tests**
 
 ```python
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.model.fake import FakeModelClient
-from cardputer_agent.session import AgentSession
+from colibri.config import AgentConfig
+from colibri.model.fake import FakeModelClient
+from colibri.session import AgentSession
 
 
 def test_submit_records_user_and_assistant_messages():
@@ -394,7 +394,7 @@ Expected: FAIL with `ModuleNotFoundError` or missing `AgentSession`.
 
 - [ ] **Step 3: Implement message, model, and session code**
 
-Create `src/cardputer_agent/messages.py`:
+Create `src/colibri/messages.py`:
 
 ```python
 from __future__ import annotations
@@ -434,23 +434,23 @@ class AgentResponse:
     messages: list[Message]
 ```
 
-Create `src/cardputer_agent/model/__init__.py`:
+Create `src/colibri/model/__init__.py`:
 
 ```python
-from cardputer_agent.model.base import ModelClient
-from cardputer_agent.model.fake import FakeModelClient
+from colibri.model.base import ModelClient
+from colibri.model.fake import FakeModelClient
 
 __all__ = ["FakeModelClient", "ModelClient"]
 ```
 
-Create `src/cardputer_agent/model/base.py`:
+Create `src/colibri/model/base.py`:
 
 ```python
 from __future__ import annotations
 
 from typing import Protocol
 
-from cardputer_agent.messages import Message, ModelLimits, ModelResponse
+from colibri.messages import Message, ModelLimits, ModelResponse
 
 
 class ModelClient(Protocol):
@@ -464,12 +464,12 @@ class ModelClient(Protocol):
         ...
 ```
 
-Create `src/cardputer_agent/model/fake.py`:
+Create `src/colibri/model/fake.py`:
 
 ```python
 from __future__ import annotations
 
-from cardputer_agent.messages import Message, ModelLimits, ModelResponse
+from colibri.messages import Message, ModelLimits, ModelResponse
 
 
 class FakeModelClient:
@@ -484,7 +484,7 @@ class FakeModelClient:
         return ModelResponse(text=f"fake: {last_user}")
 ```
 
-Create `src/cardputer_agent/session.py`:
+Create `src/colibri/session.py`:
 
 ```python
 from __future__ import annotations
@@ -492,9 +492,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import monotonic
 
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.messages import AgentResponse, Message, ModelLimits
-from cardputer_agent.model.base import ModelClient
+from colibri.config import AgentConfig
+from colibri.messages import AgentResponse, Message, ModelLimits
+from colibri.model.base import ModelClient
 
 
 SYSTEM_PROMPT = (
@@ -563,7 +563,7 @@ Expected: 3 passed.
 ### Task 3: CLI Ask and REPL
 
 **Files:**
-- Create: `src/cardputer_agent/cli.py`
+- Create: `src/colibri/cli.py`
 - Test: `tests/unit/test_cli.py`
 
 **Interfaces:**
@@ -575,7 +575,7 @@ Expected: 3 passed.
 - [ ] **Step 1: Write the failing CLI tests**
 
 ```python
-from cardputer_agent.cli import main
+from colibri.cli import main
 
 
 def test_ask_prints_fake_response(capsys):
@@ -603,11 +603,11 @@ def test_repl_exits_on_quit(monkeypatch, capsys):
 
 Run: `python -m pytest tests/unit/test_cli.py -v`
 
-Expected: FAIL with missing `cardputer_agent.cli`.
+Expected: FAIL with missing `colibri.cli`.
 
 - [ ] **Step 3: Implement CLI**
 
-Create `src/cardputer_agent/cli.py`:
+Create `src/colibri/cli.py`:
 
 ```python
 from __future__ import annotations
@@ -616,13 +616,13 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.model.fake import FakeModelClient
-from cardputer_agent.session import AgentSession
+from colibri.config import AgentConfig
+from colibri.model.fake import FakeModelClient
+from colibri.session import AgentSession
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cardputer-agent")
+    parser = argparse.ArgumentParser(prog="colibri")
     parser.add_argument("--config", type=Path, default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -651,7 +651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run_repl(session: AgentSession) -> int:
     while True:
         try:
-            user_text = input("cardputer> ")
+            user_text = input("colibri> ")
         except EOFError:
             print()
             return 0
@@ -691,7 +691,7 @@ Expected: 8 passed.
 
 - [ ] **Step 2: Run CLI smoke command**
 
-Run: `python -m cardputer_agent.cli ask "hello cardputer"`
+Run: `python -m colibri.cli ask "hello cardputer"`
 
 Expected stdout:
 
@@ -704,7 +704,7 @@ fake: hello cardputer
 Replace `README.md` with:
 
 ```markdown
-# Cardputer Agent
+# Colibri
 
 Lightweight Python agent runtime for CardputerZero-class Linux devices.
 
@@ -723,8 +723,8 @@ Milestone 1 provides:
 
 ```bash
 python -m pytest
-python -m cardputer_agent.cli ask "hello"
-python -m cardputer_agent.cli repl
+python -m colibri.cli ask "hello"
+python -m colibri.cli repl
 ```
 
 The runtime is standard-library only. `pytest` is only needed for development tests.
@@ -736,7 +736,7 @@ Run: `python -m pytest -v`
 
 Expected: 8 passed.
 
-Run: `python -m cardputer_agent.cli ask "hello cardputer"`
+Run: `python -m colibri.cli ask "hello cardputer"`
 
 Expected: `fake: hello cardputer`
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cardputer_agent.messages import Message, ModelLimits, ModelResponse
+from colibri.messages import Message, ModelLimits, ModelResponse
 
 
 class FakeModelClient:

@@ -1,4 +1,4 @@
-# CardputerZero Lightweight Python Agent Design
+# Colibri Lightweight Python Agent Design
 
 Date: 2026-07-01
 Status: Design approved for route 1
@@ -86,7 +86,7 @@ user input
 The proposed repository layout:
 
 ```text
-cardputer/
+colibri/
   pyproject.toml
   README.md
   configs/
@@ -94,7 +94,7 @@ cardputer/
   docs/
     superpowers/specs/
   src/
-    cardputer_agent/
+    colibri/
       __init__.py
       cli.py
       config.py
@@ -145,7 +145,7 @@ cardputer/
 User data should live outside the package:
 
 ```text
-~/.cardputer-agent/
+~/.colibri/
   config.toml
   skills/
     weather/
@@ -201,11 +201,11 @@ allow = ["ls", "cat", "sed", "rg", "python", "pipx", "git status"]
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 [files]
-roots = ["~/notes", "~/.cardputer-agent", "/tmp"]
+roots = ["~/notes", "~/.colibri", "/tmp"]
 confirm_write = true
 
 [skills]
-dirs = ["~/.cardputer-agent/skills"]
+dirs = ["~/.colibri/skills"]
 max_loaded = 20
 
 [mcp]
@@ -540,19 +540,19 @@ Rules:
 Initial interface:
 
 ```bash
-cardputer-agent
-cardputer-agent ask "turn off the desk light"
-cardputer-agent repl
-cardputer-agent skill list
-cardputer-agent memory search "wifi"
+colibri
+colibri ask "turn off the desk light"
+colibri repl
+colibri skill list
+colibri memory search "wifi"
 ```
 
 Interactive REPL should show compact status:
 
 ```text
-cardputer> check my notes for the camera pinout
+colibri> check my notes for the camera pinout
 thinking...
-tool files.read ~/.cardputer-agent/memory/topics/devices.md ok
+tool files.read ~/.colibri/memory/topics/devices.md ok
 ...
 ```
 
@@ -729,8 +729,8 @@ The smallest useful v1 should include:
 - Bounded agent loop.
 - Shell read-ish commands with allowlist.
 - File read/list/write under allowed roots.
-- Local skills loaded from `~/.cardputer-agent/skills`.
-- File memory from `~/.cardputer-agent/memory`.
+- Local skills loaded from `~/.colibri/skills`.
+- File memory from `~/.colibri/memory`.
 - Recent N messages plus summary compact.
 - JSONL transcript.
 - Idle timeout.

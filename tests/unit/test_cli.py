@@ -1,4 +1,4 @@
-from cardputer_agent.cli import main
+from colibri.cli import main
 
 
 def test_ask_prints_fake_response(capsys):

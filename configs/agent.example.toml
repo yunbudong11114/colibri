@@ -25,11 +25,11 @@ allow = ["ls", "cat", "sed", "rg", "python", "git status"]
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 [files]
-roots = ["~/.cardputer-agent", "/tmp"]
+roots = ["~/.colibri", "/tmp"]
 confirm_write = true
 
 [skills]
-dirs = ["~/.cardputer-agent/skills"]
+dirs = ["~/.colibri/skills"]
 max_loaded = 20
 
 [mcp]

@@ -1,6 +1,6 @@
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.model.fake import FakeModelClient
-from cardputer_agent.session import AgentSession
+from colibri.config import AgentConfig
+from colibri.model.fake import FakeModelClient
+from colibri.session import AgentSession
 
 
 def test_submit_records_user_and_assistant_messages():

@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import monotonic
 
-from cardputer_agent.config import AgentConfig
-from cardputer_agent.messages import AgentResponse, Message, ModelLimits
-from cardputer_agent.model.base import ModelClient
+from colibri.config import AgentConfig
+from colibri.messages import AgentResponse, Message, ModelLimits
+from colibri.model.base import ModelClient
 
 
 SYSTEM_PROMPT = (

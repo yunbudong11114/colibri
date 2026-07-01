@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from cardputer_agent.messages import Message, ModelLimits, ModelResponse
+from colibri.messages import Message, ModelLimits, ModelResponse
 
 
 class ModelClient(Protocol):

@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from cardputer_agent.config import AgentConfig, expand_user_path
+from colibri.config import AgentConfig, expand_user_path
 
 
 def test_default_config_uses_small_device_limits():
     config = AgentConfig.default()
 
     assert config.model.provider == "fake"
-    assert config.model.model == "fake-cardputer-model"
+    assert config.model.model == "fake-colibri-model"
     assert config.session.max_tool_rounds == 6
     assert config.session.recent_message_limit == 16
     assert config.session.compact_trigger_chars == 36000
@@ -44,7 +44,7 @@ roots = ["~/notes", "/tmp"]
 
 
 def test_expand_user_path_expands_home():
-    expanded = expand_user_path("~/.cardputer-agent")
+    expanded = expand_user_path("~/.colibri")
 
     assert expanded.is_absolute()
-    assert expanded.name == ".cardputer-agent"
+    assert expanded.name == ".colibri"
