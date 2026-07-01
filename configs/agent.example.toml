@@ -1,0 +1,38 @@
+[model]
+provider = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60
+max_output_tokens = 1024
+
+[session]
+max_tool_rounds = 6
+recent_message_limit = 16
+compact_trigger_chars = 36000
+summary_max_chars = 6000
+idle_exit_seconds = 300
+transcript = true
+
+[tools]
+enabled = ["shell", "files", "http", "memory", "skills", "mcp"]
+default_permission = "allow_read_confirm_write"
+max_result_chars = 12000
+max_shell_seconds = 30
+
+[shell]
+allow = ["ls", "cat", "sed", "rg", "python", "git status"]
+deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
+
+[files]
+roots = ["~/.cardputer-agent", "/tmp"]
+confirm_write = true
+
+[skills]
+dirs = ["~/.cardputer-agent/skills"]
+max_loaded = 20
+
+[mcp]
+enabled = false
+startup = "lazy"
+max_active_servers = 1
