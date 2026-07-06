@@ -10,6 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
+
 [project.scripts]
 colibri = "colibri.cli:main"
 
