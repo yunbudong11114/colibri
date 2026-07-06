@@ -20,6 +20,7 @@ The agent is for personal use, so the default posture can be more permissive tha
 - Do not implement browser automation, IDE/LSP integration, notebook support, or remote collaboration.
 - Do not copy Claude Code's full transcript, hook, feature flag, marketplace, or streaming tool executor complexity.
 - Do not require a desktop UI. The primary interface is CLI/TUI-friendly and later can integrate with the small screen, keyboard, microphone, speaker, and systemd.
+- Do not make any core milestone depend on a graphical environment. Colibri must remain runnable on headless Linux servers over plain SSH using CLI/stdin/stdout.
 
 ## 3. Hardware and Runtime Constraints
 
@@ -33,6 +34,7 @@ CardputerZero should be treated as a low-memory Linux appliance:
 - Audio: microphone and speaker are useful but should be optional modules.
 - Connectivity: Wi-Fi/Ethernet available, but cloud API latency and offline states are normal.
 - Expansion: GPIO/I2C/SPI/UART can control real hardware, so hardware tools need permission labels.
+- Headless operation: the same runtime must work on pure Linux servers without a display server, browser, desktop session, audio device, or hardware screen. Visual, audio, or CardputerZero-specific integrations must be optional layers around the CLI runtime.
 
 The target resident memory for the first version should be conservative:
 

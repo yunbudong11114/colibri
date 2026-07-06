@@ -2,6 +2,10 @@
 
 Lightweight Python agent runtime for CardputerZero-class Linux devices.
 
+## Runtime Support
+
+Colibri must run on headless Linux servers over plain SSH. The core runtime and milestone work should stay usable through CLI/stdin/stdout only, without requiring a graphical desktop, browser, system tray, display server, audio device, or TUI framework.
+
 ## Current Milestone
 
 Milestone 2 provides:

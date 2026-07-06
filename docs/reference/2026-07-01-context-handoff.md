@@ -24,6 +24,8 @@ The project was originally created as `cardputer-agent`, then fully renamed to C
 
 Important project rule from the active user instructions: before modifying code, update the design documentation first, complete the design change, and only then modify code.
 
+Runtime requirement: Colibri must remain usable on headless Linux servers over plain SSH. Future milestones should preserve a CLI/stdin/stdout path and must not require GUI, browser, desktop, audio, or display dependencies in the core runtime.
+
 ## Implemented So Far
 
 Milestone 1 is complete. The repository currently has:
