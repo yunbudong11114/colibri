@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 2 provides:
+Milestone 3 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -20,6 +20,10 @@ Milestone 2 provides:
 - Model provider factory and concise CLI error handling.
 - Bounded agent tool loop.
 - Read-only built-in tools: `files.list`, `files.read`, and allowlisted `shell.run`.
+- Permission decisions before tool execution.
+- Headless stdin/stdout confirmation for future non-read-only tools.
+- Session-scoped "always allow" grants.
+- Compact JSONL transcript logging.
 
 ## Development
 
@@ -63,3 +67,25 @@ When the configured model returns tool calls, Colibri can execute a small read-o
 - `shell.run`: run allowlisted commands such as `ls`, `cat`, `sed`, `rg`, `python`, and `git status`.
 
 Tool calls are bounded by `session.max_tool_rounds`, and tool output is capped by `tools.max_result_chars`.
+
+## Tool Permissions
+
+Colibri checks permission before running each registered tool call.
+
+The default `tools.default_permission = "allow_read_confirm_write"` allows read-only tools and asks for confirmation before non-read-only tools. Other supported values are:
+
+- `allow`: allow all registered tool calls.
+- `confirm`: confirm every registered tool call.
+- `deny`: deny every registered tool call.
+
+Confirmation works over stdin/stdout, so it is safe for SSH-only servers. A response of `always` allows the same tool name for the rest of the current session only.
+
+## Transcripts
+
+When `session.transcript = true`, the CLI writes compact JSONL events to:
+
+```text
+~/.colibri/transcripts/YYYY-MM-DD.jsonl
+```
+
+Set `COLIBRI_HOME` to change the base directory. Transcript events include user messages, assistant messages, tool calls, permission decisions, tool results, model errors, and tool round limits. API keys are not logged by the runtime.

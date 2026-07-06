@@ -7,7 +7,9 @@ from colibri.config import AgentConfig
 from colibri.messages import AgentResponse, Message, ModelLimits
 from colibri.model.base import ModelClient
 from colibri.tools.base import ToolContext, ToolResult
+from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
+from colibri.transcript import TranscriptWriter
 
 
 SYSTEM_PROMPT = (
@@ -21,6 +23,8 @@ class AgentSession:
     config: AgentConfig
     model: ModelClient
     tools: ToolRegistry | None = None
+    permission_policy: PermissionPolicy | None = None
+    transcript: TranscriptWriter | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)
@@ -29,24 +33,39 @@ class AgentSession:
     def submit(self, user_text: str) -> AgentResponse:
         bounded_text = self._bound_text(user_text, self.config.session.compact_trigger_chars)
         self.messages.append(Message(role="user", content=bounded_text))
+        self._write_transcript("user_message", {"text": bounded_text})
         self._trim_recent_messages()
 
         registry = self.tools or ToolRegistry.from_config(self.config)
+        if self.permission_policy is None:
+            self.permission_policy = PermissionPolicy.from_config(self.config)
+        policy = self.permission_policy
         context = ToolContext(config=self.config, cwd=registry.cwd)
 
         for _round_index in range(self.config.session.max_tool_rounds):
-            model_response = self.model.complete(
-                messages=list(self.messages),
-                tools=registry.specs(),
-                system=SYSTEM_PROMPT,
-                limits=ModelLimits(
-                    timeout_seconds=self.config.model.timeout_seconds,
-                    max_output_tokens=self.config.model.max_output_tokens,
-                ),
-            )
+            try:
+                model_response = self.model.complete(
+                    messages=list(self.messages),
+                    tools=registry.specs(),
+                    system=SYSTEM_PROMPT,
+                    limits=ModelLimits(
+                        timeout_seconds=self.config.model.timeout_seconds,
+                        max_output_tokens=self.config.model.max_output_tokens,
+                    ),
+                )
+            except Exception as error:
+                self._write_transcript(
+                    "model_error",
+                    {"error_type": type(error).__name__, "message": str(error)},
+                )
+                raise
             assistant_text = self._bound_text(model_response.text, self.config.tools.max_result_chars)
             self.messages.append(
                 Message(role="assistant", content=assistant_text, tool_calls=list(model_response.tool_calls))
+            )
+            self._write_transcript(
+                "assistant_message",
+                {"text": assistant_text, "tool_call_count": len(model_response.tool_calls)},
             )
             self._trim_recent_messages()
 
@@ -55,7 +74,38 @@ class AgentSession:
                 return AgentResponse(text=assistant_text, messages=list(self.messages))
 
             for call in model_response.tool_calls:
-                result = registry.run(call, context)
+                self._write_transcript(
+                    "tool_call",
+                    {"id": call.id, "name": call.name, "arguments": call.arguments},
+                )
+                tool = registry.get(call.name)
+                if tool is None:
+                    result = registry.run(call, context)
+                else:
+                    allowed, decision = policy.decide(tool, call.arguments)
+                    self._write_transcript(
+                        "permission_decision",
+                        {"tool_name": call.name, "decision": decision, "allowed": allowed},
+                    )
+                    if allowed:
+                        result = tool.run(call.arguments, context)
+                    else:
+                        result = ToolResult(
+                            ok=False,
+                            text="Tool call denied",
+                            error_type="permission_denied",
+                        )
+                self._write_transcript(
+                    "tool_result",
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "ok": result.ok,
+                        "error_type": result.error_type,
+                        "text": self._bound_text(result.text, self.config.tools.max_result_chars),
+                        "truncated": result.truncated,
+                    },
+                )
                 self.messages.append(
                     Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
                 )
@@ -63,6 +113,10 @@ class AgentSession:
 
         limit_text = "Tool round limit reached"
         self.messages.append(Message(role="assistant", content=limit_text))
+        self._write_transcript(
+            "round_limit",
+            {"max_tool_rounds": self.config.session.max_tool_rounds, "text": limit_text},
+        )
         self._trim_recent_messages()
         self.last_activity_at = monotonic()
         return AgentResponse(text=limit_text, messages=list(self.messages))
@@ -73,7 +127,8 @@ class AgentSession:
         self.last_activity_at = monotonic()
 
     def close(self) -> None:
-        return None
+        if self.transcript is not None:
+            self.transcript.close()
 
     def _trim_recent_messages(self) -> None:
         limit = self.config.session.recent_message_limit
@@ -92,3 +147,7 @@ class AgentSession:
         if result.ok:
             return result.text
         return f"{result.error_type or 'tool_error'}: {result.text}"
+
+    def _write_transcript(self, event_type: str, payload: dict) -> None:
+        if self.transcript is not None:
+            self.transcript.write(event_type, payload)

@@ -25,6 +25,16 @@ def test_registry_exposes_enabled_builtin_tool_specs(tmp_path):
     assert {"files.list", "files.read", "shell.run"}.issubset(names)
 
 
+def test_registry_gets_registered_tool_by_name(tmp_path):
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+
+    tool = registry.get("files.read")
+
+    assert tool is not None
+    assert tool.spec.name == "files.read"
+
+
 def test_registry_rejects_unknown_tool(tmp_path):
     config = make_config(tmp_path)
     registry = ToolRegistry.from_config(config, cwd=tmp_path)

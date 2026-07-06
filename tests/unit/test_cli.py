@@ -11,6 +11,16 @@ def test_ask_prints_fake_response(capsys):
     assert captured.out.strip() == "fake: status"
 
 
+def test_ask_closes_session_transcript(monkeypatch, capsys):
+    transcript = FakeTranscript()
+    monkeypatch.setattr("colibri.cli.TranscriptWriter.default", lambda: transcript)
+
+    exit_code = main(["ask", "status"])
+
+    assert exit_code == 0
+    assert transcript.closed
+
+
 def test_repl_exits_on_quit(monkeypatch, capsys):
     inputs = iter(["hello", "/quit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
@@ -36,3 +46,14 @@ def test_main_returns_one_for_expected_model_errors(monkeypatch, capsys):
 
     assert exit_code == 1
     assert captured.err.strip() == "Model error: boom"
+
+
+class FakeTranscript:
+    def __init__(self):
+        self.closed = False
+
+    def write(self, event_type, payload):
+        return None
+
+    def close(self):
+        self.closed = True

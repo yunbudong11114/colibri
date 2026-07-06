@@ -9,6 +9,7 @@ from colibri.config import AgentConfig, ConfigError
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.session import AgentSession
+from colibri.transcript import TranscriptWriter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,16 +28,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
         config = AgentConfig.load(args.config)
-        session = AgentSession(config=config, model=build_model_client(config.model))
+        transcript = TranscriptWriter.default() if config.session.transcript else None
+        session = AgentSession(config=config, model=build_model_client(config.model), transcript=transcript)
 
-        if args.command == "ask":
-            print(session.submit(args.text).text)
-            return 0
+        try:
+            if args.command == "ask":
+                print(session.submit(args.text).text)
+                return 0
 
-        if args.command == "repl":
-            return _run_repl(session)
+            if args.command == "repl":
+                return _run_repl(session)
 
-        return 2
+            return 2
+        finally:
+            session.close()
     except ConfigError as error:
         print(f"Config error: {error}", file=sys.stderr)
         return 1

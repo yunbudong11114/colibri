@@ -26,6 +26,9 @@ class ToolRegistry:
     def specs(self) -> list[dict]:
         return [tool.spec.as_openai_tool() for tool in self._tools.values()]
 
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
     def run(self, call: ToolCall, context: ToolContext) -> ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
