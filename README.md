@@ -14,6 +14,8 @@ Milestone 2 provides:
 - CLI `ask` and `repl` commands.
 - OpenAI-compatible chat completions model adapter.
 - Model provider factory and concise CLI error handling.
+- Bounded agent tool loop.
+- Read-only built-in tools: `files.list`, `files.read`, and allowlisted `shell.run`.
 
 ## Development
 
@@ -47,3 +49,13 @@ uv run python -m colibri.cli --config configs/glm.example.toml ask "用中文说
 ```
 
 The runtime does not read API keys from config files. It reads the environment variable named by `model.api_key_env`.
+
+## Built-In Tools
+
+When the configured model returns tool calls, Colibri can execute a small read-only tool set:
+
+- `files.list`: list direct children under configured `files.roots`.
+- `files.read`: read UTF-8 text files under configured `files.roots`.
+- `shell.run`: run allowlisted commands such as `ls`, `cat`, `sed`, `rg`, `python`, and `git status`.
+
+Tool calls are bounded by `session.max_tool_rounds`, and tool output is capped by `tools.max_result_chars`.
