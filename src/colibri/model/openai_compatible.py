@@ -45,12 +45,30 @@ class OpenAICompatibleModelClient:
     def _chat_completions_url(self) -> str:
         return f"{self.base_url}/chat/completions"
 
-    def _api_messages(self, messages: list[Message], system: str) -> list[dict[str, str]]:
+    def _api_messages(self, messages: list[Message], system: str) -> list[dict]:
         api_messages = []
         if system:
             api_messages.append({"role": "system", "content": system})
-        api_messages.extend({"role": message.role, "content": message.content} for message in messages)
+        api_messages.extend(self._api_message(message) for message in messages)
         return api_messages
+
+    def _api_message(self, message: Message) -> dict:
+        api_message: dict = {"role": message.role, "content": message.content}
+        if message.tool_call_id:
+            api_message["tool_call_id"] = message.tool_call_id
+        if message.tool_calls:
+            api_message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        return api_message
 
     def _request_json(self, url: str, payload: dict, timeout_seconds: int) -> dict:
         body = json.dumps(payload).encode("utf-8")

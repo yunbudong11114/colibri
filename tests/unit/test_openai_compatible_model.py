@@ -4,7 +4,7 @@ import urllib.error
 import pytest
 
 from colibri.config import ConfigError, ModelConfig
-from colibri.messages import Message, ModelLimits
+from colibri.messages import Message, ModelLimits, ToolCall
 from colibri.model.errors import ModelError
 from colibri.model.openai_compatible import OpenAICompatibleModelClient
 
@@ -77,6 +77,64 @@ def test_complete_passes_tools_when_present(monkeypatch):
 
     assert captured["payload"]["tools"] == tools
     assert captured["payload"]["messages"] == [{"role": "user", "content": "use a tool"}]
+
+
+def test_complete_serializes_tool_result_messages(monkeypatch):
+    client = make_client()
+    captured = {}
+
+    def fake_request(self, url, payload, timeout_seconds):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}}]}
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    client.complete(
+        messages=[Message(role="tool", content="file contents", tool_call_id="call_1")],
+        tools=[],
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert captured["payload"]["messages"] == [
+        {"role": "tool", "content": "file contents", "tool_call_id": "call_1"}
+    ]
+
+
+def test_complete_serializes_assistant_tool_calls(monkeypatch):
+    client = make_client()
+    captured = {}
+    tool_call = ToolCall(id="call_1", name="files.read", arguments={"path": "/tmp/a.txt"})
+
+    def fake_request(self, url, payload, timeout_seconds):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "done"}}]}
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    client.complete(
+        messages=[Message(role="assistant", content="", tool_calls=[tool_call])],
+        tools=[],
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert captured["payload"]["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "files.read",
+                        "arguments": "{\"path\": \"/tmp/a.txt\"}",
+                    },
+                }
+            ],
+        }
+    ]
 
 
 def test_complete_parses_tool_calls(monkeypatch):
