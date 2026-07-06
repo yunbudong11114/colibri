@@ -6,6 +6,8 @@ from time import monotonic
 from colibri.config import AgentConfig
 from colibri.messages import AgentResponse, Message, ModelLimits
 from colibri.model.base import ModelClient
+from colibri.tools.base import ToolContext, ToolResult
+from colibri.tools.registry import ToolRegistry
 
 
 SYSTEM_PROMPT = (
@@ -18,6 +20,7 @@ SYSTEM_PROMPT = (
 class AgentSession:
     config: AgentConfig
     model: ModelClient
+    tools: ToolRegistry | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)
@@ -28,21 +31,41 @@ class AgentSession:
         self.messages.append(Message(role="user", content=bounded_text))
         self._trim_recent_messages()
 
-        model_response = self.model.complete(
-            messages=list(self.messages),
-            tools=[],
-            system=SYSTEM_PROMPT,
-            limits=ModelLimits(
-                timeout_seconds=self.config.model.timeout_seconds,
-                max_output_tokens=self.config.model.max_output_tokens,
-            ),
-        )
-        assistant_text = self._bound_text(model_response.text, self.config.tools.max_result_chars)
-        self.messages.append(Message(role="assistant", content=assistant_text))
+        registry = self.tools or ToolRegistry.from_config(self.config)
+        context = ToolContext(config=self.config, cwd=registry.cwd)
+
+        for _round_index in range(self.config.session.max_tool_rounds):
+            model_response = self.model.complete(
+                messages=list(self.messages),
+                tools=registry.specs(),
+                system=SYSTEM_PROMPT,
+                limits=ModelLimits(
+                    timeout_seconds=self.config.model.timeout_seconds,
+                    max_output_tokens=self.config.model.max_output_tokens,
+                ),
+            )
+            assistant_text = self._bound_text(model_response.text, self.config.tools.max_result_chars)
+            self.messages.append(
+                Message(role="assistant", content=assistant_text, tool_calls=list(model_response.tool_calls))
+            )
+            self._trim_recent_messages()
+
+            if not model_response.tool_calls:
+                self.last_activity_at = monotonic()
+                return AgentResponse(text=assistant_text, messages=list(self.messages))
+
+            for call in model_response.tool_calls:
+                result = registry.run(call, context)
+                self.messages.append(
+                    Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
+                )
+                self._trim_recent_messages()
+
+        limit_text = "Tool round limit reached"
+        self.messages.append(Message(role="assistant", content=limit_text))
         self._trim_recent_messages()
         self.last_activity_at = monotonic()
-
-        return AgentResponse(text=assistant_text, messages=list(self.messages))
+        return AgentResponse(text=limit_text, messages=list(self.messages))
 
     def reset(self) -> None:
         self.messages.clear()
@@ -63,3 +86,9 @@ class AgentSession:
             return text
         keep = max(0, max_chars - len("\n...[truncated]"))
         return text[:keep] + "\n...[truncated]"
+
+    @staticmethod
+    def _tool_result_text(result: ToolResult) -> str:
+        if result.ok:
+            return result.text
+        return f"{result.error_type or 'tool_error'}: {result.text}"
