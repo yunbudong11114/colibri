@@ -1,0 +1,11 @@
+[model]
+provider = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-5.5"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60
+max_output_tokens = 1024
+
+[session]
+recent_message_limit = 16
+compact_trigger_chars = 36000

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Sequence
 
-from colibri.config import AgentConfig
-from colibri.model.fake import FakeModelClient
+from colibri.config import AgentConfig, ConfigError
+from colibri.model.errors import ModelError
+from colibri.model.factory import build_model_client
 from colibri.session import AgentSession
 
 
@@ -22,18 +24,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = AgentConfig.load(args.config)
-    session = AgentSession(config=config, model=FakeModelClient())
+    try:
+        args = build_parser().parse_args(argv)
+        config = AgentConfig.load(args.config)
+        session = AgentSession(config=config, model=build_model_client(config.model))
 
-    if args.command == "ask":
-        print(session.submit(args.text).text)
-        return 0
+        if args.command == "ask":
+            print(session.submit(args.text).text)
+            return 0
 
-    if args.command == "repl":
-        return _run_repl(session)
+        if args.command == "repl":
+            return _run_repl(session)
 
-    return 2
+        return 2
+    except ConfigError as error:
+        print(f"Config error: {error}", file=sys.stderr)
+        return 1
+    except ModelError as error:
+        print(f"Model error: {error}", file=sys.stderr)
+        return 1
 
 
 def _run_repl(session: AgentSession) -> int:
@@ -49,7 +58,11 @@ def _run_repl(session: AgentSession) -> int:
         if not user_text.strip():
             continue
 
-        print(session.submit(user_text).text)
+        try:
+            print(session.submit(user_text).text)
+        except ModelError as error:
+            print(f"Model error: {error}", file=sys.stderr)
+            return 1
 
 
 if __name__ == "__main__":

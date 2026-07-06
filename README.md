@@ -22,3 +22,19 @@ PYTHONPATH=src python -m colibri.cli repl
 ```
 
 The runtime is standard-library only. `pytest` is only needed for development tests.
+
+## Model Providers
+
+Colibri defaults to the deterministic fake model:
+
+```bash
+PYTHONPATH=src python -m colibri.cli ask "hello"
+```
+
+To use an OpenAI-compatible chat completions API, copy `configs/openai.example.toml`, set `OPENAI_API_KEY` in the environment, and pass the config:
+
+```bash
+PYTHONPATH=src python -m colibri.cli --config configs/openai.example.toml ask "say hi in five words"
+```
+
+The runtime does not read API keys from config files. It reads the environment variable named by `model.api_key_env`.
