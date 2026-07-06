@@ -6,6 +6,10 @@ from typing import Any
 import tomllib
 
 
+class ConfigError(RuntimeError):
+    pass
+
+
 def expand_user_path(value: str) -> Path:
     return Path(value).expanduser()
 
