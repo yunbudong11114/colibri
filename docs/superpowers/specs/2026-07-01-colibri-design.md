@@ -384,7 +384,7 @@ The "always" choice should be session-scoped by default, not permanently written
 
 ## 10. Skill System
 
-Skills are local directories:
+Skills are local directories only. Colibri v1 should not implement skill installation, marketplace discovery, remote downloads, package registries, or plugin distribution.
 
 ```text
 skills/<name>/
@@ -411,13 +411,13 @@ input_schema = { type = "object" }
 
 Skill loading should be cheap:
 
-1. At startup, scan skill directories for names, descriptions, and first section of `SKILL.md`.
+1. At startup, scan only configured local skill directories for names, descriptions, and first section of `SKILL.md`.
 2. Do not load every full `SKILL.md` into every prompt.
 3. On each user turn, select relevant skills by simple keyword scoring first.
 4. Inject only top 1-3 relevant skill instructions.
 5. Expose scripts as `skill.run` subcommands only when their skill is enabled.
 
-This avoids Claude Code's richer but heavier skill machinery while preserving the user's ability to configure capabilities.
+This avoids Claude Code's richer but heavier skill machinery while preserving the user's ability to configure local capabilities. Users can add skills by placing files in configured directories; Colibri will not install or update those files for them in v1.
 
 ## 11. MCP Support
 
@@ -765,6 +765,7 @@ Milestone 7: local skills
 - skill instruction injection
 - simple `skill.run`
 - script permission integration
+- local filesystem only; no skill install, marketplace, registry, or remote fetch
 
 Status: planned.
 
