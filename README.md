@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 4 provides:
+Milestone 5 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -25,6 +25,7 @@ Milestone 4 provides:
 - Session-scoped "always allow" grants.
 - Compact JSONL transcript logging.
 - File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
+- Automatic memory recall from `MEMORY.md` and relevant topic files.
 
 ## Development
 
@@ -92,6 +93,13 @@ memory/
 ```
 
 Memory tools use `memory.root` and `memory.max_search_results` from config. `memory.list`, `memory.read`, and `memory.search` are read-only. `memory.write` is not read-only, so the default permission policy asks before appending.
+
+When `memory.enabled = true`, Colibri also reads `MEMORY.md`, scores topic names and descriptions against the current turn, and injects the top relevant topic files into the model input as a temporary context block. The injected memory is not stored in `AgentSession.messages`.
+
+Recall is bounded by:
+
+- `memory.max_recall_topics`
+- `memory.max_recall_chars`
 
 ## Tool Permissions
 

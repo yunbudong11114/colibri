@@ -64,6 +64,9 @@ class SkillsConfig:
 class MemoryConfig:
     root: Path = field(default_factory=lambda: expand_user_path("~/.colibri/memory"))
     max_search_results: int = 5
+    enabled: bool = True
+    max_recall_topics: int = 3
+    max_recall_chars: int = 4000
 
 
 @dataclass(frozen=True)

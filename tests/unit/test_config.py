@@ -51,6 +51,9 @@ def test_load_config_overrides_memory_values(tmp_path):
 [memory]
 root = "{memory_root}"
 max_search_results = 3
+enabled = false
+max_recall_topics = 2
+max_recall_chars = 1234
 """.strip(),
         encoding="utf-8",
     )
@@ -59,6 +62,9 @@ max_search_results = 3
 
     assert config.memory.root == memory_root
     assert config.memory.max_search_results == 3
+    assert not config.memory.enabled
+    assert config.memory.max_recall_topics == 2
+    assert config.memory.max_recall_chars == 1234
 
 
 def test_expand_user_path_expands_home():

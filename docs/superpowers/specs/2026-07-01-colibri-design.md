@@ -735,7 +735,12 @@ Milestone 5: memory recall injection
 - inject selected memory as a separate context block before model calls
 - record selected memory references in transcript payloads
 
-Status: proposed next milestone.
+Status: complete.
+
+Primary spec/plan:
+
+- `docs/superpowers/specs/2026-07-07-colibri-memory-recall-design.md`
+- `docs/superpowers/plans/2026-07-07-colibri-memory-recall.md`
 
 Milestone 6: context compacting and limits
 

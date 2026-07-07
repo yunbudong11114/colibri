@@ -167,6 +167,41 @@ def test_memory_write_uses_permission_confirmation(tmp_path):
     assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "- Router upstairs\n"
 
 
+def test_session_injects_recalled_memory_without_persisting_it(tmp_path):
+    memory_root = tmp_path / "memory"
+    memory_topics = memory_root / "topics"
+    memory_topics.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text("- devices: Router and wifi notes.\n", encoding="utf-8")
+    (memory_topics / "devices.md").write_text("- Router is upstairs.\n", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
+    model = MemoryAwareModel()
+    session = AgentSession(config=config, model=model)
+
+    response = session.submit("where is the router?")
+
+    assert response.text == "memory used"
+    assert model.first_messages[0].role == "system"
+    assert "Relevant memory:" in model.first_messages[0].content
+    assert "[devices]" in model.first_messages[0].content
+    assert [message.role for message in session.messages] == ["user", "assistant"]
+    assert all("Relevant memory:" not in message.content for message in session.messages)
+
+
+def test_session_logs_memory_recall_event(tmp_path):
+    memory_root = tmp_path / "memory"
+    memory_topics = memory_root / "topics"
+    memory_topics.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text("- devices: Router and wifi notes.\n", encoding="utf-8")
+    (memory_topics / "devices.md").write_text("- Router is upstairs.\n", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
+    transcript = MemoryTranscript()
+    session = AgentSession(config=config, model=MemoryAwareModel(), transcript=transcript)
+
+    session.submit("where is the router?")
+
+    assert transcript.events[1] == ("memory_recall", {"topics": ["devices"], "truncated": False})
+
+
 class ScriptedToolModel:
     def __init__(self, path: str):
         self.path = path
@@ -230,6 +265,16 @@ class ScriptedMemoryWriteModel:
                 ],
             )
         return ModelResponse(text="final answer")
+
+
+class MemoryAwareModel:
+    def __init__(self):
+        self.first_messages = []
+
+    def complete(self, messages, tools, system, limits):
+        self.first_messages = list(messages)
+        assert any(message.role == "system" and "Router is upstairs" in message.content for message in messages)
+        return ModelResponse(text="memory used")
 
 
 class CountingTool:

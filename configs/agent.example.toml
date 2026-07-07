@@ -33,8 +33,11 @@ dirs = ["~/.colibri/skills"]
 max_loaded = 20
 
 [memory]
+enabled = true
 root = "~/.colibri/memory"
 max_search_results = 5
+max_recall_topics = 3
+max_recall_chars = 4000
 
 [mcp]
 enabled = false

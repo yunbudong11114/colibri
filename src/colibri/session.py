@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from time import monotonic
 
 from colibri.config import AgentConfig
+from colibri.memory import MemoryRecall
 from colibri.messages import AgentResponse, Message, ModelLimits
 from colibri.model.base import ModelClient
 from colibri.tools.base import ToolContext, ToolResult
@@ -41,11 +42,18 @@ class AgentSession:
             self.permission_policy = PermissionPolicy.from_config(self.config)
         policy = self.permission_policy
         context = ToolContext(config=self.config, cwd=registry.cwd)
+        memory_result = MemoryRecall(self.config).recall(bounded_text, list(self.messages))
+        if memory_result.text:
+            self._write_transcript(
+                "memory_recall",
+                {"topics": memory_result.topics, "truncated": memory_result.truncated},
+            )
+        model_messages = self._model_messages(memory_result.text)
 
         for _round_index in range(self.config.session.max_tool_rounds):
             try:
                 model_response = self.model.complete(
-                    messages=list(self.messages),
+                    messages=list(model_messages),
                     tools=registry.specs(),
                     system=SYSTEM_PROMPT,
                     limits=ModelLimits(
@@ -110,6 +118,7 @@ class AgentSession:
                     Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
                 )
                 self._trim_recent_messages()
+                model_messages = self._model_messages(memory_result.text)
 
         limit_text = "Tool round limit reached"
         self.messages.append(Message(role="assistant", content=limit_text))
@@ -151,3 +160,9 @@ class AgentSession:
     def _write_transcript(self, event_type: str, payload: dict) -> None:
         if self.transcript is not None:
             self.transcript.write(event_type, payload)
+
+    def _model_messages(self, memory_text: str) -> list[Message]:
+        messages = list(self.messages)
+        if memory_text:
+            return [Message(role="system", content=memory_text)] + messages
+        return messages
