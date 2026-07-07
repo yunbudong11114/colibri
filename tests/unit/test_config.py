@@ -43,6 +43,24 @@ roots = ["~/notes", "/tmp"]
     assert config.files.roots[1] == Path("/tmp")
 
 
+def test_load_config_overrides_memory_values(tmp_path):
+    memory_root = tmp_path / "memory"
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        f"""
+[memory]
+root = "{memory_root}"
+max_search_results = 3
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.load(config_path)
+
+    assert config.memory.root == memory_root
+    assert config.memory.max_search_results == 3
+
+
 def test_expand_user_path_expands_home():
     expanded = expand_user_path("~/.colibri")
 

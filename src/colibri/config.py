@@ -61,6 +61,12 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    root: Path = field(default_factory=lambda: expand_user_path("~/.colibri/memory"))
+    max_search_results: int = 5
+
+
+@dataclass(frozen=True)
 class McpConfig:
     enabled: bool = False
     startup: str = "lazy"
@@ -75,6 +81,7 @@ class AgentConfig:
     shell: ShellConfig = field(default_factory=ShellConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
 
     @classmethod
@@ -97,6 +104,7 @@ class AgentConfig:
             shell=_replace_dataclass(self.shell, data.get("shell", {})),
             files=_replace_dataclass(self.files, _path_list_overrides(data.get("files", {}), "roots")),
             skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
+            memory=_replace_dataclass(self.memory, _path_overrides(data.get("memory", {}), "root")),
             mcp=_replace_dataclass(self.mcp, data.get("mcp", {})),
         )
 
@@ -111,4 +119,11 @@ def _path_list_overrides(overrides: dict[str, Any], key: str) -> dict[str, Any]:
     copied = dict(overrides)
     if key in copied:
         copied[key] = [expand_user_path(value) for value in copied[key]]
+    return copied
+
+
+def _path_overrides(overrides: dict[str, Any], key: str) -> dict[str, Any]:
+    copied = dict(overrides)
+    if key in copied:
+        copied[key] = expand_user_path(copied[key])
     return copied

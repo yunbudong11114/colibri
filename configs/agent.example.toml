@@ -32,6 +32,10 @@ confirm_write = true
 dirs = ["~/.colibri/skills"]
 max_loaded = 20
 
+[memory]
+root = "~/.colibri/memory"
+max_search_results = 5
+
 [mcp]
 enabled = false
 startup = "lazy"

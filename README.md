@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 3 provides:
+Milestone 4 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -24,6 +24,7 @@ Milestone 3 provides:
 - Headless stdin/stdout confirmation for future non-read-only tools.
 - Session-scoped "always allow" grants.
 - Compact JSONL transcript logging.
+- File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
 
 ## Development
 
@@ -60,13 +61,37 @@ The runtime does not read API keys from config files. It reads the environment v
 
 ## Built-In Tools
 
-When the configured model returns tool calls, Colibri can execute a small read-only tool set:
+When the configured model returns tool calls, Colibri can execute a small built-in tool set:
 
 - `files.list`: list direct children under configured `files.roots`.
 - `files.read`: read UTF-8 text files under configured `files.roots`.
 - `shell.run`: run allowlisted commands such as `ls`, `cat`, `sed`, `rg`, `python`, and `git status`.
+- `memory.list`: list Markdown memory topics.
+- `memory.read`: read a memory topic.
+- `memory.search`: search the memory index and topic files by keyword.
+- `memory.write`: append a Markdown bullet to a memory topic.
 
 Tool calls are bounded by `session.max_tool_rounds`, and tool output is capped by `tools.max_result_chars`.
+
+## Memory
+
+Colibri stores persistent memory as plain Markdown under:
+
+```text
+~/.colibri/memory
+```
+
+The default layout is:
+
+```text
+memory/
+  MEMORY.md
+  topics/
+    devices.md
+    preferences.md
+```
+
+Memory tools use `memory.root` and `memory.max_search_results` from config. `memory.list`, `memory.read`, and `memory.search` are read-only. `memory.write` is not read-only, so the default permission policy asks before appending.
 
 ## Tool Permissions
 

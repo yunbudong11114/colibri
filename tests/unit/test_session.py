@@ -149,6 +149,24 @@ def test_close_closes_transcript():
     assert transcript.closed
 
 
+def test_memory_write_uses_permission_confirmation(tmp_path):
+    config = AgentConfig.default().with_overrides({"memory": {"root": str(tmp_path / "memory")}})
+    prompter = FakePrompter(reply="yes")
+    policy = PermissionPolicy.from_config(config, prompter=prompter)
+    session = AgentSession(
+        config=config,
+        model=ScriptedMemoryWriteModel(),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        permission_policy=policy,
+    )
+
+    response = session.submit("remember device")
+
+    assert response.text == "final answer"
+    assert prompter.requests == [PermissionRequest("memory.write", {"topic": "devices", "text": "Router upstairs"}, False)]
+    assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "- Router upstairs\n"
+
+
 class ScriptedToolModel:
     def __init__(self, path: str):
         self.path = path
@@ -193,6 +211,27 @@ class SingleToolCallModel:
         return ModelResponse(text="final answer")
 
 
+class ScriptedMemoryWriteModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 1:
+            assert any(tool["function"]["name"] == "memory.write" for tool in tools)
+            return ModelResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="memory.write",
+                        arguments={"topic": "devices", "text": "Router upstairs"},
+                    )
+                ],
+            )
+        return ModelResponse(text="final answer")
+
+
 class CountingTool:
     spec = ToolSpec(
         name="counting.tool",
@@ -219,3 +258,13 @@ class MemoryTranscript:
 
     def close(self):
         self.closed = True
+
+
+class FakePrompter:
+    def __init__(self, reply):
+        self.reply = reply
+        self.requests = []
+
+    def confirm(self, request):
+        self.requests.append(request)
+        return self.reply

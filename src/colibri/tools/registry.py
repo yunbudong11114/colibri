@@ -5,7 +5,15 @@ from pathlib import Path
 from colibri.config import AgentConfig
 from colibri.messages import ToolCall
 from colibri.tools.base import Tool, ToolContext, ToolResult
-from colibri.tools.builtin import FilesListTool, FilesReadTool, ShellRunTool
+from colibri.tools.builtin import (
+    FilesListTool,
+    FilesReadTool,
+    MemoryListTool,
+    MemoryReadTool,
+    MemorySearchTool,
+    MemoryWriteTool,
+    ShellRunTool,
+)
 
 
 class ToolRegistry:
@@ -19,6 +27,8 @@ class ToolRegistry:
         enabled = set(config.tools.enabled)
         if "files" in enabled:
             tools.extend([FilesListTool(), FilesReadTool()])
+        if "memory" in enabled:
+            tools.extend([MemoryListTool(), MemoryReadTool(), MemorySearchTool(), MemoryWriteTool()])
         if "shell" in enabled:
             tools.append(ShellRunTool())
         return cls(tools=tools, cwd=cwd)
