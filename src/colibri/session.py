@@ -5,8 +5,11 @@ from time import monotonic
 
 from colibri.config import AgentConfig
 from colibri.context import (
+    COMPACT_SYSTEM_PROMPT,
     append_summary,
     budget_model_messages,
+    compact_prompt_message,
+    format_model_summary,
     model_input_chars,
     summarize_messages,
     summary_context,
@@ -150,13 +153,41 @@ class AgentSession:
         limit = self.config.session.recent_message_limit
         if len(self.messages) > limit:
             dropped = self.messages[:-limit]
-            addition = summarize_messages(dropped)
+            addition, mode = self._compact_dropped_messages(dropped)
             self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
             self.messages = self.messages[-limit:]
             self._write_transcript(
                 "context_compact",
-                {"dropped_messages": len(dropped), "summary_chars": len(self.summary)},
+                {"dropped_messages": len(dropped), "mode": mode, "summary_chars": len(self.summary)},
             )
+
+    def _compact_dropped_messages(self, dropped: list[Message]) -> tuple[str, str]:
+        if self._should_model_compact():
+            try:
+                compact_response = self.model.complete(
+                    messages=[compact_prompt_message(self.summary, dropped)],
+                    tools=[],
+                    system=COMPACT_SYSTEM_PROMPT,
+                    limits=ModelLimits(
+                        timeout_seconds=self.config.model.timeout_seconds,
+                        max_output_tokens=self.config.model.max_output_tokens,
+                    ),
+                )
+                if compact_response.tool_calls:
+                    raise RuntimeError("compact response included tool calls")
+                addition = format_model_summary(compact_response.text)
+                if not addition:
+                    raise RuntimeError("compact response was empty")
+                return addition, "model"
+            except Exception as error:
+                self._write_transcript(
+                    "context_compact_error",
+                    {"error_type": type(error).__name__, "message": str(error), "fallback": True},
+                )
+        return summarize_messages(dropped), "fallback"
+
+    def _should_model_compact(self) -> bool:
+        return self.config.session.model_compact and self.config.model.provider != "fake"
 
     @staticmethod
     def _bound_text(text: str, max_chars: int) -> str:

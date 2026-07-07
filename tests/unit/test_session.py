@@ -30,7 +30,9 @@ def test_session_keeps_only_recent_messages():
 
 
 def test_session_compacts_dropped_messages_into_summary():
-    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "summary_max_chars": 200}})
+    config = AgentConfig.default().with_overrides(
+        {"session": {"recent_message_limit": 4, "summary_max_chars": 200, "model_compact": False}}
+    )
     session = AgentSession(config=config, model=FakeModelClient())
 
     session.submit("one")
@@ -41,8 +43,55 @@ def test_session_compacts_dropped_messages_into_summary():
     assert session.summary == "user: one\nassistant: fake: one"
 
 
+def test_session_uses_model_assisted_compact_without_tools():
+    config = AgentConfig.default().with_overrides(
+        {
+            "model": {"provider": "openai_compatible"},
+            "session": {"recent_message_limit": 3, "summary_max_chars": 1000, "model_compact": True},
+        }
+    )
+    transcript = MemoryTranscript()
+    model = CompactAwareModel()
+    session = AgentSession(config=config, model=model, transcript=transcript)
+
+    session.submit("one")
+    session.submit("two")
+
+    assert "Summary:" in session.summary
+    assert "Primary Request and Intent" in session.summary
+    assert "analysis scratchpad" not in session.summary
+    assert model.compact_tools == []
+    assert any(
+        event_type == "context_compact" and payload["mode"] == "model"
+        for event_type, payload in transcript.events
+    )
+
+
+def test_session_falls_back_when_model_assisted_compact_fails():
+    config = AgentConfig.default().with_overrides(
+        {
+            "model": {"provider": "openai_compatible"},
+            "session": {"recent_message_limit": 3, "summary_max_chars": 1000, "model_compact": True},
+        }
+    )
+    transcript = MemoryTranscript()
+    session = AgentSession(config=config, model=FailingCompactModel(), transcript=transcript)
+
+    session.submit("one")
+    session.submit("two")
+
+    assert "user: one" in session.summary
+    assert any(event_type == "context_compact_error" for event_type, _payload in transcript.events)
+    assert any(
+        event_type == "context_compact" and payload["mode"] == "fallback"
+        for event_type, payload in transcript.events
+    )
+
+
 def test_session_summary_is_injected_without_persisting_it():
-    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "summary_max_chars": 200}})
+    config = AgentConfig.default().with_overrides(
+        {"session": {"recent_message_limit": 4, "summary_max_chars": 200, "model_compact": False}}
+    )
     model = SummaryAwareModel()
     session = AgentSession(config=config, model=model)
 
@@ -58,7 +107,7 @@ def test_session_summary_is_injected_without_persisting_it():
 
 
 def test_session_logs_context_compact_event():
-    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4}})
+    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "model_compact": False}})
     transcript = MemoryTranscript()
     session = AgentSession(config=config, model=FakeModelClient(), transcript=transcript)
 
@@ -363,6 +412,37 @@ class BudgetAwareModel:
         self.calls += 1
         self.first_messages = list(messages)
         return ModelResponse(text=f"budget {self.calls}")
+
+
+class CompactAwareModel:
+    def __init__(self):
+        self.compact_tools = None
+
+    def complete(self, messages, tools, system, limits):
+        if system == "You are a helpful AI assistant tasked with summarizing conversations.":
+            self.compact_tools = list(tools)
+            assert any(message.role == "user" and "Respond with TEXT ONLY" in message.content for message in messages)
+            return ModelResponse(
+                text=(
+                    "<analysis>\nanalysis scratchpad\n</analysis>\n\n"
+                    "<summary>\n"
+                    "1. Primary Request and Intent:\n"
+                    "   User started with one.\n"
+                    "9. Optional Next Step:\n"
+                    "   Continue with the latest request.\n"
+                    "</summary>"
+                )
+            )
+        last_user = next((message.content for message in reversed(messages) if message.role == "user"), "")
+        return ModelResponse(text=f"normal: {last_user}")
+
+
+class FailingCompactModel:
+    def complete(self, messages, tools, system, limits):
+        if system == "You are a helpful AI assistant tasked with summarizing conversations.":
+            raise RuntimeError("compact failed")
+        last_user = next((message.content for message in reversed(messages) if message.role == "user"), "")
+        return ModelResponse(text=f"normal: {last_user}")
 
 
 class CountingTool:

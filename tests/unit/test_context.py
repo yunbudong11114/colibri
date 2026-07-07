@@ -1,4 +1,4 @@
-from colibri.context import append_summary, budget_model_messages, summarize_messages
+from colibri.context import append_summary, budget_model_messages, format_model_summary, summarize_messages
 from colibri.messages import Message, ToolCall
 
 
@@ -37,6 +37,16 @@ def test_append_summary_keeps_tail_within_limit():
 
     assert summary == "new line two"
     assert len(summary) <= 18
+
+
+def test_format_model_summary_strips_analysis_and_keeps_summary_body():
+    summary = format_model_summary(
+        "<analysis>\nprivate scratchpad\n</analysis>\n"
+        "<summary>\n1. Primary Request and Intent:\nKeep the project moving.\n</summary>"
+    )
+
+    assert summary == "Summary:\n1. Primary Request and Intent:\nKeep the project moving."
+    assert "private scratchpad" not in summary
 
 
 def test_budget_model_messages_drops_oldest_non_system_and_keeps_latest_user():

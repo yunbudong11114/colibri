@@ -26,7 +26,8 @@ Milestone 6 provides:
 - Compact JSONL transcript logging.
 - File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
 - Automatic memory recall from `MEMORY.md` and relevant topic files.
-- Rolling summary compacting for messages outside the recent-message window.
+- Model-assisted rolling summary compacting for messages outside the recent-message window.
+- Deterministic compacting fallback for fake/offline model runs.
 - Character-budgeted model input using `session.compact_trigger_chars`.
 
 ## Development
@@ -107,9 +108,11 @@ Recall is bounded by:
 
 Colibri keeps only `session.recent_message_limit` durable messages in memory. Messages that fall out of that window are converted into a bounded rolling summary stored on the session.
 
-The summary is injected into model input as temporary context and is not stored as a normal conversation message. Model input is also trimmed to fit `session.compact_trigger_chars` while preserving the latest user message.
+When `session.model_compact = true` and the configured provider is not `fake`, Colibri asks the model to create a Claude Code style continuation summary. The compact request uses no tools and asks for plain text with an `<analysis>` scratchpad plus a `<summary>` section; Colibri strips the analysis block before storing the summary.
 
-Compacting is deterministic and offline-safe in this milestone. It does not call a model to summarize.
+If model compacting fails, or when using the default fake provider, Colibri falls back to deterministic local compacting that keeps user/assistant text short and replaces old tool results with metadata.
+
+The summary is injected into model input as temporary context and is not stored as a normal conversation message. Model input is also trimmed to fit `session.compact_trigger_chars` while preserving the latest user message.
 
 ## Tool Permissions
 

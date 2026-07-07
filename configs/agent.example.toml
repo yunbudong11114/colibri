@@ -11,6 +11,7 @@ max_tool_rounds = 6
 recent_message_limit = 16
 compact_trigger_chars = 36000
 summary_max_chars = 6000
+model_compact = true
 idle_exit_seconds = 300
 transcript = true
 

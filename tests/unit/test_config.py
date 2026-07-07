@@ -11,6 +11,7 @@ def test_default_config_uses_small_device_limits():
     assert config.session.max_tool_rounds == 6
     assert config.session.recent_message_limit == 16
     assert config.session.compact_trigger_chars == 36000
+    assert config.session.model_compact
     assert config.tools.max_result_chars == 12000
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
 
@@ -26,6 +27,7 @@ timeout_seconds = 45
 
 [session]
 recent_message_limit = 8
+model_compact = false
 
 [files]
 roots = ["~/notes", "/tmp"]
@@ -39,6 +41,7 @@ roots = ["~/notes", "/tmp"]
     assert config.model.model == "gpt-4.1-mini"
     assert config.model.timeout_seconds == 45
     assert config.session.recent_message_limit == 8
+    assert not config.session.model_compact
     assert config.files.roots[0].name == "notes"
     assert config.files.roots[1] == Path("/tmp")
 

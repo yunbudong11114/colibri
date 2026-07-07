@@ -4,7 +4,7 @@
 
 **Goal:** Keep useful conversation continuity while bounding session history and model input size.
 
-**Architecture:** Add deterministic compacting helpers that convert dropped messages into a bounded rolling summary. `AgentSession` injects summary and memory as temporary system context, then applies a character budget to model input before each model call.
+**Architecture:** Add compacting helpers that prefer model-assisted Claude Code style summaries and fall back to deterministic metadata summaries. `AgentSession` injects summary and memory as temporary system context, then applies a character budget to model input before each model call.
 
 **Tech Stack:** Python standard library, existing `AgentSession`, existing dataclass config, pytest.
 
@@ -13,9 +13,9 @@
 - Update design documentation before code changes.
 - Preserve pure headless server operation through CLI/stdin/stdout.
 - Use only Python standard library APIs.
-- Do not require network access for compacting.
+- Do not require network access for fallback compacting.
 - Do not keep full transcripts in memory.
-- Do not add model-assisted summarization in this milestone.
+- Prefer model-assisted summarization when configured, but preserve deterministic fallback compacting.
 
 ---
 
@@ -113,5 +113,5 @@ Steps:
 ## Self-Review
 
 - Spec coverage: this plan covers deterministic compacting, summary injection, model input budget, transcript events, docs, and verification.
-- Scope: model-assisted compacting, per-turn tool result budgets, shell permission fixes, skills, and MCP are intentionally excluded.
+- 2026-07-07 enhancement: model-assisted compacting is now in scope for Milestone 6. Per-turn tool result budgets, shell permission fixes, skills, and MCP remain excluded.
 - Placeholder scan: no incomplete implementation placeholders are present.

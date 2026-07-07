@@ -512,6 +512,8 @@ Preserve user goals, decisions, file paths, tool results, open tasks,
 memory changes, device constraints, and unresolved errors.
 ```
 
+Colibri should use a Claude Code style compact prompt rather than an unconstrained one-line summary. The model is asked for plain text containing an `<analysis>` scratchpad and a `<summary>` section. Colibri strips the analysis block, converts the summary wrapper into a readable `Summary:` header, and then bounds the stored summary. This is a prompt-level format constraint, not a JSON schema requirement.
+
 Fallback compact when model compact fails:
 
 - Keep user requests and assistant final decisions.
@@ -745,7 +747,7 @@ Primary spec/plan:
 Milestone 6: context compacting and limits
 
 - recent-message window refinements
-- summary compact
+- model-assisted summary compact with deterministic fallback
 - fallback compact
 - tool result budgeting refinements
 - configurable context limits

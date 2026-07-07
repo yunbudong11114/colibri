@@ -9,3 +9,4 @@ max_output_tokens = 1024
 [session]
 recent_message_limit = 16
 compact_trigger_chars = 36000
+model_compact = true

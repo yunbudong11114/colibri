@@ -30,6 +30,7 @@ class SessionConfig:
     recent_message_limit: int = 16
     compact_trigger_chars: int = 36000
     summary_max_chars: int = 6000
+    model_compact: bool = True
     idle_exit_seconds: int = 300
     transcript: bool = True
 
