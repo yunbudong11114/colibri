@@ -657,7 +657,9 @@ Device tests on CardputerZero:
 - microSD write volume for transcripts.
 - Idle timeout exit.
 
-## 20. First Implementation Milestones
+## 20. Current Implementation Roadmap
+
+This roadmap reflects the actual implementation sequence as of 2026-07-07. Earlier drafts grouped skills, memory, permissions, transcripts, and compacting differently; the project now treats each milestone as one complete, testable slice.
 
 Milestone 1: local CLI skeleton
 
@@ -668,33 +670,93 @@ Milestone 1: local CLI skeleton
 - fake model for tests
 - basic `AgentSession`
 
-Milestone 2: core loop and built-in tools
+Status: complete.
+
+Primary plan/spec:
+
+- `docs/superpowers/plans/2026-07-01-colibri-milestone-1.md`
+
+Milestone 2: real model adapter and minimum tool loop
 
 - OpenAI-compatible model adapter
+- model provider factory
+- tool message serialization
 - tool registry
-- shell/file tools
-- permission prompts
+- bounded agent loop
+- read-only file tools: `files.list`, `files.read`
+- allowlisted shell tool: `shell.run`
 - result truncation
-- transcript JSONL
 
-Milestone 3: skills and memory
+Status: complete.
+
+Primary specs/plans:
+
+- `docs/superpowers/specs/2026-07-06-colibri-openai-compatible-model-design.md`
+- `docs/superpowers/plans/2026-07-06-colibri-openai-compatible-model.md`
+- `docs/superpowers/specs/2026-07-06-colibri-minimum-tool-loop-design.md`
+- `docs/superpowers/plans/2026-07-06-colibri-minimum-tool-loop.md`
+
+Milestone 3: permissions and transcript logging
+
+- permission policy for `allow`, `deny`, `confirm`, and `allow_read_confirm_write`
+- headless stdin/stdout confirmation path
+- session-scoped `always allow`
+- JSONL transcript writer
+- session event logging for messages, tool calls, permission decisions, tool results, model errors, and round limits
+
+Status: complete.
+
+Primary spec/plan:
+
+- `docs/superpowers/specs/2026-07-06-colibri-permissions-transcript-design.md`
+- `docs/superpowers/plans/2026-07-06-colibri-permissions-transcript.md`
+
+Milestone 4: file-backed memory tools
+
+- `[memory]` config
+- `memory.list`
+- `memory.read`
+- `memory.search`
+- `memory.write`
+- permission confirmation for memory writes
+
+Status: complete.
+
+Primary spec/plan:
+
+- `docs/superpowers/specs/2026-07-07-colibri-file-memory-tools-design.md`
+- `docs/superpowers/plans/2026-07-07-colibri-file-memory-tools.md`
+
+Milestone 5: memory recall injection
+
+- load `MEMORY.md` index within strict character limits
+- score topic names and descriptions against user input and recent messages
+- read top 1-3 relevant topic files within a memory context budget
+- inject selected memory as a separate context block before model calls
+- record selected memory references in transcript payloads
+
+Status: proposed next milestone.
+
+Milestone 6: context compacting and limits
+
+- recent-message window refinements
+- summary compact
+- fallback compact
+- tool result budgeting refinements
+- configurable context limits
+
+Status: planned.
+
+Milestone 7: local skills
 
 - skill scanner
 - skill instruction injection
 - simple `skill.run`
-- `MEMORY.md` index parser
-- topic recall
-- memory read/write tools
+- script permission integration
 
-Milestone 4: compacting and limits
+Status: planned.
 
-- recent-message window
-- summary compact
-- fallback compact
-- tool result budgeting
-- configurable limits
-
-Milestone 5: MCP bridge
+Milestone 8: MCP bridge
 
 - config-defined stdio MCP server
 - lazy startup
@@ -702,13 +764,17 @@ Milestone 5: MCP bridge
 - `mcp.call`
 - idle shutdown
 
-Milestone 6: CardputerZero polish
+Status: planned.
+
+Milestone 9: CardputerZero polish
 
 - small-screen friendly console status
 - idle timeout
 - low-memory diagnostics
 - systemd service example
 - optional voice wake design spike
+
+Status: planned.
 
 ## 21. Implementation Defaults
 
@@ -723,6 +789,8 @@ Use these defaults for v1 so implementation does not stall on dependency or poli
 - Packaging: use a standard `src/` layout and avoid runtime dependency on `uv`, Poetry, or Hatch on the device. Development tooling may use them, but the installed agent should run with plain Python.
 
 ## 22. Recommended v1 Cut
+
+This section is the target v1 boundary, not the current implementation state. See Section 20 for the current milestone status.
 
 The smallest useful v1 should include:
 
