@@ -17,6 +17,7 @@ from colibri.context import (
 from colibri.memory import MemoryRecall
 from colibri.messages import AgentResponse, Message, ModelLimits
 from colibri.model.base import ModelClient
+from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
@@ -58,7 +59,13 @@ class AgentSession:
                 "memory_recall",
                 {"topics": memory_result.topics, "truncated": memory_result.truncated},
             )
-        model_messages = self._budgeted_model_messages(memory_result.text)
+        skill_result = SkillIndex.scan(self.config.skills.dirs).context_for(bounded_text, self.config.skills)
+        if skill_result.text:
+            self._write_transcript(
+                "skill_recall",
+                {"skills": skill_result.skills, "truncated": skill_result.truncated},
+            )
+        model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
 
         for _round_index in range(self.config.session.max_tool_rounds):
             try:
@@ -128,7 +135,7 @@ class AgentSession:
                     Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
                 )
                 self._trim_recent_messages()
-                model_messages = self._budgeted_model_messages(memory_result.text)
+                model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
 
         limit_text = "Tool round limit reached"
         self.messages.append(Message(role="assistant", content=limit_text))
@@ -206,7 +213,7 @@ class AgentSession:
         if self.transcript is not None:
             self.transcript.write(event_type, payload)
 
-    def _model_messages(self, memory_text: str) -> list[Message]:
+    def _model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
         messages = list(self.messages)
         context_messages: list[Message] = []
         summary_text = summary_context(self.summary)
@@ -214,10 +221,12 @@ class AgentSession:
             context_messages.append(Message(role="system", content=summary_text))
         if memory_text:
             context_messages.append(Message(role="system", content=memory_text))
+        if skill_text:
+            context_messages.append(Message(role="system", content=skill_text))
         return context_messages + messages
 
-    def _budgeted_model_messages(self, memory_text: str) -> list[Message]:
-        messages = self._model_messages(memory_text)
+    def _budgeted_model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
+        messages = self._model_messages(memory_text, skill_text)
         budgeted, dropped = budget_model_messages(messages, self.config.session.compact_trigger_chars)
         if dropped:
             self._write_transcript(

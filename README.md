@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 6 provides:
+Milestone 7 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -29,6 +29,8 @@ Milestone 6 provides:
 - Model-assisted rolling summary compacting for messages outside the recent-message window.
 - Deterministic compacting fallback for fake/offline model runs.
 - Character-budgeted model input using `session.compact_trigger_chars`.
+- Local filesystem skills with progressive disclosure.
+- `skill.run` for configured local skill commands.
 
 ## Development
 
@@ -74,6 +76,7 @@ When the configured model returns tool calls, Colibri can execute a small built-
 - `memory.read`: read a memory topic.
 - `memory.search`: search the memory index and topic files by keyword.
 - `memory.write`: append a Markdown bullet to a memory topic.
+- `skill.run`: run a configured command from a local skill.
 
 Tool calls are bounded by `session.max_tool_rounds`, and tool output is capped by `tools.max_result_chars`.
 
@@ -103,6 +106,25 @@ Recall is bounded by:
 
 - `memory.max_recall_topics`
 - `memory.max_recall_chars`
+
+## Local Skills
+
+Colibri loads skills only from configured local directories such as:
+
+```text
+~/.colibri/skills/<name>/SKILL.md
+```
+
+Optional `skill.toml` files can declare local commands for `skill.run`.
+
+Skill loading uses progressive disclosure: Colibri keeps a small metadata index in memory, selects relevant skills by keyword overlap for the current turn, then reads and injects only the selected `SKILL.md` files as temporary model context. The injected skill text is not stored in `AgentSession.messages`.
+
+Skill injection is bounded by:
+
+- `skills.max_loaded`
+- `skills.max_instruction_chars`
+
+Colibri does not install skills, fetch remote skills, or use a marketplace in v1.
 
 ## Context Compacting
 

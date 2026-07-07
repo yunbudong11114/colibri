@@ -4,6 +4,7 @@ from pathlib import Path
 
 from colibri.config import AgentConfig
 from colibri.messages import ToolCall
+from colibri.skills import SkillRunTool
 from colibri.tools.base import Tool, ToolContext, ToolResult
 from colibri.tools.builtin import (
     FilesListTool,
@@ -31,6 +32,8 @@ class ToolRegistry:
             tools.extend([MemoryListTool(), MemoryReadTool(), MemorySearchTool(), MemoryWriteTool()])
         if "shell" in enabled:
             tools.append(ShellRunTool())
+        if "skills" in enabled:
+            tools.append(SkillRunTool())
         return cls(tools=tools, cwd=cwd)
 
     def specs(self) -> list[dict]:

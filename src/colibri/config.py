@@ -58,7 +58,8 @@ class FilesConfig:
 @dataclass(frozen=True)
 class SkillsConfig:
     dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri/skills")])
-    max_loaded: int = 20
+    max_loaded: int = 3
+    max_instruction_chars: int = 6000
 
 
 @dataclass(frozen=True)

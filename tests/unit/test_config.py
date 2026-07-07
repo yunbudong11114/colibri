@@ -13,6 +13,8 @@ def test_default_config_uses_small_device_limits():
     assert config.session.compact_trigger_chars == 36000
     assert config.session.model_compact
     assert config.tools.max_result_chars == 12000
+    assert config.skills.max_loaded == 3
+    assert config.skills.max_instruction_chars == 6000
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
 
 
@@ -31,6 +33,11 @@ model_compact = false
 
 [files]
 roots = ["~/notes", "/tmp"]
+
+[skills]
+dirs = ["~/skills"]
+max_loaded = 2
+max_instruction_chars = 1234
 """.strip(),
         encoding="utf-8",
     )
@@ -44,6 +51,9 @@ roots = ["~/notes", "/tmp"]
     assert not config.session.model_compact
     assert config.files.roots[0].name == "notes"
     assert config.files.roots[1] == Path("/tmp")
+    assert config.skills.dirs[0].name == "skills"
+    assert config.skills.max_loaded == 2
+    assert config.skills.max_instruction_chars == 1234
 
 
 def test_load_config_overrides_memory_values(tmp_path):

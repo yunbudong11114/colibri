@@ -276,6 +276,40 @@ def test_memory_write_uses_permission_confirmation(tmp_path):
     assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "- Router upstairs\n"
 
 
+def test_skill_run_uses_permission_confirmation(tmp_path):
+    skill_dir = tmp_path / "skills" / "release"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Release Notes\n", encoding="utf-8")
+    (scripts_dir / "render.py").write_text("print('rendered')\n", encoding="utf-8")
+    (skill_dir / "skill.toml").write_text(
+        """
+[[commands]]
+name = "render"
+command = "python"
+args = ["scripts/render.py"]
+read_only = false
+""".strip(),
+        encoding="utf-8",
+    )
+    config = AgentConfig.default().with_overrides({"skills": {"dirs": [str(tmp_path / "skills")]}})
+    prompter = FakePrompter(reply="yes")
+    policy = PermissionPolicy.from_config(config, prompter=prompter)
+    session = AgentSession(
+        config=config,
+        model=ScriptedSkillRunModel(),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        permission_policy=policy,
+    )
+
+    response = session.submit("run release render")
+
+    assert response.text == "final answer"
+    assert prompter.requests == [
+        PermissionRequest("skill.run", {"skill": "release", "command": "render"}, False)
+    ]
+
+
 def test_session_injects_recalled_memory_without_persisting_it(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
@@ -309,6 +343,23 @@ def test_session_logs_memory_recall_event(tmp_path):
     session.submit("where is the router?")
 
     assert transcript.events[1] == ("memory_recall", {"topics": ["devices"], "truncated": False})
+
+
+def test_session_injects_relevant_skill_without_persisting_it(tmp_path):
+    skill_dir = tmp_path / "skills" / "release"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Release Notes\n\nUse this when writing release notes.\n", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"skills": {"dirs": [str(tmp_path / "skills")]}})
+    transcript = MemoryTranscript()
+    model = SkillAwareModel()
+    session = AgentSession(config=config, model=model, transcript=transcript)
+
+    response = session.submit("please write release notes")
+
+    assert response.text == "skill used"
+    assert any(message.role == "system" and "Relevant skills:" in message.content for message in model.first_messages)
+    assert all("Relevant skills:" not in message.content for message in session.messages)
+    assert ("skill_recall", {"skills": ["release"], "truncated": False}) in transcript.events
 
 
 class ScriptedToolModel:
@@ -376,6 +427,27 @@ class ScriptedMemoryWriteModel:
         return ModelResponse(text="final answer")
 
 
+class ScriptedSkillRunModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 1:
+            assert any(tool["function"]["name"] == "skill.run" for tool in tools)
+            return ModelResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="skill.run",
+                        arguments={"skill": "release", "command": "render"},
+                    )
+                ],
+            )
+        return ModelResponse(text="final answer")
+
+
 class MemoryAwareModel:
     def __init__(self):
         self.first_messages = []
@@ -384,6 +456,16 @@ class MemoryAwareModel:
         self.first_messages = list(messages)
         assert any(message.role == "system" and "Router is upstairs" in message.content for message in messages)
         return ModelResponse(text="memory used")
+
+
+class SkillAwareModel:
+    def __init__(self):
+        self.first_messages = []
+
+    def complete(self, messages, tools, system, limits):
+        self.first_messages = list(messages)
+        assert any(message.role == "system" and "[release]" in message.content for message in messages)
+        return ModelResponse(text="skill used")
 
 
 class SummaryAwareModel:

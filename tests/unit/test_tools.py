@@ -31,6 +31,7 @@ def test_registry_exposes_enabled_builtin_tool_specs(tmp_path):
         "memory.read",
         "memory.search",
         "memory.write",
+        "skill.run",
     }.issubset(names)
 
 
@@ -212,6 +213,16 @@ def test_memory_write_is_not_read_only(tmp_path):
     registry = ToolRegistry.from_config(config, cwd=tmp_path)
 
     tool = registry.get("memory.write")
+
+    assert tool is not None
+    assert not tool.spec.read_only
+
+
+def test_skill_run_is_not_read_only(tmp_path):
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+
+    tool = registry.get("skill.run")
 
     assert tool is not None
     assert not tool.spec.read_only

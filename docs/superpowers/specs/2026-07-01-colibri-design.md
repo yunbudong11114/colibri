@@ -208,7 +208,8 @@ confirm_write = true
 
 [skills]
 dirs = ["~/.colibri/skills"]
-max_loaded = 20
+max_loaded = 3
+max_instruction_chars = 6000
 
 [mcp]
 enabled = true
@@ -411,11 +412,13 @@ input_schema = { type = "object" }
 
 Skill loading should be cheap:
 
-1. At startup, scan only configured local skill directories for names, descriptions, and first section of `SKILL.md`.
-2. Do not load every full `SKILL.md` into every prompt.
-3. On each user turn, select relevant skills by simple keyword scoring first.
-4. Inject only top 1-3 relevant skill instructions.
-5. Expose scripts as `skill.run` subcommands only when their skill is enabled.
+1. At startup, scan only configured local skill directories for names, descriptions, `SKILL.md` paths, and command metadata.
+2. Keep the long-lived skill index metadata-only; do not retain every full `SKILL.md` body in memory.
+3. Do not load every full `SKILL.md` into every prompt.
+4. On each user turn, select relevant skills by simple keyword scoring first.
+5. Read full `SKILL.md` content only for selected skills.
+6. Inject only the top bounded relevant skill instructions.
+7. Expose scripts as `skill.run` subcommands only when their skill is enabled.
 
 This avoids Claude Code's richer but heavier skill machinery while preserving the user's ability to configure local capabilities. Users can add skills by placing files in configured directories; Colibri will not install or update those files for them in v1.
 
@@ -767,7 +770,11 @@ Milestone 7: local skills
 - script permission integration
 - local filesystem only; no skill install, marketplace, registry, or remote fetch
 
-Status: planned.
+Status: complete.
+
+Primary spec:
+
+- `docs/superpowers/specs/2026-07-07-colibri-local-skills-design.md`
 
 Milestone 8: MCP bridge
 

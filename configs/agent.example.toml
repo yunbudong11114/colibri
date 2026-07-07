@@ -31,7 +31,8 @@ confirm_write = true
 
 [skills]
 dirs = ["~/.colibri/skills"]
-max_loaded = 20
+max_loaded = 3
+max_instruction_chars = 6000
 
 [memory]
 enabled = true
