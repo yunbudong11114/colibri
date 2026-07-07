@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from time import monotonic
 
 from colibri.config import AgentConfig
+from colibri.context import (
+    append_summary,
+    budget_model_messages,
+    model_input_chars,
+    summarize_messages,
+    summary_context,
+)
 from colibri.memory import MemoryRecall
 from colibri.messages import AgentResponse, Message, ModelLimits
 from colibri.model.base import ModelClient
@@ -48,7 +55,7 @@ class AgentSession:
                 "memory_recall",
                 {"topics": memory_result.topics, "truncated": memory_result.truncated},
             )
-        model_messages = self._model_messages(memory_result.text)
+        model_messages = self._budgeted_model_messages(memory_result.text)
 
         for _round_index in range(self.config.session.max_tool_rounds):
             try:
@@ -118,7 +125,7 @@ class AgentSession:
                     Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
                 )
                 self._trim_recent_messages()
-                model_messages = self._model_messages(memory_result.text)
+                model_messages = self._budgeted_model_messages(memory_result.text)
 
         limit_text = "Tool round limit reached"
         self.messages.append(Message(role="assistant", content=limit_text))
@@ -142,7 +149,14 @@ class AgentSession:
     def _trim_recent_messages(self) -> None:
         limit = self.config.session.recent_message_limit
         if len(self.messages) > limit:
+            dropped = self.messages[:-limit]
+            addition = summarize_messages(dropped)
+            self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
             self.messages = self.messages[-limit:]
+            self._write_transcript(
+                "context_compact",
+                {"dropped_messages": len(dropped), "summary_chars": len(self.summary)},
+            )
 
     @staticmethod
     def _bound_text(text: str, max_chars: int) -> str:
@@ -163,6 +177,23 @@ class AgentSession:
 
     def _model_messages(self, memory_text: str) -> list[Message]:
         messages = list(self.messages)
+        context_messages: list[Message] = []
+        summary_text = summary_context(self.summary)
+        if summary_text:
+            context_messages.append(Message(role="system", content=summary_text))
         if memory_text:
-            return [Message(role="system", content=memory_text)] + messages
-        return messages
+            context_messages.append(Message(role="system", content=memory_text))
+        return context_messages + messages
+
+    def _budgeted_model_messages(self, memory_text: str) -> list[Message]:
+        messages = self._model_messages(memory_text)
+        budgeted, dropped = budget_model_messages(messages, self.config.session.compact_trigger_chars)
+        if dropped:
+            self._write_transcript(
+                "context_budget",
+                {
+                    "dropped_model_messages": dropped,
+                    "input_chars": model_input_chars(budgeted),
+                },
+            )
+        return budgeted

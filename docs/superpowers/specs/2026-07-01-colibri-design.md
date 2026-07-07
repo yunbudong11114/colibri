@@ -750,7 +750,12 @@ Milestone 6: context compacting and limits
 - tool result budgeting refinements
 - configurable context limits
 
-Status: planned.
+Status: complete.
+
+Primary spec/plan:
+
+- `docs/superpowers/specs/2026-07-07-colibri-context-compacting-design.md`
+- `docs/superpowers/plans/2026-07-07-colibri-context-compacting.md`
 
 Milestone 7: local skills
 

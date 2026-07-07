@@ -29,6 +29,66 @@ def test_session_keeps_only_recent_messages():
     assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
 
 
+def test_session_compacts_dropped_messages_into_summary():
+    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "summary_max_chars": 200}})
+    session = AgentSession(config=config, model=FakeModelClient())
+
+    session.submit("one")
+    session.submit("two")
+    session.submit("three")
+
+    assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
+    assert session.summary == "user: one\nassistant: fake: one"
+
+
+def test_session_summary_is_injected_without_persisting_it():
+    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "summary_max_chars": 200}})
+    model = SummaryAwareModel()
+    session = AgentSession(config=config, model=model)
+
+    session.submit("one")
+    session.submit("two")
+    response = session.submit("three")
+
+    assert response.text == "summary used"
+    assert model.first_messages[0].role == "system"
+    assert "Compacted conversation summary:" in model.first_messages[0].content
+    assert "user: one" in model.first_messages[0].content
+    assert all("Compacted conversation summary:" not in message.content for message in session.messages)
+
+
+def test_session_logs_context_compact_event():
+    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4}})
+    transcript = MemoryTranscript()
+    session = AgentSession(config=config, model=FakeModelClient(), transcript=transcript)
+
+    session.submit("one")
+    session.submit("two")
+    session.submit("three")
+
+    compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
+    assert sum(event["dropped_messages"] for event in compact_events) == 2
+    assert compact_events[-1]["summary_chars"] == len(session.summary)
+
+
+def test_session_budgets_model_input_and_logs_event():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"compact_trigger_chars": 80, "recent_message_limit": 20}}
+    )
+    transcript = MemoryTranscript()
+    model = BudgetAwareModel()
+    session = AgentSession(config=config, model=model, transcript=transcript)
+
+    session.submit("first " + "x" * 30)
+    session.submit("second " + "y" * 30)
+
+    assert any(message.content.startswith("second") for message in model.first_messages)
+    assert not any(message.content.startswith("first") for message in model.first_messages)
+    budget_events = [payload for event_type, payload in transcript.events if event_type == "context_budget"]
+    assert budget_events
+    assert budget_events[-1]["dropped_model_messages"] > 0
+
+
 def test_reset_clears_messages_and_summary():
     session = AgentSession(config=AgentConfig.default(), model=FakeModelClient())
     session.submit("hello")
@@ -275,6 +335,34 @@ class MemoryAwareModel:
         self.first_messages = list(messages)
         assert any(message.role == "system" and "Router is upstairs" in message.content for message in messages)
         return ModelResponse(text="memory used")
+
+
+class SummaryAwareModel:
+    def __init__(self):
+        self.calls = 0
+        self.first_messages = []
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 3:
+            self.first_messages = list(messages)
+            assert any(
+                message.role == "system" and "Compacted conversation summary:" in message.content
+                for message in messages
+            )
+            return ModelResponse(text="summary used")
+        return ModelResponse(text=f"summary setup {self.calls}")
+
+
+class BudgetAwareModel:
+    def __init__(self):
+        self.calls = 0
+        self.first_messages = []
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        self.first_messages = list(messages)
+        return ModelResponse(text=f"budget {self.calls}")
 
 
 class CountingTool:

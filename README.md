@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 5 provides:
+Milestone 6 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -26,6 +26,8 @@ Milestone 5 provides:
 - Compact JSONL transcript logging.
 - File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
 - Automatic memory recall from `MEMORY.md` and relevant topic files.
+- Rolling summary compacting for messages outside the recent-message window.
+- Character-budgeted model input using `session.compact_trigger_chars`.
 
 ## Development
 
@@ -100,6 +102,14 @@ Recall is bounded by:
 
 - `memory.max_recall_topics`
 - `memory.max_recall_chars`
+
+## Context Compacting
+
+Colibri keeps only `session.recent_message_limit` durable messages in memory. Messages that fall out of that window are converted into a bounded rolling summary stored on the session.
+
+The summary is injected into model input as temporary context and is not stored as a normal conversation message. Model input is also trimmed to fit `session.compact_trigger_chars` while preserving the latest user message.
+
+Compacting is deterministic and offline-safe in this milestone. It does not call a model to summarize.
 
 ## Tool Permissions
 
