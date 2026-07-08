@@ -24,6 +24,20 @@ class FakeWeixinApi:
         return {"ret": 0, "errcode": 0}
 
 
+class FakeChannel:
+    def __init__(self, name, messages):
+        self.name = name
+        self.messages = messages
+        self.replies = []
+
+    def run(self, handler, context):
+        for message in self.messages:
+            self.replies.append(handler(message))
+
+    def send_text(self, recipient_id, text):
+        self.replies.append(text)
+
+
 def test_weixin_channel_parses_allowed_finished_text_message():
     api = FakeWeixinApi(
         [
@@ -146,3 +160,20 @@ def test_gateway_runner_handles_message_with_weixin_permission_policy(tmp_path):
     reply = runner.handle_message(channel, InboundMessage(channel="weixin", sender_id="user-1", text="hi"))
 
     assert reply == "fake: hi"
+
+
+def test_gateway_runner_runs_all_enabled_channels(tmp_path, monkeypatch):
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
+    first = FakeChannel("first", [InboundMessage(channel="first", sender_id="user-1", text="one")])
+    second = FakeChannel("second", [InboundMessage(channel="second", sender_id="user-2", text="two")])
+    runner = GatewayRunner(
+        config=config,
+        model=FakeModelClient(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+    monkeypatch.setattr(runner, "_build_channels", lambda: [first, second])
+
+    runner.run()
+
+    assert first.replies == ["fake: one"]
+    assert second.replies == ["fake: two"]

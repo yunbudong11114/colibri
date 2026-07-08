@@ -73,6 +73,11 @@ def main(
             print(f"Config updated: {config_path}")
             return 0
 
+        if args.command == "gateway":
+            _write_ready_status(config, status)
+            GatewayRunner(config=config, model=build_model_client(config.model)).run()
+            return 0
+
         transcript = TranscriptWriter.default() if config.session.transcript else None
         session = AgentSession(
             config=config,
@@ -89,10 +94,6 @@ def main(
 
             if args.command == "repl":
                 return _run_repl(session, status=status, input_func=input_func, monotonic_func=monotonic_func)
-
-            if args.command == "gateway":
-                GatewayRunner(config=config, model=session.model).run()
-                return 0
 
             return 2
         finally:
@@ -340,25 +341,28 @@ def save_weixin_auth_config(path: Path, token: str, base_url: str) -> None:
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    section = "\n".join(
-        [
-            "[channels.weixin]",
-            "enabled = true",
-            f"token = {_toml_string(token)}",
-            f"base_url = {_toml_string(base_url)}",
-            "",
-        ]
+    path.write_text(
+        _upsert_toml_section_values(
+            text,
+            "channels.weixin",
+            {
+                "enabled": "true",
+                "token": _toml_string(token),
+                "base_url": _toml_string(base_url),
+            },
+        ),
+        encoding="utf-8",
     )
-    path.write_text(_replace_toml_section(text, "channels.weixin", section), encoding="utf-8")
 
 
-def _replace_toml_section(text: str, section_name: str, section_text: str) -> str:
+def _upsert_toml_section_values(text: str, section_name: str, values: dict[str, str]) -> str:
     lines = text.splitlines()
     header = f"[{section_name}]"
     start = next((index for index, line in enumerate(lines) if line.strip() == header), None)
     if start is None:
         prefix = text.rstrip()
-        return (prefix + "\n\n" if prefix else "") + section_text
+        section_lines = [header] + [f"{key} = {value}" for key, value in values.items()]
+        return (prefix + "\n\n" if prefix else "") + "\n".join(section_lines) + "\n"
 
     end = len(lines)
     for index in range(start + 1, len(lines)):
@@ -366,7 +370,23 @@ def _replace_toml_section(text: str, section_name: str, section_text: str) -> st
         if stripped.startswith("[") and stripped.endswith("]"):
             end = index
             break
-    next_lines = lines[:start] + section_text.rstrip().splitlines() + lines[end:]
+
+    seen: set[str] = set()
+    next_section = [lines[start]]
+    for line in lines[start + 1 : end]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in values:
+                next_section.append(f"{key} = {values[key]}")
+                seen.add(key)
+                continue
+        next_section.append(line)
+    for key, value in values.items():
+        if key not in seen:
+            next_section.append(f"{key} = {value}")
+
+    next_lines = lines[:start] + next_section + lines[end:]
     return "\n".join(next_lines).rstrip() + "\n"
 
 

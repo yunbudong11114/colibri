@@ -74,6 +74,8 @@ colibri gateway
 
 On successful login, Colibri writes `channels.weixin.token`, `channels.weixin.base_url`, and `channels.weixin.enabled = true` into the active config path. If `--config` is omitted, it writes `~/.colibri/config.toml`.
 
+Auth config writes must preserve unrelated `channels.weixin` keys such as `allow_from`, `poll_timeout_seconds`, and `auth_timeout_seconds`.
+
 `gateway` loads config, starts all enabled channels from `gateway.enabled_channels`, and blocks until interrupted.
 
 ## Internal Interfaces
@@ -86,6 +88,8 @@ On successful login, Colibri writes `channels.weixin.token`, `channels.weixin.ba
 - evicts idle sessions,
 - routes channel messages into `AgentSession.submit()`,
 - sends replies back through the originating channel.
+
+Gateway starts one lightweight worker thread per enabled channel. This keeps the first Weixin long-poll implementation simple while avoiding a design where one blocking channel prevents future channels from starting.
 
 `colibri.channels.base` defines:
 

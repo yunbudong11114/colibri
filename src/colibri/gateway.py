@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import queue
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from time import monotonic
 from typing import Callable
 
@@ -109,11 +111,41 @@ class GatewayRunner:
         if not channels:
             raise ConfigError("No gateway channels are enabled")
         context = ChannelContext(stop_requested=stop_requested)
+        errors: queue.Queue[BaseException] = queue.Queue()
+        threads = [
+            threading.Thread(
+                target=self._run_channel,
+                args=(channel, context, errors),
+                name=f"colibri-{channel.name}",
+                daemon=True,
+            )
+            for channel in channels
+        ]
         try:
-            for channel in channels:
-                channel.run(lambda message, ch=channel: self.handle_message(ch, message), context)
+            for thread in threads:
+                thread.start()
+
+            while not stop_requested():
+                try:
+                    error = errors.get(timeout=0.2)
+                except queue.Empty:
+                    if not any(thread.is_alive() for thread in threads):
+                        return
+                    continue
+                raise error
         finally:
             self.sessions.close()
+
+    def _run_channel(
+        self,
+        channel: Channel,
+        context: ChannelContext,
+        errors: queue.Queue[BaseException],
+    ) -> None:
+        try:
+            channel.run(lambda message, ch=channel: self.handle_message(ch, message), context)
+        except BaseException as error:
+            errors.put(error)
 
     def handle_message(self, channel: Channel, message: InboundMessage) -> str:
         key = f"{message.channel}:{message.sender_id}"

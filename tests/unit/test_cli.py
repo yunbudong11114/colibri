@@ -132,6 +132,11 @@ def test_auth_weixin_saves_token_without_printing_secret(monkeypatch, tmp_path, 
         """
 [model]
 provider = "fake"
+
+[channels.weixin]
+enabled = false
+allow_from = ["user-1"]
+poll_timeout_seconds = 20
 """.strip(),
         encoding="utf-8",
     )
@@ -148,6 +153,8 @@ provider = "fake"
     assert "enabled = true" in saved
     assert 'token = "secret-token"' in saved
     assert 'base_url = "https://redirect.weixin.test/"' in saved
+    assert 'allow_from = ["user-1"]' in saved
+    assert "poll_timeout_seconds = 20" in saved
 
 
 def test_read_repl_line_reads_unicode_from_plain_stream():
