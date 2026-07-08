@@ -24,7 +24,7 @@ class ModelConfig:
     model: str = "fake-colibri-model"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: int = 60
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 10240
 
 
 @dataclass(frozen=True)
