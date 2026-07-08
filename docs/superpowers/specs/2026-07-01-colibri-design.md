@@ -784,7 +784,7 @@ Milestone 8: MCP bridge
 - `mcp.call`
 - idle shutdown
 
-Status: planned.
+Status: deferred. Do not implement in the current milestone sequence; revisit only if MCP becomes necessary for the target device workflows.
 
 Milestone 9: CardputerZero polish
 
@@ -802,7 +802,7 @@ Use these defaults for v1 so implementation does not stall on dependency or poli
 
 - Model HTTP client: use Python standard library `urllib.request` first. Add `httpx` later only if streaming, proxy support, or better timeout handling becomes necessary.
 - Tool schema validation: implement a small local subset validator for `type`, `properties`, `required`, `enum`, `items`, and primitive scalar types. Avoid `jsonschema` in v1 to reduce dependency weight.
-- MCP client: implement a minimal JSON-RPC stdio client for tool listing and tool calls. Evaluate the official MCP SDK after measuring its RSS on CardputerZero.
+- MCP client: deferred. If revived later, prefer a minimal JSON-RPC stdio client for tool listing and tool calls, and evaluate the official MCP SDK only after measuring its RSS on CardputerZero.
 - Default cloud model: configure an OpenAI-compatible model name in `config.toml`; ship the example with `gpt-4.1-mini` because it is a reasonable low-latency default, but do not hard-code it.
 - Persistent permissions: do not persist "always allow" in v1. "Always" approvals are session-scoped only.
 - Async model: keep v1 mostly synchronous. Use subprocess timeouts and simple blocking HTTP to reduce mental and runtime overhead.
@@ -825,4 +825,4 @@ The smallest useful v1 should include:
 - JSONL transcript.
 - Idle timeout.
 
-MCP can be implemented immediately after this core because it depends on the same tool registry and permission system.
+MCP is intentionally deferred from the current v1 path. Revisit it only when a concrete workflow needs external MCP servers.
