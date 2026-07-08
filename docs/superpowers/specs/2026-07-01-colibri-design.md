@@ -211,6 +211,9 @@ dirs = ["~/.colibri/skills"]
 max_loaded = 3
 max_instruction_chars = 6000
 
+[console]
+status = true
+
 [mcp]
 enabled = true
 startup = "lazy"
@@ -792,7 +795,19 @@ Milestone 9: CardputerZero polish
 - idle timeout
 - low-memory diagnostics
 - systemd service example
-- optional voice wake design spike
+
+Status: complete.
+
+Primary spec:
+
+- `docs/superpowers/specs/2026-07-08-colibri-cardputer-polish-design.md`
+
+Milestone 10: optional voice wake design spike
+
+- external wake process boundary
+- stdin/socket/local trigger options
+- memory and dependency budget
+- no runtime code unless explicitly approved later
 
 Status: planned.
 

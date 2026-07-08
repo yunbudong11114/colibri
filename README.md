@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 7 provides:
+Milestone 9 provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -31,6 +31,10 @@ Milestone 7 provides:
 - Character-budgeted model input using `session.compact_trigger_chars`.
 - Local filesystem skills with progressive disclosure.
 - `skill.run` for configured local skill commands.
+- SSH/serial-friendly console status lines.
+- REPL idle timeout.
+- Low-memory diagnostics command.
+- Conservative systemd service example.
 
 ## Development
 
@@ -38,6 +42,7 @@ Milestone 7 provides:
 uv run python -m pytest
 uv run python -m colibri.cli ask "hello"
 uv run python -m colibri.cli repl
+uv run python -m colibri.cli diagnostics
 ```
 
 The runtime is standard-library only. `pytest` is only needed for development tests.
@@ -136,6 +141,28 @@ If model compacting fails, or when using the default fake provider, Colibri fall
 
 The summary is injected into model input as temporary context and is not stored as a normal conversation message. Model input is also trimmed to fit `session.compact_trigger_chars` while preserving the latest user message.
 
+## Console Status and Diagnostics
+
+When `console.status = true`, Colibri writes concise status lines to `stderr`:
+
+```text
+[colibri] ready model=fake-colibri-model tools=8 memory=on skills=3
+[colibri] thinking
+[colibri] tool files.read ok chars=1284
+```
+
+Model answers remain on `stdout`, so shell pipelines can still consume normal responses.
+
+Run diagnostics with:
+
+```bash
+uv run python -m colibri.cli diagnostics
+```
+
+Diagnostics reports Python/platform details, provider/model, enabled tools, memory and skills paths, RSS when available, and context limits.
+
+`session.idle_exit_seconds` controls REPL idle exit. Set it to `0` or a negative value to disable idle exit.
+
 ## Tool Permissions
 
 Colibri checks permission before running each registered tool call.
@@ -157,3 +184,13 @@ When `session.transcript = true`, the CLI writes compact JSONL events to:
 ```
 
 Set `COLIBRI_HOME` to change the base directory. Transcript events include user messages, assistant messages, tool calls, permission decisions, tool results, model errors, and tool round limits. API keys are not logged by the runtime.
+
+## Systemd
+
+An example service is available at:
+
+```text
+deploy/systemd/colibri-repl.service
+```
+
+The example uses `Restart=no` because REPL idle timeout and `Restart=always` would restart the process after normal idle exits. Long-running daemon mode is intentionally left for future work.

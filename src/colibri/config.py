@@ -63,6 +63,11 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class ConsoleConfig:
+    status: bool = True
+
+
+@dataclass(frozen=True)
 class MemoryConfig:
     root: Path = field(default_factory=lambda: expand_user_path("~/.colibri/memory"))
     max_search_results: int = 5
@@ -86,6 +91,7 @@ class AgentConfig:
     shell: ShellConfig = field(default_factory=ShellConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    console: ConsoleConfig = field(default_factory=ConsoleConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
 
@@ -109,6 +115,7 @@ class AgentConfig:
             shell=_replace_dataclass(self.shell, data.get("shell", {})),
             files=_replace_dataclass(self.files, _path_list_overrides(data.get("files", {}), "roots")),
             skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
+            console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(data.get("memory", {}), "root")),
             mcp=_replace_dataclass(self.mcp, data.get("mcp", {})),
         )

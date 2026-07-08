@@ -15,6 +15,7 @@ def test_default_config_uses_small_device_limits():
     assert config.tools.max_result_chars == 12000
     assert config.skills.max_loaded == 3
     assert config.skills.max_instruction_chars == 6000
+    assert config.console.status
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
 
 
@@ -38,6 +39,9 @@ roots = ["~/notes", "/tmp"]
 dirs = ["~/skills"]
 max_loaded = 2
 max_instruction_chars = 1234
+
+[console]
+status = false
 """.strip(),
         encoding="utf-8",
     )
@@ -54,6 +58,7 @@ max_instruction_chars = 1234
     assert config.skills.dirs[0].name == "skills"
     assert config.skills.max_loaded == 2
     assert config.skills.max_instruction_chars == 1234
+    assert not config.console.status
 
 
 def test_load_config_overrides_memory_values(tmp_path):

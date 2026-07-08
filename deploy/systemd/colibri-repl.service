@@ -1,0 +1,25 @@
+[Unit]
+Description=Colibri interactive REPL
+Documentation=https://github.com/yunbudong11114/colibri
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=COLIBRI_HOME=/var/lib/colibri
+EnvironmentFile=-/etc/colibri/colibri.env
+WorkingDirectory=/var/lib/colibri
+ExecStart=/usr/bin/python -m colibri.cli --config /etc/colibri/agent.toml repl
+
+# REPL is interactive and may exit normally after session.idle_exit_seconds.
+# Do not use Restart=always here, or idle timeout will create a restart loop.
+Restart=no
+
+# For a serial/TTY-bound deployment, set StandardInput/Output to the target TTY
+# in a local override, for example:
+# StandardInput=tty
+# StandardOutput=tty
+# TTYPath=/dev/ttyS0
+
+[Install]
+WantedBy=multi-user.target

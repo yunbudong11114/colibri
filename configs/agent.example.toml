@@ -34,6 +34,9 @@ dirs = ["~/.colibri/skills"]
 max_loaded = 3
 max_instruction_chars = 6000
 
+[console]
+status = true
+
 [memory]
 enabled = true
 root = "~/.colibri/memory"
