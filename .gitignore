@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 .superpowers/
 *.egg-info/
+.colibri/permissions.toml

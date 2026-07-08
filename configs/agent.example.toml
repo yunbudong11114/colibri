@@ -21,6 +21,8 @@ default_permission = "allow_read_confirm_write"
 max_result_chars = 12000
 max_shell_seconds = 30
 
+# shell.allow is legacy. Dynamic permissions prompt for ungranted commands.
+# shell.deny remains a hard deny list.
 [shell]
 allow = ["ls", "cat", "sed", "rg", "python", "git status"]
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]

@@ -23,6 +23,19 @@ def test_build_diagnostics_reports_core_fields(tmp_path):
     assert "recent_message_limit=16 compact_trigger_chars=36000 summary_max_chars=6000" in joined
 
 
+def test_diagnostics_reports_project_permissions_file(tmp_path):
+    (tmp_path / ".colibri").mkdir()
+    (tmp_path / ".colibri" / "permissions.toml").write_text(
+        '[shell]\ncommands = ["pwd"]\n\n[tools]\nnames = []\n',
+        encoding="utf-8",
+    )
+    config = AgentConfig.default()
+
+    lines = build_diagnostics(config, None, cwd=tmp_path)
+
+    assert "project_permissions=present" in "\n".join(lines)
+
+
 def test_rss_kb_returns_integer_or_none():
     value = rss_kb()
 

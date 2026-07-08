@@ -8,7 +8,7 @@ Colibri must run on headless Linux servers over plain SSH. The core runtime and 
 
 ## Current Milestone
 
-Milestone 9 provides:
+Current implementation provides:
 
 - Python package skeleton.
 - TOML config loader with CardputerZero-friendly defaults.
@@ -19,10 +19,10 @@ Milestone 9 provides:
 - OpenAI-compatible chat completions model adapter.
 - Model provider factory and concise CLI error handling.
 - Bounded agent tool loop.
-- Read-only built-in tools: `files.list`, `files.read`, and allowlisted `shell.run`.
-- Permission decisions before tool execution.
-- Headless stdin/stdout confirmation for future non-read-only tools.
-- Session-scoped "always allow" grants.
+- Built-in tools: `files.list`, `files.read`, `shell.run`, memory tools, and `skill.run`.
+- Dynamic permission decisions before tool execution.
+- Headless stdin/stdout confirmation for ungranted tools and shell commands.
+- Session-scoped and project-scoped permission grants.
 - Compact JSONL transcript logging.
 - File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
 - Automatic memory recall from `MEMORY.md` and relevant topic files.
@@ -76,7 +76,7 @@ When the configured model returns tool calls, Colibri can execute a small built-
 
 - `files.list`: list direct children under configured `files.roots`.
 - `files.read`: read UTF-8 text files under configured `files.roots`.
-- `shell.run`: run allowlisted commands such as `ls`, `cat`, `sed`, `rg`, `python`, and `git status`.
+- `shell.run`: run shell commands after Colibri permission approval.
 - `memory.list`: list Markdown memory topics.
 - `memory.read`: read a memory topic.
 - `memory.search`: search the memory index and topic files by keyword.
@@ -159,7 +159,7 @@ Run diagnostics with:
 uv run python -m colibri.cli diagnostics
 ```
 
-Diagnostics reports Python/platform details, provider/model, enabled tools, memory and skills paths, RSS when available, and context limits.
+Diagnostics reports Python/platform details, provider/model, enabled tools, memory and skills paths, project permission file state, RSS when available, and context limits.
 
 `session.idle_exit_seconds` controls REPL idle exit. Set it to `0` or a negative value to disable idle exit.
 
@@ -167,13 +167,29 @@ Diagnostics reports Python/platform details, provider/model, enabled tools, memo
 
 Colibri checks permission before running each registered tool call.
 
-The default `tools.default_permission = "allow_read_confirm_write"` allows read-only tools and asks for confirmation before non-read-only tools. Other supported values are:
+The default `tools.default_permission = "allow_read_confirm_write"` allows read-only non-shell tools and asks for confirmation before non-read-only tools. Shell commands require a grant or prompt even when they look read-only, because shell commands can leak secrets, consume resources, or behave differently across systems.
+
+Other supported values are:
 
 - `allow`: allow all registered tool calls.
 - `confirm`: confirm every registered tool call.
 - `deny`: deny every registered tool call.
 
-Confirmation works over stdin/stdout, so it is safe for SSH-only servers. A response of `always` allows the same tool name for the rest of the current session only.
+Confirmation works over stdin/stdout, so it is safe for SSH-only servers. Prompt choices are:
+
+- `y`: allow this call once.
+- `s`: allow the same tool or exact shell command for this session.
+- `e`: for shell only, allow the same executable for this session.
+- `p`: allow the same tool or exact shell command for this project.
+- `n`: deny this call and return a denial result to the model.
+
+Project grants are stored in:
+
+```text
+.colibri/permissions.toml
+```
+
+Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. `shell.deny` remains a hard deny list, and `.colibri/permissions.toml` should not be committed.
 
 ## Transcripts
 
