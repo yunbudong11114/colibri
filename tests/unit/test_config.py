@@ -61,6 +61,63 @@ status = false
     assert not config.console.status
 
 
+def test_load_without_path_reads_user_default_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    config_dir = home / ".colibri"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        """
+[model]
+provider = "openai_compatible"
+model = "user-default"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    config = AgentConfig.load()
+
+    assert config.model.provider == "openai_compatible"
+    assert config.model.model == "user-default"
+
+
+def test_load_without_path_falls_back_when_user_default_missing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    config = AgentConfig.load()
+
+    assert config.model.provider == "fake"
+    assert config.model.model == "fake-colibri-model"
+
+
+def test_explicit_config_path_overrides_user_default(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    config_dir = home / ".colibri"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.toml").write_text(
+        """
+[model]
+model = "user-default"
+""".strip(),
+        encoding="utf-8",
+    )
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text(
+        """
+[model]
+model = "explicit"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    config = AgentConfig.load(explicit)
+
+    assert config.model.model == "explicit"
+
+
 def test_load_config_overrides_memory_values(tmp_path):
     memory_root = tmp_path / "memory"
     config_path = tmp_path / "agent.toml"

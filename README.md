@@ -70,6 +70,16 @@ uv run python -m colibri.cli --config configs/glm.example.toml ask "用中文说
 
 The runtime does not read API keys from config files. It reads the environment variable named by `model.api_key_env`.
 
+## Configuration
+
+If `--config` is omitted, Colibri tries to read:
+
+```text
+~/.colibri/config.toml
+```
+
+If that file does not exist, Colibri uses built-in defaults. An explicit `--config` path always takes precedence over the default user config file.
+
 ## Built-In Tools
 
 When the configured model returns tool calls, Colibri can execute a small built-in tool set:

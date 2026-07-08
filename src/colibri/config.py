@@ -10,6 +10,9 @@ class ConfigError(RuntimeError):
     pass
 
 
+DEFAULT_USER_CONFIG = "~/.colibri/config.toml"
+
+
 def expand_user_path(value: str) -> Path:
     return Path(value).expanduser()
 
@@ -102,7 +105,11 @@ class AgentConfig:
     @classmethod
     def load(cls, path: str | Path | None = None) -> "AgentConfig":
         if path is None:
-            return cls.default()
+            default_path = expand_user_path(DEFAULT_USER_CONFIG)
+            if default_path.exists():
+                path = default_path
+            else:
+                return cls.default()
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
         return cls.default().with_overrides(data)
 

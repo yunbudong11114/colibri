@@ -173,6 +173,8 @@ This split keeps code immutable and user customization easy to back up.
 
 Use TOML because it is human-editable and available in Python 3.11 via `tomllib`.
 
+When the CLI starts without `--config`, Colibri should try `~/.colibri/config.toml` first and fall back to built-in defaults if the file does not exist. An explicit `--config` path always wins over the default user config file.
+
 Example:
 
 ```toml
