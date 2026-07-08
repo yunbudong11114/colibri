@@ -37,7 +37,7 @@ class ToolResult:
 class ToolContext:
     config: AgentConfig
     cwd: Path
-    allowed_file_paths: frozenset[str] = frozenset()
+    allowed_file_roots: frozenset[str] = frozenset()
 
 
 class Tool(Protocol):

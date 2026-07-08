@@ -21,10 +21,23 @@ def resolve_file_path(raw_path: str, cwd: Path) -> Path | None:
         return None
 
 
-def is_under_configured_file_root(path: Path, context: ToolContext) -> bool:
-    for root in context.config.files.roots:
+def is_under_workspace_file_root(path: Path, context: ToolContext) -> bool:
+    roots = [context.cwd, *context.config.files.roots]
+    for raw_root in roots:
         try:
-            path.relative_to(root.expanduser().resolve())
+            path.relative_to(raw_root.expanduser().resolve())
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def is_under_allowed_file_root(path: Path, context: ToolContext) -> bool:
+    if is_under_workspace_file_root(path, context):
+        return True
+    for raw_root in context.allowed_file_roots:
+        try:
+            path.relative_to(Path(raw_root).expanduser().resolve())
             return True
         except (OSError, ValueError):
             continue
@@ -35,9 +48,7 @@ def _resolve_allowed_path(raw_path: str, context: ToolContext) -> Path | None:
     resolved = resolve_file_path(raw_path, context.cwd)
     if resolved is None:
         return None
-    if is_under_configured_file_root(resolved, context):
-        return resolved
-    if str(resolved) in context.allowed_file_paths:
+    if is_under_allowed_file_root(resolved, context):
         return resolved
     return None
 

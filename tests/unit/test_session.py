@@ -235,12 +235,12 @@ def test_session_allows_out_of_root_file_path_after_dynamic_permission(tmp_path)
     (outside / "note.txt").write_text("hello", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
     prompter = FakePrompter(reply="y")
-    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     transcript = MemoryTranscript()
     session = AgentSession(
         config=config,
         model=ScriptedToolThenFinalModel("files.list", {"path": str(outside)}),
-        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        tools=ToolRegistry.from_config(config, cwd=allowed_root),
         permission_policy=policy,
         transcript=transcript,
     )
@@ -252,6 +252,32 @@ def test_session_allows_out_of_root_file_path_after_dynamic_permission(tmp_path)
     event = [payload for name, payload in transcript.events if name == "permission_decision"][0]
     assert event["subject_kind"] == "file_path"
     assert event["file_path"] == str(outside.resolve())
+
+
+def test_session_file_directory_grant_passes_root_to_file_tool(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    (outside / "note.txt").write_text("hello", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(reply="s")
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("files.read", {"path": str(outside / "note.txt")}),
+        tools=ToolRegistry.from_config(config, cwd=allowed_root),
+        permission_policy=policy,
+        transcript=transcript,
+    )
+
+    response = session.submit("read outside")
+
+    assert "hello" in response.text
+    event = [payload for name, payload in transcript.events if name == "permission_decision"][0]
+    assert event["scope"] == "session_file_root"
+    assert event["file_root"] == str(outside.resolve())
 
 
 def test_session_writes_transcript_events(tmp_path):

@@ -187,9 +187,9 @@ def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     outside.mkdir()
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
     prompter = FakePrompter(replies=["y"], requests=[])
-    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
 
-    result = policy.decide(FilesListTool(), {"path": str(outside)}, tool_context(config, tmp_path))
+    result = policy.decide(FilesListTool(), {"path": str(outside)}, tool_context(config, allowed_root))
 
     assert result.allowed
     assert result.scope == "once"
@@ -199,6 +199,19 @@ def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     assert prompter.requests[0].subject.file_path == str(outside.resolve())
 
 
+def test_files_under_startup_cwd_are_allowed_without_prompt(tmp_path):
+    config = AgentConfig.default().with_overrides({"files": {"roots": []}})
+    prompter = FakePrompter(replies=["n"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    result = policy.decide(FilesListTool(), {"path": "."}, context)
+
+    assert result.allowed
+    assert result.scope == "default_read_only"
+    assert prompter.requests == []
+
+
 def test_file_path_session_grant_allows_same_resolved_path_without_prompt(tmp_path):
     allowed_root = tmp_path / "allowed"
     outside = tmp_path / "outside"
@@ -206,36 +219,55 @@ def test_file_path_session_grant_allows_same_resolved_path_without_prompt(tmp_pa
     outside.mkdir()
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
     prompter = FakePrompter(replies=["s"], requests=[])
-    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
-    context = tool_context(config, tmp_path)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+    context = tool_context(config, allowed_root)
 
     first = policy.decide(FilesListTool(), {"path": str(outside)}, context)
     second = policy.decide(FilesListTool(), {"path": str(outside)}, context)
 
     assert first.allowed
     assert second.allowed
-    assert second.scope == "session_path"
+    assert second.scope == "session_file_root"
     assert len(prompter.requests) == 1
 
 
-def test_file_path_project_grant_is_exact(tmp_path):
+def test_file_path_session_grant_allows_children_under_same_directory(tmp_path):
     allowed_root = tmp_path / "allowed"
     outside = tmp_path / "outside"
-    other = tmp_path / "other"
     allowed_root.mkdir()
     outside.mkdir()
-    other.mkdir()
+    (outside / "one.txt").write_text("one", encoding="utf-8")
+    (outside / "two.txt").write_text("two", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    store = ProjectPermissionStore.for_cwd(tmp_path)
-    store.save(ProjectGrants(file_paths={str(outside.resolve())}))
+    prompter = FakePrompter(replies=["s"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+    context = ToolContext(config=config, cwd=allowed_root)
+
+    first = policy.decide(FilesListTool(), {"path": str(outside)}, context)
+    second = policy.decide(FilesListTool(), {"path": str(outside / "two.txt")}, context)
+
+    assert first.allowed
+    assert first.scope == "session_file_root"
+    assert second.allowed
+    assert second.scope == "session_file_root"
+    assert len(prompter.requests) == 1
+
+
+def test_file_path_project_root_grant_allows_children_without_prompt(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    (outside / "note.txt").write_text("hello", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    store = ProjectPermissionStore.for_cwd(allowed_root)
+    store.save(ProjectGrants(file_roots={str(outside.resolve())}))
     prompter = FakePrompter(replies=["n"], requests=[])
-    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
-    context = tool_context(config, tmp_path)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+    context = ToolContext(config=config, cwd=allowed_root)
 
-    allowed = policy.decide(FilesListTool(), {"path": str(outside)}, context)
-    denied = policy.decide(FilesListTool(), {"path": str(other)}, context)
+    result = policy.decide(FilesListTool(), {"path": str(outside / "note.txt")}, context)
 
-    assert allowed.allowed
-    assert allowed.scope == "project_path"
-    assert not denied.allowed
-    assert prompter.requests[0].subject.file_path == str(other.resolve())
+    assert result.allowed
+    assert result.scope == "project_file_root"
+    assert prompter.requests == []

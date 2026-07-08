@@ -87,6 +87,7 @@ def _run_repl(
     monotonic_func: Callable[[], float] = monotonic,
 ) -> int:
     last_activity = monotonic_func()
+    history: list[str] = []
     while True:
         idle_seconds = session.config.session.idle_exit_seconds
         if idle_seconds > 0 and monotonic_func() - last_activity >= idle_seconds:
@@ -97,7 +98,7 @@ def _run_repl(
             timeout_remaining = max(0, idle_seconds - (monotonic_func() - last_activity))
         try:
             if input_func is None:
-                user_text = read_repl_line("colibri> ", timeout_remaining)
+                user_text = read_repl_line("colibri> ", timeout_remaining, history=history)
             else:
                 user_text = input_func("colibri> ")
         except EOFError:
@@ -111,6 +112,7 @@ def _run_repl(
             return 0
         if not user_text.strip():
             continue
+        history.append(user_text)
 
         try:
             status.write("thinking")
@@ -126,9 +128,10 @@ def read_repl_line(
     timeout_seconds: float,
     stdin: TextIO = sys.stdin,
     stdout: TextIO = sys.stdout,
+    history: list[str] | None = None,
 ) -> str | None:
     if _is_tty(stdin):
-        return _read_repl_line_tty(prompt, timeout_seconds, stdin, stdout)
+        return _read_repl_line_tty(prompt, timeout_seconds, stdin, stdout, history=history)
     stdout.write(prompt)
     stdout.flush()
     if timeout_seconds > 0 and _is_selectable(stdin):
@@ -142,10 +145,13 @@ def read_repl_line(
 
 
 class ReplLineEditor:
-    def __init__(self, prompt: str, stdout: TextIO):
+    def __init__(self, prompt: str, stdout: TextIO, history: list[str] | None = None):
         self.prompt = prompt
         self.stdout = stdout
+        self.history = history or []
         self._chars: list[str] = []
+        self._history_index: int | None = None
+        self._draft: str = ""
 
     @property
     def text(self) -> str:
@@ -156,12 +162,38 @@ class ReplLineEditor:
         self.stdout.flush()
 
     def feed_text(self, text: str) -> None:
+        self._history_index = None
         self._chars.extend(text)
         self.redraw()
 
     def backspace(self) -> None:
+        self._history_index = None
         if self._chars:
             self._chars.pop()
+        self.redraw()
+
+    def history_previous(self) -> None:
+        if not self.history:
+            return
+        if self._history_index is None:
+            self._draft = self.text
+            self._history_index = len(self.history) - 1
+        else:
+            self._history_index = max(0, self._history_index - 1)
+        self._replace_text(self.history[self._history_index])
+
+    def history_next(self) -> None:
+        if self._history_index is None:
+            return
+        if self._history_index >= len(self.history) - 1:
+            self._history_index = None
+            self._replace_text(self._draft)
+            return
+        self._history_index += 1
+        self._replace_text(self.history[self._history_index])
+
+    def _replace_text(self, text: str) -> None:
+        self._chars = list(text)
         self.redraw()
 
     def redraw(self) -> None:
@@ -174,10 +206,11 @@ def _read_repl_line_tty(
     timeout_seconds: float,
     stdin: TextIO,
     stdout: TextIO,
+    history: list[str] | None = None,
 ) -> str | None:
     fd = stdin.fileno()
     previous = termios.tcgetattr(fd)
-    editor = ReplLineEditor(prompt, stdout)
+    editor = ReplLineEditor(prompt, stdout, history=history)
     decoder = codecs.getincrementaldecoder("utf-8")()
     try:
         tty.setraw(fd)
@@ -202,6 +235,10 @@ def _read_repl_line_tty(
                 if not editor.text:
                     raise EOFError
                 continue
+            if data == b"\x1b":
+                decoder.reset()
+                _handle_escape_sequence(editor, read_escape_sequence(fd))
+                continue
             if data in {b"\x7f", b"\b"}:
                 decoder.reset()
                 editor.backspace()
@@ -223,6 +260,30 @@ def _is_selectable(stream: TextIO) -> bool:
 
 def read_tty_byte(fd: int) -> bytes:
     return os.read(fd, 1)
+
+
+def read_escape_sequence(fd: int) -> bytes:
+    sequence = bytearray(b"\x1b")
+    while len(sequence) < 8:
+        ready, _write_ready, _error_ready = select.select([fd], [], [], 0.01)
+        if not ready:
+            break
+        next_byte = read_tty_byte(fd)
+        if next_byte == b"":
+            break
+        sequence.extend(next_byte)
+        if len(sequence) == 2 and next_byte in {b"[", b"O"}:
+            continue
+        if 0x40 <= next_byte[0] <= 0x7E:
+            break
+    return bytes(sequence)
+
+
+def _handle_escape_sequence(editor: ReplLineEditor, sequence: bytes) -> None:
+    if sequence in {b"\x1b[A", b"\x1bOA"}:
+        editor.history_previous()
+    elif sequence in {b"\x1b[B", b"\x1bOB"}:
+        editor.history_next()
 
 
 def _is_tty(stream: TextIO) -> bool:

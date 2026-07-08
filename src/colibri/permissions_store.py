@@ -10,7 +10,7 @@ import tomllib
 class ProjectGrants:
     shell_commands: set[str] = field(default_factory=set)
     tool_names: set[str] = field(default_factory=set)
-    file_paths: set[str] = field(default_factory=set)
+    file_roots: set[str] = field(default_factory=set)
 
 
 class ProjectPermissionStore:
@@ -31,7 +31,7 @@ class ProjectPermissionStore:
         return ProjectGrants(
             shell_commands={item for item in shell.get("commands", []) if isinstance(item, str)},
             tool_names={item for item in tools.get("names", []) if isinstance(item, str)},
-            file_paths={item for item in files.get("paths", []) if isinstance(item, str)},
+            file_roots={item for item in files.get("roots", []) if isinstance(item, str)},
         )
 
     def save(self, grants: ProjectGrants) -> None:
@@ -57,7 +57,7 @@ class ProjectPermissionStore:
         lines.append(f"names = {_toml_string_list(sorted(grants.tool_names))}")
         lines.append("")
         lines.append("[files]")
-        lines.append(f"paths = {_toml_string_list(sorted(grants.file_paths))}")
+        lines.append(f"roots = {_toml_string_list(sorted(grants.file_roots))}")
         lines.append("")
         return "\n".join(lines)
 

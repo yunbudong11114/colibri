@@ -2,7 +2,7 @@ from io import StringIO
 
 import pytest
 
-from colibri.cli import ReplLineEditor, main, read_repl_line, read_tty_byte
+from colibri.cli import ReplLineEditor, main, read_escape_sequence, read_repl_line, read_tty_byte
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
 
@@ -112,6 +112,26 @@ def test_repl_line_editor_backspace_removes_cjk_and_redraws_line():
     assert output.endswith("\r\x1b[2Kcolibri> 尿尿是豆阿斯顿")
 
 
+def test_repl_line_editor_up_and_down_navigate_history_without_printing_escape_text():
+    stdout = StringIO()
+    editor = ReplLineEditor("colibri> ", stdout, history=["first", "第二个问题"])
+
+    editor.start()
+    editor.feed_text("draft")
+    editor.history_previous()
+    editor.history_previous()
+    editor.history_next()
+    editor.history_next()
+
+    assert editor.text == "draft"
+    output = stdout.getvalue()
+    assert "\x1b[A" not in output
+    assert "\x1b[B" not in output
+    assert "\r\x1b[2Kcolibri> 第二个问题" in output
+    assert "\r\x1b[2Kcolibri> first" in output
+    assert output.endswith("\r\x1b[2Kcolibri> draft")
+
+
 def test_read_tty_byte_uses_unbuffered_fd_read(monkeypatch):
     calls = []
 
@@ -123,6 +143,22 @@ def test_read_tty_byte_uses_unbuffered_fd_read(monkeypatch):
 
     assert read_tty_byte(12) == b"\xe6"
     assert calls == [(12, 1)]
+
+
+def test_read_escape_sequence_consumes_arrow_key_bytes(monkeypatch):
+    available = [True, True]
+    bytes_to_read = [b"[", b"A"]
+
+    def fake_select(reads, writes, errors, timeout):
+        return (reads, writes, errors) if available.pop(0) else ([], writes, errors)
+
+    def fake_read(fd):
+        return bytes_to_read.pop(0)
+
+    monkeypatch.setattr("colibri.cli.select.select", fake_select)
+    monkeypatch.setattr("colibri.cli.read_tty_byte", fake_read)
+
+    assert read_escape_sequence(12) == b"\x1b[A"
 
 
 def test_diagnostics_prints_key_value_lines(capsys):

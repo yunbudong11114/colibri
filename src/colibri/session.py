@@ -119,12 +119,16 @@ class AgentSession:
                             "reason": decision.reason,
                             "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
                             "file_path": decision.file_path,
+                            "file_root": decision.file_root,
                         },
                     )
                     if decision.allowed:
                         run_context = context
-                        if decision.file_path is not None:
-                            run_context = replace(context, allowed_file_paths=frozenset({decision.file_path}))
+                        if decision.file_root is not None:
+                            run_context = replace(
+                                context,
+                                allowed_file_roots=frozenset({decision.file_root}),
+                            )
                         result = tool.run(call.arguments, run_context)
                     else:
                         result = ToolResult(

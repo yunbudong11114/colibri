@@ -139,23 +139,26 @@ deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 Future work may add risk-specific prompts for network or destructive commands, but this milestone keeps hard-deny behavior simple.
 
-## 7. File Path Grants
+## 7. File Workspace and Directory Grants
 
-File tools still need path containment by default, but out-of-root read paths should be able to use the same dynamic permission flow as shell commands and higher-risk tools.
+File tools should follow Claude Code's workspace model instead of prompting for every exact path.
 
 Rules:
 
-- `files.roots` remains the automatic allow boundary.
-- If `files.read` or `files.list` targets a path inside `files.roots`, the read-only default policy can still allow it without prompting.
-- If `files.read` or `files.list` targets a path outside `files.roots`, the permission subject becomes a `file_path` subject and must be granted or denied dynamically.
-- File path grants are exact resolved paths, not recursive root expansion.
-- `y` allows that one call.
-- `s` allows the exact resolved path for the current session.
-- `p` stores the exact resolved path in the project permission file.
-- A project grant for `files.read` or `files.list` as a tool name still does not grant arbitrary out-of-root paths.
+- The process startup directory, represented by the tool registry `cwd`, is the default workspace root.
+- `files.roots` remains supported and is merged with the startup workspace root as additional automatic read roots.
+- If `files.read` or `files.list` targets a path under the startup workspace root or configured `files.roots`, the read-only default policy can allow it without prompting.
+- Path checks must use resolved paths. A symlink inside the workspace that points outside the workspace must not become implicitly allowed.
+- If `files.read` or `files.list` targets a path outside the workspace roots, the permission subject becomes a `file_path` subject and must be granted or denied dynamically.
+- `y` allows that one file tool call without creating a stored grant.
+- `s` allows the target's containing directory recursively for the current session.
+- `p` stores the target's containing directory recursively in the project permission file.
+- A project grant for `files.read` or `files.list` as a tool name still does not grant arbitrary out-of-workspace paths.
 - Missing, invalid, or unresolvable paths still return normal tool errors.
 
-This keeps CardputerZero deployments safe when the agent runs as a long-lived personal server while avoiding confusing "permission allowed, path denied" outcomes for intentional project access.
+Project file grants are recursive directory grants, not exact file grants. Colibri does not support legacy exact file path grants.
+
+This keeps normal project exploration quiet while preserving a clear trust boundary for reading outside the project.
 
 ## 8. Prompt Design
 
@@ -179,7 +182,7 @@ For out-of-root file paths:
 
 ```text
 file: files.list /home/user/project
-[y] once [s] session [p] project [n] deny:
+[y] once [s] session-dir [p] project-dir [n] deny:
 ```
 
 `e` is only valid for shell commands and only creates a session executable grant. If the user enters an unsupported choice, the call is denied by default.
@@ -208,7 +211,7 @@ commands = ["pwd", "git status"]
 names = ["files.list", "files.read"]
 
 [files]
-paths = ["/home/user/project"]
+roots = ["/home/user/project"]
 ```
 
 Behavior:
@@ -244,7 +247,8 @@ The policy should know:
 - session shell executable grants,
 - project tool grants,
 - session file path grants,
-- project file path grants,
+- session file directory grants,
+- project file directory grants,
 - project shell command grants,
 - injected prompter.
 
@@ -272,7 +276,7 @@ Extend `permission_decision` payloads with:
 - `allowed`,
 - `reason`,
 - `shell_command` when applicable,
-- `file_path` when applicable.
+- `file_path` and `file_root` when applicable.
 
 Console status may continue to show:
 
@@ -298,8 +302,8 @@ Required tests:
 - denied tool call returns a denial result and does not execute,
 - file roots auto-allow in-root read-only paths,
 - out-of-root file paths prompt,
-- `s` allows the same out-of-root path for the current session,
-- `p` stores an exact resolved file path project grant,
+- `s` allows the out-of-root path's containing directory for the current session,
+- `p` stores the out-of-root path's containing directory as a project file root grant,
 - file tool-name grants do not allow arbitrary out-of-root paths,
 - project permission store loads missing files as empty grants,
 - project permission store saves deduplicated TOML,

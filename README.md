@@ -84,8 +84,8 @@ If that file does not exist, Colibri uses built-in defaults. An explicit `--conf
 
 When the configured model returns tool calls, Colibri can execute a small built-in tool set:
 
-- `files.list`: list direct children under configured `files.roots`, or an out-of-root path after dynamic permission approval.
-- `files.read`: read UTF-8 text files under configured `files.roots`, or an out-of-root path after dynamic permission approval.
+- `files.list`: list direct children under the startup workspace, configured `files.roots`, or an approved external directory.
+- `files.read`: read UTF-8 text files under the startup workspace, configured `files.roots`, or an approved external directory.
 - `shell.run`: run shell commands after Colibri permission approval.
 - `memory.list`: list Markdown memory topics.
 - `memory.read`: read a memory topic.
@@ -181,7 +181,7 @@ Colibri checks permission before running each registered tool call.
 
 The default `tools.default_permission = "allow_read_confirm_write"` allows read-only non-shell tools inside their normal safe boundaries and asks for confirmation before non-read-only tools. Shell commands require a grant or prompt even when they look read-only, because shell commands can leak secrets, consume resources, or behave differently across systems.
 
-For `files.read` and `files.list`, paths inside `files.roots` are automatically allowed by the read-only default. Paths outside `files.roots` use the dynamic permission prompt and are granted as exact resolved paths, not broad recursive roots.
+For `files.read` and `files.list`, the process startup directory is the default workspace root. Paths under that workspace root or configured `files.roots` are automatically allowed by the read-only default. Paths outside those roots use the dynamic permission prompt. A one-time approval allows only that call; session and project approvals allow the target's containing directory recursively, so Colibri does not ask again for every child path.
 
 Other supported values are:
 
@@ -192,9 +192,9 @@ Other supported values are:
 Confirmation works over stdin/stdout, so it is safe for SSH-only servers. Prompt choices are:
 
 - `y`: allow this call once.
-- `s`: allow the same tool or exact shell command for this session.
+- `s`: allow the same tool, exact shell command, or external file directory for this session.
 - `e`: for shell only, allow the same executable for this session.
-- `p`: allow the same tool, exact shell command, or exact out-of-root file path for this project.
+- `p`: allow the same tool, exact shell command, or external file directory for this project.
 - `n`: deny this call and return a denial result to the model.
 
 Project grants are stored in:
@@ -203,7 +203,7 @@ Project grants are stored in:
 .colibri/permissions.toml
 ```
 
-Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. Project-level file path grants are exact resolved paths. `shell.deny` remains a hard deny list, and `.colibri/permissions.toml` should not be committed.
+Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. Project-level file grants are recursive directory roots under `[files].roots`. `shell.deny` remains a hard deny list, and `.colibri/permissions.toml` should not be committed.
 
 ## Transcripts
 
