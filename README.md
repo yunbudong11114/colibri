@@ -124,7 +124,7 @@ Recall is bounded by:
 
 ## Local Skills
 
-Colibri loads skills only from configured local directories such as:
+Colibri loads user skills from configured local directories such as:
 
 ```text
 ~/.colibri/skills/<name>/SKILL.md
@@ -132,7 +132,9 @@ Colibri loads skills only from configured local directories such as:
 
 Optional `skill.toml` files can declare local commands for `skill.run`.
 
-Skill loading uses progressive disclosure: Colibri keeps a small metadata index in memory, selects relevant skills by keyword overlap for the current turn, then reads and injects only the selected `SKILL.md` files as temporary model context. The injected skill text is not stored in `AgentSession.messages`.
+Colibri also ships a tiny built-in guidance skill, `create-colibri-skill`, so users can ask how to create a new Colibri skill without first installing a skill that explains skills.
+
+Skill loading uses progressive disclosure: Colibri keeps a small metadata index in memory, selects relevant skills by keyword overlap for the current turn, then reads and injects only the selected skill instructions as temporary model context. The injected skill text is not stored in `AgentSession.messages`.
 
 Skill injection is bounded by:
 

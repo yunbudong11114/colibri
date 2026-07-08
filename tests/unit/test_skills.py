@@ -10,9 +10,41 @@ def test_skill_index_scans_local_skills_without_storing_bodies(tmp_path):
 
     index = SkillIndex.scan([tmp_path / "skills"])
 
-    assert [skill.name for skill in index.skills] == ["release"]
-    assert index.skills[0].description == "Release Notes"
-    assert index.skills[0].content is None
+    release = index.get("release")
+    assert release is not None
+    assert release.description == "Release Notes"
+    assert release.content is None
+
+
+def test_skill_index_includes_builtin_create_colibri_skill_without_user_dir(tmp_path):
+    index = SkillIndex.scan([tmp_path / "missing-skills"])
+
+    skill = index.get("create-colibri-skill")
+
+    assert skill is not None
+    assert skill.root.name == "builtin"
+    assert skill.content is not None
+    assert not skill.commands
+
+
+def test_builtin_create_colibri_skill_is_selected_for_skill_creation(tmp_path):
+    config = AgentConfig.default().with_overrides(
+        {"skills": {"dirs": [str(tmp_path / "missing-skills")], "max_loaded": 1}}
+    )
+
+    context = SkillIndex.scan(config.skills.dirs).context_for("帮我创建一个 colibri skill", config.skills)
+
+    assert context.skills == ["create-colibri-skill"]
+    assert "[create-colibri-skill]" in context.text
+    assert "SKILL.md" in context.text
+
+
+def test_builtin_create_colibri_skill_is_not_selected_for_unrelated_turn(tmp_path):
+    config = AgentConfig.default().with_overrides({"skills": {"dirs": [str(tmp_path / "missing-skills")]}})
+
+    context = SkillIndex.scan(config.skills.dirs).context_for("hello status", config.skills)
+
+    assert context.skills == []
 
 
 def test_skill_index_parses_command_metadata(tmp_path):
@@ -35,10 +67,12 @@ read_only = false
 
     index = SkillIndex.scan([tmp_path / "skills"])
 
-    assert index.skills[0].description == "Release helper"
-    assert index.skills[0].commands[0].name == "render"
-    assert index.skills[0].commands[0].args == ["scripts/render.py"]
-    assert not index.skills[0].commands[0].read_only
+    release = index.get("release")
+    assert release is not None
+    assert release.description == "Release helper"
+    assert release.commands[0].name == "render"
+    assert release.commands[0].args == ["scripts/render.py"]
+    assert not release.commands[0].read_only
 
 
 def test_skill_index_selects_and_loads_bounded_skill_context(tmp_path):

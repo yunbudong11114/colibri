@@ -11,6 +11,40 @@ from colibri.config import SkillsConfig
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_text
 
 
+CREATE_COLIBRI_SKILL_CONTENT = """# Create Colibri Skill
+
+Use this skill when the user wants to create, write, add, or design a local Colibri skill.
+
+Colibri skills are local filesystem instructions. Do not install packages, fetch remote skill catalogs, or use a marketplace.
+
+Create this layout:
+
+```text
+~/.colibri/skills/<skill-name>/
+  SKILL.md
+  skill.toml        # optional
+  scripts/...       # optional
+```
+
+`SKILL.md` is required. Keep it focused on when to use the skill, what context to gather, and the exact workflow the assistant should follow. Prefer progressive disclosure: put the essential instructions in `SKILL.md`, and reference extra local files only when needed.
+
+Optional `skill.toml` can describe local commands for `skill.run`:
+
+```toml
+description = "Short description used for skill selection."
+
+[[commands]]
+name = "check"
+description = "Run the local verification command."
+command = "python"
+args = ["scripts/check.py"]
+read_only = true
+```
+
+After creating a skill, test that Colibri selects it for a matching user request and does not select it for unrelated turns. Keep command permissions explicit and avoid long resident processes on small devices.
+"""
+
+
 @dataclass(frozen=True)
 class SkillCommand:
     name: str
@@ -44,8 +78,8 @@ class SkillIndex:
 
     @classmethod
     def scan(cls, dirs: list[Path]) -> "SkillIndex":
-        skills: list[SkillMetadata] = []
-        seen: set[str] = set()
+        skills: list[SkillMetadata] = _builtin_skills()
+        seen: set[str] = {skill.name for skill in skills}
         for root in dirs:
             try:
                 entries = sorted(root.iterdir(), key=lambda path: path.name)
@@ -88,10 +122,12 @@ class SkillIndex:
         chunks: list[str] = ["Relevant skills:"]
         truncated = False
         for skill in selected:
-            try:
-                content = skill.skill_file.read_text(encoding="utf-8")
-            except OSError:
-                continue
+            content = skill.content
+            if content is None:
+                try:
+                    content = skill.skill_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
             chunks.append(f"\n[{skill.name}]\nBase directory: {skill.root}\n\n{content.strip()}")
         text = "\n".join(chunks).strip()
         if not text:
@@ -106,8 +142,7 @@ class SkillIndex:
         query_terms = _terms(user_text)
         scored: list[tuple[int, str, SkillMetadata]] = []
         for skill in self.skills:
-            haystack = _terms(f"{skill.name} {skill.description}")
-            score = len(query_terms & haystack)
+            score = _skill_score(skill, query_terms, user_text)
             if score:
                 scored.append((score, skill.name, skill))
         scored.sort(key=lambda item: (-item[0], item[1]))
@@ -205,6 +240,50 @@ def _parse_commands(metadata: dict[str, Any]) -> list[SkillCommand]:
             )
         )
     return parsed
+
+
+def _builtin_skills() -> list[SkillMetadata]:
+    name = "create-colibri-skill"
+    root = Path("builtin")
+    return [
+        SkillMetadata(
+            name=name,
+            description="Guide creating, writing, adding, or designing a local Colibri skill.",
+            root=root,
+            skill_file=root / name / "SKILL.md",
+            content=CREATE_COLIBRI_SKILL_CONTENT,
+        )
+    ]
+
+
+def _skill_score(skill: SkillMetadata, query_terms: set[str], user_text: str) -> int:
+    if skill.name == "create-colibri-skill":
+        if not _is_create_skill_request(user_text):
+            return 0
+        return 100 + len(query_terms & _terms(f"{skill.name} {skill.description}"))
+    haystack = _terms(f"{skill.name} {skill.description}")
+    return len(query_terms & haystack)
+
+
+def _is_create_skill_request(user_text: str) -> bool:
+    lowered = user_text.lower()
+    has_skill_term = bool({"skill", "skills"} & _terms(lowered)) or "技能" in lowered
+    if not has_skill_term:
+        return False
+    create_words = (
+        "create",
+        "new",
+        "add",
+        "write",
+        "design",
+        "build",
+        "创建",
+        "新增",
+        "添加",
+        "编写",
+        "设计",
+    )
+    return any(word in lowered for word in create_words)
 
 
 def _derive_description(content: str) -> str:

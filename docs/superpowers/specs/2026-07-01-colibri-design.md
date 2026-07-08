@@ -390,7 +390,9 @@ The "always" choice should be session-scoped by default, not permanently written
 
 ## 10. Skill System
 
-Skills are local directories only. Colibri v1 should not implement skill installation, marketplace discovery, remote downloads, package registries, or plugin distribution.
+Skills are primarily local directories. Colibri v1 should not implement skill installation, marketplace discovery, remote downloads, package registries, or plugin distribution.
+
+Colibri may also ship a very small set of built-in guidance skills inside the project. Built-in skills are not read from `skills.dirs`, do not install anything, and do not expose commands unless explicitly designed later. They exist to teach users how to create or structure local Colibri skills.
 
 ```text
 skills/<name>/
@@ -417,15 +419,17 @@ input_schema = { type = "object" }
 
 Skill loading should be cheap:
 
-1. At startup, scan only configured local skill directories for names, descriptions, `SKILL.md` paths, and command metadata.
+1. At startup, seed project built-in skill metadata, then scan configured local skill directories for names, descriptions, `SKILL.md` paths, and command metadata.
 2. Keep the long-lived skill index metadata-only; do not retain every full `SKILL.md` body in memory.
 3. Do not load every full `SKILL.md` into every prompt.
 4. On each user turn, select relevant skills by simple keyword scoring first.
-5. Read full `SKILL.md` content only for selected skills.
+5. Read full local `SKILL.md` content only for selected skills; built-in selected skills read their bundled instruction text from the project.
 6. Inject only the top bounded relevant skill instructions.
 7. Expose scripts as `skill.run` subcommands only when their skill is enabled.
 
-This avoids Claude Code's richer but heavier skill machinery while preserving the user's ability to configure local capabilities. Users can add skills by placing files in configured directories; Colibri will not install or update those files for them in v1.
+The first built-in skill is `create-colibri-skill`. It triggers on requests about creating, writing, adding, or designing Colibri skills, and guides the assistant to create a local `~/.colibri/skills/<name>/SKILL.md` skill with optional `skill.toml` command metadata.
+
+This avoids Claude Code's richer but heavier skill machinery while preserving the user's ability to configure local capabilities. Users can add skills by placing files in configured directories; Colibri will not install, update, or fetch remote skill packages in v1.
 
 ## 11. MCP Support
 

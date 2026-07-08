@@ -3,7 +3,7 @@
 Date: 2026-07-07
 Status: Implemented
 Milestone: 7
-Scope: Local filesystem skills with progressive disclosure
+Scope: Local filesystem skills with progressive disclosure plus minimal built-in guidance skills
 
 ## 1. Goal
 
@@ -11,6 +11,7 @@ Milestone 7 adds local skills to Colibri without adding installation, marketplac
 
 After this milestone, Colibri should:
 
+- seed minimal project built-in guidance skills,
 - scan configured local skill directories,
 - build a small in-memory index from skill metadata only,
 - select relevant skills for each user turn,
@@ -28,12 +29,12 @@ Milestone 7 must not implement:
 - remote skill download,
 - package registries,
 - plugin management,
-- bundled skill catalogs,
+- bundled skill catalogs or remote skill packages,
 - MCP skills,
 - model-based skill search,
 - recursive loading of arbitrary referenced files.
 
-Users add skills by placing files under configured local directories.
+Users add skills by placing files under configured local directories. Colibri may still ship a tiny built-in guidance skill that explains how to create those local files; that is not a marketplace, installer, or catalog.
 
 ## 3. Skill Layout
 
@@ -73,24 +74,32 @@ The design intentionally follows Claude Code's skill disclosure shape, but is st
 
 Rules:
 
-1. Scan time stores only metadata:
+1. Scan time seeds metadata for project built-in guidance skills, then scans configured local skill directories.
+2. Scan time stores only metadata:
    - name,
    - description,
    - path to `SKILL.md`,
    - command metadata from `skill.toml`.
-2. Scan time must not retain full `SKILL.md` bodies in the long-lived skill index.
-3. On each user turn, score skill metadata with simple keyword overlap.
-4. Load full `SKILL.md` only for selected skills.
-5. Inject at most `skills.max_loaded` selected skills.
-6. Bound injected instruction text by `skills.max_instruction_chars`.
-7. Do not recursively read files referenced by `SKILL.md`. Future milestones can add explicit file-reference loading.
-8. If a selected skill exceeds the budget, truncate the injected instruction and mark it as truncated.
+3. Scan time must not retain full local `SKILL.md` bodies in the long-lived skill index. Built-in guidance skills may keep small bundled instruction text in code.
+4. On each user turn, score skill metadata with simple keyword overlap.
+5. Load full local `SKILL.md` only for selected skills; selected built-in skills use their bundled instruction text.
+6. Inject at most `skills.max_loaded` selected skills.
+7. Bound injected instruction text by `skills.max_instruction_chars`.
+8. Do not recursively read files referenced by `SKILL.md`. Future milestones can add explicit file-reference loading.
+9. If a selected skill exceeds the budget, truncate the injected instruction and mark it as truncated.
 
 This yields:
 
 ```text
-local dirs -> metadata index -> per-turn selection -> read selected SKILL.md -> bounded injection
+built-in guidance skills + local dirs -> metadata index -> per-turn selection -> read selected instructions -> bounded injection
 ```
+
+Built-in guidance skills:
+
+- `create-colibri-skill` ships inside Colibri and is not read from `skills.dirs`.
+- It has no `skill.run` commands.
+- It is selected only when the user asks to create, write, add, or design a Colibri skill.
+- It explains the local skill directory shape, `SKILL.md`, optional `skill.toml`, progressive disclosure, and verification.
 
 ## 5. Model Context
 
