@@ -1,4 +1,6 @@
-from colibri.cli import main
+from io import StringIO
+
+from colibri.cli import main, read_repl_line
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
 
@@ -46,11 +48,10 @@ def test_ask_closes_session_transcript(monkeypatch, capsys):
     assert transcript.closed
 
 
-def test_repl_exits_on_quit(monkeypatch, capsys):
+def test_repl_exits_on_quit(capsys):
     inputs = iter(["hello", "/quit"])
-    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
-    exit_code = main(["repl"])
+    exit_code = main(["repl"], input_func=lambda _: next(inputs))
 
     captured = capsys.readouterr()
 
@@ -73,6 +74,16 @@ def test_repl_exits_on_idle_timeout(capsys):
 
     assert exit_code == 0
     assert "[colibri] idle_exit seconds=1" in captured.err
+
+
+def test_read_repl_line_reads_unicode_from_plain_stream():
+    stdin = StringIO("我有我\n")
+    stdout = StringIO()
+
+    text = read_repl_line("colibri> ", timeout_seconds=0, stdin=stdin, stdout=stdout)
+
+    assert text == "我有我"
+    assert stdout.getvalue() == "colibri> "
 
 
 def test_diagnostics_prints_key_value_lines(capsys):

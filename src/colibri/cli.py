@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import select
 from time import monotonic
 import sys
-from typing import Callable, Sequence
+from typing import Callable, TextIO, Sequence
 
 from colibri.console import ConsoleStatusWriter, StatusTranscript
 from colibri.config import AgentConfig, ConfigError
@@ -33,12 +34,11 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     config_loader: Callable[[Path | None], AgentConfig] | None = None,
-    input_func: Callable[[str], str] | None = None,
+    input_func: Callable[[str], str | None] | None = None,
     monotonic_func: Callable[[], float] = monotonic,
 ) -> int:
     try:
         args = build_parser().parse_args(argv)
-        read_input = input_func or input
         load_config = config_loader or AgentConfig.load
         config = load_config(args.config)
         status = ConsoleStatusWriter(enabled=config.console.status)
@@ -63,7 +63,7 @@ def main(
                 return 0
 
             if args.command == "repl":
-                return _run_repl(session, status=status, input_func=read_input, monotonic_func=monotonic_func)
+                return _run_repl(session, status=status, input_func=input_func, monotonic_func=monotonic_func)
 
             return 2
         finally:
@@ -80,7 +80,7 @@ def _run_repl(
     session: AgentSession,
     *,
     status: ConsoleStatusWriter,
-    input_func: Callable[[str], str] = input,
+    input_func: Callable[[str], str | None] | None = None,
     monotonic_func: Callable[[], float] = monotonic,
 ) -> int:
     last_activity = monotonic_func()
@@ -89,10 +89,19 @@ def _run_repl(
         if idle_seconds > 0 and monotonic_func() - last_activity >= idle_seconds:
             status.write("idle_exit", seconds=idle_seconds)
             return 0
+        timeout_remaining = 0
+        if idle_seconds > 0:
+            timeout_remaining = max(0, idle_seconds - (monotonic_func() - last_activity))
         try:
-            user_text = input_func("colibri> ")
+            if input_func is None:
+                user_text = read_repl_line("colibri> ", timeout_remaining)
+            else:
+                user_text = input_func("colibri> ")
         except EOFError:
             print()
+            return 0
+        if user_text is None:
+            status.write("idle_exit", seconds=idle_seconds)
             return 0
 
         if user_text.strip() in {"/quit", "/exit"}:
@@ -107,6 +116,32 @@ def _run_repl(
         except ModelError as error:
             print(f"Model error: {error}", file=sys.stderr)
             return 1
+
+
+def read_repl_line(
+    prompt: str,
+    timeout_seconds: float,
+    stdin: TextIO = sys.stdin,
+    stdout: TextIO = sys.stdout,
+) -> str | None:
+    stdout.write(prompt)
+    stdout.flush()
+    if timeout_seconds > 0 and _is_selectable(stdin):
+        ready, _write_ready, _error_ready = select.select([stdin], [], [], timeout_seconds)
+        if not ready:
+            return None
+    line = stdin.readline()
+    if line == "":
+        raise EOFError
+    return line.rstrip("\n")
+
+
+def _is_selectable(stream: TextIO) -> bool:
+    try:
+        stream.fileno()
+    except (OSError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> None:

@@ -80,7 +80,9 @@ Implementation approach:
 
 - Add a timeout-aware input helper for REPL.
 - Prefer `select.select()` on POSIX stdin when available.
-- Fall back to blocking `input()` if the stream is not selectable.
+- Use a plain prompt write plus `stdin.readline()` instead of Python's built-in `input()`.
+- Avoid readline/libedit by default because CJK input and deletion can leave ghost characters or submit an empty buffer on some macOS terminals.
+- Fall back to blocking `stdin.readline()` if the stream is not selectable.
 - Keep tests isolated by allowing a fake input function.
 
 ## 5. Low-Memory Diagnostics
