@@ -1,6 +1,6 @@
 from io import StringIO
 
-from colibri.cli import ReplLineEditor, main, read_repl_line
+from colibri.cli import ReplLineEditor, main, read_repl_line, read_tty_byte
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
 
@@ -100,6 +100,19 @@ def test_repl_line_editor_backspace_removes_cjk_and_redraws_line():
     output = stdout.getvalue()
     assert "\r\x1b[2Kcolibri> 尿尿是豆阿斯" in output
     assert output.endswith("\r\x1b[2Kcolibri> 尿尿是豆阿斯顿")
+
+
+def test_read_tty_byte_uses_unbuffered_fd_read(monkeypatch):
+    calls = []
+
+    def fake_read(fd, size):
+        calls.append((fd, size))
+        return b"\xe6"
+
+    monkeypatch.setattr("colibri.cli.os.read", fake_read)
+
+    assert read_tty_byte(12) == b"\xe6"
+    assert calls == [(12, 1)]
 
 
 def test_diagnostics_prints_key_value_lines(capsys):

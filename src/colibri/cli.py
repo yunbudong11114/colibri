@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import os
 from pathlib import Path
 import select
 from time import monotonic
@@ -189,7 +190,7 @@ def _read_repl_line_tty(
                     stdout.write("\n")
                     stdout.flush()
                     return None
-            data = stdin.buffer.read(1)
+            data = read_tty_byte(fd)
             if data == b"":
                 raise EOFError
             if data in {b"\r", b"\n"}:
@@ -219,6 +220,10 @@ def _is_selectable(stream: TextIO) -> bool:
     except (OSError, ValueError, AttributeError):
         return False
     return True
+
+
+def read_tty_byte(fd: int) -> bytes:
+    return os.read(fd, 1)
 
 
 def _is_tty(stream: TextIO) -> bool:
