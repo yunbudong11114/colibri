@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from subprocess import TimeoutExpired, run
 from typing import Any
 import re
 import tomllib
 
 from colibri.config import SkillsConfig
-from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_text
 
 
 CREATE_COLIBRI_SKILL_CONTENT = """# Create Colibri Skill
@@ -147,64 +145,6 @@ class SkillIndex:
                 scored.append((score, skill.name, skill))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [skill for _score, _name, skill in scored[:limit]]
-
-
-class SkillRunTool:
-    spec = ToolSpec(
-        name="skill.run",
-        description="Run a configured local skill command.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "skill": {"type": "string"},
-                "command": {"type": "string"},
-                "args": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["skill", "command"],
-        },
-        read_only=False,
-    )
-
-    def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
-        skill_name = arguments.get("skill")
-        command_name = arguments.get("command")
-        extra_args = arguments.get("args", [])
-        if not isinstance(skill_name, str) or not isinstance(command_name, str):
-            return ToolResult(ok=False, text="skill and command are required", error_type="invalid_arguments")
-        if not isinstance(extra_args, list) or not all(isinstance(arg, str) for arg in extra_args):
-            return ToolResult(ok=False, text="args must be a list of strings", error_type="invalid_arguments")
-
-        index = SkillIndex.scan(context.config.skills.dirs)
-        skill = index.get(skill_name)
-        if skill is None:
-            return ToolResult(ok=False, text=f"Unknown skill: {skill_name}", error_type="not_found")
-        command = next((item for item in skill.commands if item.name == command_name), None)
-        if command is None:
-            return ToolResult(ok=False, text=f"Unknown skill command: {command_name}", error_type="not_found")
-        if not command.command:
-            return ToolResult(ok=False, text="Skill command is empty", error_type="invalid_config")
-
-        try:
-            completed = run(
-                [command.command, *command.args, *extra_args],
-                cwd=skill.root,
-                text=True,
-                capture_output=True,
-                timeout=context.config.tools.max_shell_seconds,
-                check=False,
-            )
-        except TimeoutExpired as error:
-            text = error.stdout or error.stderr or "Skill command timed out"
-            bounded, truncated = bound_tool_text(str(text), context.config.tools.max_result_chars)
-            return ToolResult(ok=False, text=bounded, error_type="timeout", truncated=truncated)
-        except OSError as error:
-            return ToolResult(ok=False, text=str(error), error_type="tool_error")
-
-        output = completed.stdout if completed.stdout else completed.stderr
-        bounded, truncated = bound_tool_text(output, context.config.tools.max_result_chars)
-        if completed.returncode != 0:
-            return ToolResult(ok=False, text=bounded, error_type="tool_error", truncated=truncated)
-        return ToolResult(ok=True, text=bounded, truncated=truncated)
 
 
 def _read_skill_toml(root: Path) -> dict[str, Any]:

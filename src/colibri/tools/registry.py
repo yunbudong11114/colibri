@@ -4,7 +4,6 @@ from pathlib import Path
 
 from colibri.config import AgentConfig
 from colibri.messages import ToolCall
-from colibri.skills import SkillRunTool
 from colibri.tools.base import Tool, ToolContext, ToolResult
 from colibri.tools.builtin import (
     FilesListTool,
@@ -14,6 +13,7 @@ from colibri.tools.builtin import (
     MemorySearchTool,
     MemoryWriteTool,
     ShellRunTool,
+    SkillRunTool,
     WebSearchTool,
 )
 

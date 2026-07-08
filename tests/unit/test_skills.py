@@ -1,6 +1,7 @@
 from colibri.config import AgentConfig
-from colibri.skills import SkillIndex, SkillRunTool
+from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext
+from colibri.tools.builtin import SkillRunTool
 
 
 def test_skill_index_scans_local_skills_without_storing_bodies(tmp_path):
