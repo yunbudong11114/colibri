@@ -187,8 +187,8 @@ timeout_seconds = 60
 max_output_tokens = 1024
 
 [session]
-max_tool_rounds = 6
-recent_message_limit = 16
+max_tool_rounds = 16
+recent_message_limit = 48
 compact_trigger_chars = 36000
 summary_max_chars = 6000
 idle_exit_seconds = 300

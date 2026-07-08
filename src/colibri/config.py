@@ -29,8 +29,8 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class SessionConfig:
-    max_tool_rounds: int = 6
-    recent_message_limit: int = 16
+    max_tool_rounds: int = 16
+    recent_message_limit: int = 48
     compact_trigger_chars: int = 36000
     summary_max_chars: int = 6000
     model_compact: bool = True

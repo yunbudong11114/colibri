@@ -7,6 +7,7 @@ timeout_seconds = 60
 max_output_tokens = 1024
 
 [session]
-recent_message_limit = 16
+max_tool_rounds = 16
+recent_message_limit = 48
 compact_trigger_chars = 36000
 model_compact = true

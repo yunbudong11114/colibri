@@ -1,8 +1,15 @@
 from io import StringIO
 
+import pytest
+
 from colibri.cli import ReplLineEditor, main, read_repl_line, read_tty_byte
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
+
+
+@pytest.fixture(autouse=True)
+def isolate_user_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 def test_ask_prints_fake_response(capsys):
