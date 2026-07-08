@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol
 from colibri.config import AgentConfig
 from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
 from colibri.tools.base import Tool, ToolContext
+from colibri.tools.builtin.files import is_under_configured_file_root, resolve_file_path
 
 
 PermissionDecision = Literal["allow", "deny", "confirm", "always"]
@@ -15,10 +16,11 @@ PermissionDecision = Literal["allow", "deny", "confirm", "always"]
 
 @dataclass(frozen=True)
 class PermissionSubject:
-    kind: Literal["tool", "shell"]
+    kind: Literal["tool", "shell", "file_path"]
     tool_name: str
     shell_command: str | None = None
     shell_executable: str | None = None
+    file_path: str | None = None
     read_only: bool = False
 
 
@@ -28,6 +30,8 @@ class PermissionDecisionResult:
     decision: str
     scope: str
     reason: str = ""
+    subject_kind: str = "tool"
+    file_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,9 @@ class ConsolePermissionPrompter:
         if request.subject.kind == "shell":
             print(f"shell: {request.subject.shell_command}")
             return input("[y] once [s] session [e] executable-session [p] project [n] deny: ").strip().lower()
+        if request.subject.kind == "file_path":
+            print(f"file: {request.tool_name} {request.subject.file_path}")
+            return input("[y] once [s] session [p] project [n] deny: ").strip().lower()
         print(f"tool: {request.tool_name} {request.arguments}")
         return input("[y] once [s] session [p] project [n] deny: ").strip().lower()
 
@@ -60,6 +67,7 @@ class PermissionPolicy:
     session_tool_grants: set[str] = field(default_factory=set)
     session_shell_commands: set[str] = field(default_factory=set)
     session_shell_executables: set[str] = field(default_factory=set)
+    session_file_paths: set[str] = field(default_factory=set)
 
     @classmethod
     def from_config(
@@ -75,9 +83,9 @@ class PermissionPolicy:
         )
 
     def decide(self, tool: Tool, arguments: dict[str, Any], context: ToolContext) -> PermissionDecisionResult:
-        subject = permission_subject_for(tool, arguments)
+        subject = permission_subject_for(tool, arguments, context)
         if subject.kind == "shell" and subject.shell_executable in context.config.shell.deny:
-            return PermissionDecisionResult(False, "deny", "none", "hard_deny")
+            return _decision(False, "deny", "none", subject, "hard_deny")
 
         project_grants = self.project_store.load()
         grant_result = self._granted(subject, project_grants)
@@ -104,27 +112,35 @@ class PermissionPolicy:
     ) -> PermissionDecisionResult | None:
         if subject.kind == "shell":
             if subject.shell_command in self.session_shell_commands:
-                return PermissionDecisionResult(True, "allow", "session")
+                return _decision(True, "allow", "session", subject)
             if subject.shell_executable in self.session_shell_executables:
-                return PermissionDecisionResult(True, "allow", "session_executable")
+                return _decision(True, "allow", "session_executable", subject)
             if subject.shell_command in project_grants.shell_commands:
-                return PermissionDecisionResult(True, "allow", "project")
+                return _decision(True, "allow", "project", subject)
+            return None
+        if subject.kind == "file_path":
+            if subject.file_path in self.session_file_paths:
+                return _decision(True, "allow", "session_path", subject)
+            if subject.file_path in project_grants.file_paths:
+                return _decision(True, "allow", "project_path", subject)
             return None
         if subject.tool_name in self.session_tool_grants:
-            return PermissionDecisionResult(True, "allow", "session")
+            return _decision(True, "allow", "session", subject)
         if subject.tool_name in project_grants.tool_names:
-            return PermissionDecisionResult(True, "allow", "project")
+            return _decision(True, "allow", "project", subject)
         return None
 
     def _default_decision(self, subject: PermissionSubject) -> PermissionDecisionResult | None:
         if self.default_permission == "allow":
-            return PermissionDecisionResult(True, "allow", "default")
+            return _decision(True, "allow", "default", subject)
         if self.default_permission == "deny":
-            return PermissionDecisionResult(False, "deny", "default")
+            return _decision(False, "deny", "default", subject)
         if self.default_permission == "confirm":
             return None
         if self.default_permission == "allow_read_confirm_write" and subject.kind != "shell" and subject.read_only:
-            return PermissionDecisionResult(True, "allow", "default_read_only")
+            if subject.kind == "file_path":
+                return None
+            return _decision(True, "allow", "default_read_only", subject)
         return None
 
     def _apply_choice(
@@ -134,30 +150,42 @@ class PermissionPolicy:
         project_grants: ProjectGrants,
     ) -> PermissionDecisionResult:
         if choice in {"y", "yes"}:
-            return PermissionDecisionResult(True, "allow", "once")
+            return _decision(True, "allow", "once", subject)
         if choice in {"s", "session", "a", "always"}:
             if subject.kind == "shell" and subject.shell_command is not None:
                 self.session_shell_commands.add(subject.shell_command)
+            elif subject.kind == "file_path" and subject.file_path is not None:
+                self.session_file_paths.add(subject.file_path)
             else:
                 self.session_tool_grants.add(subject.tool_name)
-            return PermissionDecisionResult(True, "allow", "session")
+            scope = "session_path" if subject.kind == "file_path" else "session"
+            return _decision(True, "allow", scope, subject)
         if choice in {"e", "executable"} and subject.kind == "shell" and subject.shell_executable is not None:
             self.session_shell_executables.add(subject.shell_executable)
-            return PermissionDecisionResult(True, "allow", "session_executable")
+            return _decision(True, "allow", "session_executable", subject)
         if choice in {"p", "project"}:
             if subject.kind == "shell" and subject.shell_command is not None:
                 next_grants = ProjectGrants(
                     shell_commands=set(project_grants.shell_commands) | {subject.shell_command},
                     tool_names=set(project_grants.tool_names),
+                    file_paths=set(project_grants.file_paths),
+                )
+            elif subject.kind == "file_path" and subject.file_path is not None:
+                next_grants = ProjectGrants(
+                    shell_commands=set(project_grants.shell_commands),
+                    tool_names=set(project_grants.tool_names),
+                    file_paths=set(project_grants.file_paths) | {subject.file_path},
                 )
             else:
                 next_grants = ProjectGrants(
                     shell_commands=set(project_grants.shell_commands),
                     tool_names=set(project_grants.tool_names) | {subject.tool_name},
+                    file_paths=set(project_grants.file_paths),
                 )
             self.project_store.save(next_grants)
-            return PermissionDecisionResult(True, "allow", "project")
-        return PermissionDecisionResult(False, "deny", "once", "user_denied")
+            scope = "project_path" if subject.kind == "file_path" else "project"
+            return _decision(True, "allow", scope, subject)
+        return _decision(False, "deny", "once", subject, "user_denied")
 
     def _prompter(self) -> PermissionPrompter:
         if self.prompter is None:
@@ -165,7 +193,11 @@ class PermissionPolicy:
         return self.prompter
 
 
-def permission_subject_for(tool: Tool, arguments: dict[str, Any]) -> PermissionSubject:
+def permission_subject_for(
+    tool: Tool,
+    arguments: dict[str, Any],
+    context: ToolContext | None = None,
+) -> PermissionSubject:
     if tool.spec.name == "shell.run":
         command = arguments.get("command")
         command_text = command.strip() if isinstance(command, str) else ""
@@ -182,4 +214,32 @@ def permission_subject_for(tool: Tool, arguments: dict[str, Any]) -> PermissionS
             shell_executable=executable,
             read_only=False,
         )
+    if tool.spec.name in {"files.list", "files.read"} and context is not None:
+        raw_path = arguments.get("path")
+        if isinstance(raw_path, str) and raw_path:
+            resolved = resolve_file_path(raw_path, context.cwd)
+            if resolved is not None and not is_under_configured_file_root(resolved, context):
+                return PermissionSubject(
+                    kind="file_path",
+                    tool_name=tool.spec.name,
+                    file_path=str(resolved),
+                    read_only=tool.spec.read_only,
+                )
     return PermissionSubject(kind="tool", tool_name=tool.spec.name, read_only=tool.spec.read_only)
+
+
+def _decision(
+    allowed: bool,
+    decision: str,
+    scope: str,
+    subject: PermissionSubject,
+    reason: str = "",
+) -> PermissionDecisionResult:
+    return PermissionDecisionResult(
+        allowed=allowed,
+        decision=decision,
+        scope=scope,
+        reason=reason,
+        subject_kind=subject.kind,
+        file_path=subject.file_path,
+    )

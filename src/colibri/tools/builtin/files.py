@@ -11,21 +11,34 @@ def _path_argument(arguments: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _resolve_allowed_path(raw_path: str, context: ToolContext) -> Path | None:
+def resolve_file_path(raw_path: str, cwd: Path) -> Path | None:
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
-        candidate = context.cwd / candidate
+        candidate = cwd / candidate
     try:
-        resolved = candidate.resolve()
+        return candidate.resolve()
     except OSError:
         return None
 
+
+def is_under_configured_file_root(path: Path, context: ToolContext) -> bool:
     for root in context.config.files.roots:
         try:
-            resolved.relative_to(root.expanduser().resolve())
-            return resolved
+            path.relative_to(root.expanduser().resolve())
+            return True
         except (OSError, ValueError):
             continue
+    return False
+
+
+def _resolve_allowed_path(raw_path: str, context: ToolContext) -> Path | None:
+    resolved = resolve_file_path(raw_path, context.cwd)
+    if resolved is None:
+        return None
+    if is_under_configured_file_root(resolved, context):
+        return resolved
+    if str(resolved) in context.allowed_file_paths:
+        return resolved
     return None
 
 

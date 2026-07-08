@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 
 from colibri.config import AgentConfig
@@ -112,16 +112,20 @@ class AgentSession:
                         "permission_decision",
                         {
                             "tool_name": call.name,
-                            "subject_kind": _permission_subject_kind(call),
+                            "subject_kind": decision.subject_kind,
                             "decision": decision.decision,
                             "scope": decision.scope,
                             "allowed": decision.allowed,
                             "reason": decision.reason,
                             "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
+                            "file_path": decision.file_path,
                         },
                     )
                     if decision.allowed:
-                        result = tool.run(call.arguments, context)
+                        run_context = context
+                        if decision.file_path is not None:
+                            run_context = replace(context, allowed_file_paths=frozenset({decision.file_path}))
+                        result = tool.run(call.arguments, run_context)
                     else:
                         result = ToolResult(
                             ok=False,
@@ -245,11 +249,6 @@ class AgentSession:
                 },
             )
         return budgeted
-
-
-def _permission_subject_kind(call: ToolCall) -> str:
-    return "shell" if call.name == "shell.run" else "tool"
-
 
 def _denied_tool_text(call: ToolCall) -> str:
     if call.name == "shell.run":

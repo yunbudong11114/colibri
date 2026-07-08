@@ -5,7 +5,7 @@ from typing import Any
 from colibri.config import AgentConfig
 from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
-from colibri.tools.builtin import ShellRunTool
+from colibri.tools.builtin import FilesListTool, ShellRunTool
 from colibri.tools.permissions import PermissionPolicy, PermissionRequest
 
 
@@ -178,3 +178,64 @@ def test_shell_hard_deny_blocks_without_prompt(tmp_path):
     assert not result.allowed
     assert result.reason == "hard_deny"
     assert prompter.requests == []
+
+
+def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+
+    result = policy.decide(FilesListTool(), {"path": str(outside)}, tool_context(config, tmp_path))
+
+    assert result.allowed
+    assert result.scope == "once"
+    assert result.subject_kind == "file_path"
+    assert result.file_path == str(outside.resolve())
+    assert prompter.requests[0].subject.kind == "file_path"
+    assert prompter.requests[0].subject.file_path == str(outside.resolve())
+
+
+def test_file_path_session_grant_allows_same_resolved_path_without_prompt(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(replies=["s"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    first = policy.decide(FilesListTool(), {"path": str(outside)}, context)
+    second = policy.decide(FilesListTool(), {"path": str(outside)}, context)
+
+    assert first.allowed
+    assert second.allowed
+    assert second.scope == "session_path"
+    assert len(prompter.requests) == 1
+
+
+def test_file_path_project_grant_is_exact(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    other = tmp_path / "other"
+    allowed_root.mkdir()
+    outside.mkdir()
+    other.mkdir()
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    store = ProjectPermissionStore.for_cwd(tmp_path)
+    store.save(ProjectGrants(file_paths={str(outside.resolve())}))
+    prompter = FakePrompter(replies=["n"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    allowed = policy.decide(FilesListTool(), {"path": str(outside)}, context)
+    denied = policy.decide(FilesListTool(), {"path": str(other)}, context)
+
+    assert allowed.allowed
+    assert allowed.scope == "project_path"
+    assert not denied.allowed
+    assert prompter.requests[0].subject.file_path == str(other.resolve())

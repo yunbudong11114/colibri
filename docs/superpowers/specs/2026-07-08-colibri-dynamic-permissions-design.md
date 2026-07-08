@@ -141,16 +141,21 @@ Future work may add risk-specific prompts for network or destructive commands, b
 
 ## 7. File Path Grants
 
-File tools still need path containment. Dynamic permission grants are not a replacement for path safety.
+File tools still need path containment by default, but out-of-root read paths should be able to use the same dynamic permission flow as shell commands and higher-risk tools.
 
 Rules:
 
-- `files.roots` remains the hard filesystem boundary.
-- A project grant for `files.read` or `files.list` does not allow paths outside configured roots.
-- If a path is outside roots, the tool returns a clear path-denied result.
-- Future work may support an interactive "add this path root for session/project" flow, but this milestone does not add dynamic root expansion.
+- `files.roots` remains the automatic allow boundary.
+- If `files.read` or `files.list` targets a path inside `files.roots`, the read-only default policy can still allow it without prompting.
+- If `files.read` or `files.list` targets a path outside `files.roots`, the permission subject becomes a `file_path` subject and must be granted or denied dynamically.
+- File path grants are exact resolved paths, not recursive root expansion.
+- `y` allows that one call.
+- `s` allows the exact resolved path for the current session.
+- `p` stores the exact resolved path in the project permission file.
+- A project grant for `files.read` or `files.list` as a tool name still does not grant arbitrary out-of-root paths.
+- Missing, invalid, or unresolvable paths still return normal tool errors.
 
-This keeps CardputerZero deployments safe when the agent runs as a long-lived personal server.
+This keeps CardputerZero deployments safe when the agent runs as a long-lived personal server while avoiding confusing "permission allowed, path denied" outcomes for intentional project access.
 
 ## 8. Prompt Design
 
@@ -167,6 +172,13 @@ For non-shell tools:
 
 ```text
 tool: files.read {"path":"README.md"}
+[y] once [s] session [p] project [n] deny:
+```
+
+For out-of-root file paths:
+
+```text
+file: files.list /home/user/project
 [y] once [s] session [p] project [n] deny:
 ```
 
@@ -194,6 +206,9 @@ commands = ["pwd", "git status"]
 
 [tools]
 names = ["files.list", "files.read"]
+
+[files]
+paths = ["/home/user/project"]
 ```
 
 Behavior:
@@ -228,6 +243,8 @@ The policy should know:
 - session shell command grants,
 - session shell executable grants,
 - project tool grants,
+- session file path grants,
+- project file path grants,
 - project shell command grants,
 - injected prompter.
 
@@ -254,7 +271,8 @@ Extend `permission_decision` payloads with:
 - `scope`,
 - `allowed`,
 - `reason`,
-- `shell_command` when applicable.
+- `shell_command` when applicable,
+- `file_path` when applicable.
 
 Console status may continue to show:
 
@@ -278,7 +296,11 @@ Required tests:
 - hard-denied executable blocks without prompting,
 - tool project grant allows the named tool only,
 - denied tool call returns a denial result and does not execute,
-- file roots still block out-of-root paths despite grants,
+- file roots auto-allow in-root read-only paths,
+- out-of-root file paths prompt,
+- `s` allows the same out-of-root path for the current session,
+- `p` stores an exact resolved file path project grant,
+- file tool-name grants do not allow arbitrary out-of-root paths,
 - project permission store loads missing files as empty grants,
 - project permission store saves deduplicated TOML,
 - `.colibri/permissions.toml` is ignored by git,

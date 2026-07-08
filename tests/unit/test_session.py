@@ -225,6 +225,33 @@ def test_session_returns_user_denial_to_model(tmp_path):
     )
 
 
+def test_session_allows_out_of_root_file_path_after_dynamic_permission(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    (outside / "note.txt").write_text("hello", encoding="utf-8")
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(reply="y")
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("files.list", {"path": str(outside)}),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        permission_policy=policy,
+        transcript=transcript,
+    )
+
+    response = session.submit("list outside")
+
+    assert "note.txt" in response.text
+    assert prompter.requests[0].subject.kind == "file_path"
+    event = [payload for name, payload in transcript.events if name == "permission_decision"][0]
+    assert event["subject_kind"] == "file_path"
+    assert event["file_path"] == str(outside.resolve())
+
+
 def test_session_writes_transcript_events(tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("tool result text", encoding="utf-8")
