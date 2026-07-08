@@ -28,7 +28,10 @@ def test_ask_prints_status_to_stderr(capsys):
 
     assert exit_code == 0
     assert captured.out.strip() == "fake: status"
-    assert "[colibri] ready model=fake-colibri-model" in captured.err
+    assert "[colibri] ready model=fake-colibri-model\n" in captured.err
+    assert "tools=" not in captured.err
+    assert "memory=" not in captured.err
+    assert "skills=" not in captured.err
     assert "[colibri] thinking" in captured.err
 
 

@@ -156,7 +156,7 @@ The summary is injected into model input as temporary context and is not stored 
 When `console.status = true`, Colibri writes concise status lines to `stderr`:
 
 ```text
-[colibri] ready model=fake-colibri-model tools=8 memory=on skills=3
+[colibri] ready model=fake-colibri-model
 [colibri] thinking
 [colibri] tool files.read ok chars=1284
 ```

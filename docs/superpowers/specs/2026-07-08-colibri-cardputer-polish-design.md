@@ -45,7 +45,7 @@ Rules:
 Events:
 
 ```text
-[colibri] ready model=ZHIPU/GLM-5.2 tools=8 memory=on skills=3
+[colibri] ready model=ZHIPU/GLM-5.2
 [colibri] thinking
 [colibri] memory topics=devices,preferences
 [colibri] skill skills=release

@@ -17,7 +17,6 @@ from colibri.diagnostics import build_diagnostics
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.session import AgentSession
-from colibri.tools.registry import ToolRegistry
 from colibri.transcript import TranscriptWriter
 
 
@@ -234,13 +233,9 @@ def _is_tty(stream: TextIO) -> bool:
 
 
 def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> None:
-    registry = ToolRegistry.from_config(config)
     status.write(
         "ready",
         model=config.model.model,
-        tools=len(registry.specs()),
-        memory="on" if config.memory.enabled else "off",
-        skills=config.skills.max_loaded,
     )
 
 

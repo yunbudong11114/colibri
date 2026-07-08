@@ -4,10 +4,10 @@ from colibri.console import ConsoleStatusWriter, StatusTranscript
 def test_status_writer_prints_plain_prefixed_lines(capsys):
     status = ConsoleStatusWriter(enabled=True)
 
-    status.write("ready", model="fake", tools=3)
+    status.write("ready", model="fake")
 
     captured = capsys.readouterr()
-    assert captured.err.strip() == "[colibri] ready model=fake tools=3"
+    assert captured.err.strip() == "[colibri] ready model=fake"
     assert captured.out == ""
 
 
