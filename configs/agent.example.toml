@@ -12,6 +12,7 @@ recent_message_limit = 80
 compact_trigger_chars = 64000
 summary_max_chars = 10000
 model_compact = true
+idle_exit_enabled = false
 idle_exit_seconds = 300
 transcript = true
 
@@ -48,6 +49,19 @@ api_key = ""
 endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
 max_results = 10
 timeout_seconds = 10
+
+[gateway]
+enabled_channels = ["weixin"]
+max_sessions = 4
+session_idle_seconds = 600
+
+[channels.weixin]
+enabled = false
+token = ""
+base_url = "https://ilinkai.weixin.qq.com/"
+allow_from = []
+poll_timeout_seconds = 35
+auth_timeout_seconds = 300
 
 [mcp]
 enabled = false

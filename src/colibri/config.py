@@ -34,6 +34,7 @@ class SessionConfig:
     compact_trigger_chars: int = 64000
     summary_max_chars: int = 10000
     model_compact: bool = True
+    idle_exit_enabled: bool = False
     idle_exit_seconds: int = 300
     transcript: bool = True
 
@@ -87,6 +88,28 @@ class WebSearchConfig:
 
 
 @dataclass(frozen=True)
+class GatewayConfig:
+    enabled_channels: list[str] = field(default_factory=lambda: ["weixin"])
+    max_sessions: int = 4
+    session_idle_seconds: int = 600
+
+
+@dataclass(frozen=True)
+class WeixinChannelConfig:
+    enabled: bool = False
+    token: str = ""
+    base_url: str = "https://ilinkai.weixin.qq.com/"
+    allow_from: list[str] = field(default_factory=list)
+    poll_timeout_seconds: int = 35
+    auth_timeout_seconds: int = 300
+
+
+@dataclass(frozen=True)
+class ChannelsConfig:
+    weixin: WeixinChannelConfig = field(default_factory=WeixinChannelConfig)
+
+
+@dataclass(frozen=True)
 class McpConfig:
     enabled: bool = False
     startup: str = "lazy"
@@ -104,6 +127,8 @@ class AgentConfig:
     console: ConsoleConfig = field(default_factory=ConsoleConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    channels: ChannelsConfig = field(default_factory=ChannelsConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
 
     @classmethod
@@ -133,6 +158,8 @@ class AgentConfig:
             console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(data.get("memory", {}), "root")),
             web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
+            gateway=_replace_dataclass(self.gateway, data.get("gateway", {})),
+            channels=_replace_channels(self.channels, data.get("channels", {})),
             mcp=_replace_dataclass(self.mcp, data.get("mcp", {})),
         )
 
@@ -155,3 +182,9 @@ def _path_overrides(overrides: dict[str, Any], key: str) -> dict[str, Any]:
     if key in copied:
         copied[key] = expand_user_path(copied[key])
     return copied
+
+
+def _replace_channels(instance: ChannelsConfig, overrides: dict[str, Any]) -> ChannelsConfig:
+    if not overrides:
+        return instance
+    return replace(instance, weixin=_replace_dataclass(instance.weixin, overrides.get("weixin", {})))

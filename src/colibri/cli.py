@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import json
 import os
 from pathlib import Path
 import select
@@ -12,8 +13,10 @@ import tty
 from typing import Callable, TextIO, Sequence
 
 from colibri.console import ConsoleStatusWriter, StatusTranscript
-from colibri.config import AgentConfig, ConfigError
+from colibri.config import DEFAULT_USER_CONFIG, AgentConfig, ConfigError, expand_user_path
+from colibri.channels.weixin import WeixinChannelError, perform_weixin_auth
 from colibri.diagnostics import build_diagnostics
+from colibri.gateway import GatewayRunner
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.session import AgentSession
@@ -30,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("repl")
     subparsers.add_parser("diagnostics")
+    subparsers.add_parser("gateway")
+
+    auth = subparsers.add_parser("auth")
+    auth_subparsers = auth.add_subparsers(dest="auth_provider", required=True)
+    auth_subparsers.add_parser("weixin")
     return parser
 
 
@@ -51,6 +59,20 @@ def main(
                 print(line)
             return 0
 
+        if args.command == "auth" and args.auth_provider == "weixin":
+            result = perform_weixin_auth(
+                base_url=config.channels.weixin.base_url,
+                timeout_seconds=config.channels.weixin.auth_timeout_seconds,
+            )
+            config_path = _active_config_path(args.config)
+            save_weixin_auth_config(config_path, result.token, result.base_url)
+            print("Weixin auth succeeded.")
+            print(f"user_id={result.user_id}")
+            print(f"account_id={result.account_id}")
+            print(f"base_url={result.base_url}")
+            print(f"Config updated: {config_path}")
+            return 0
+
         transcript = TranscriptWriter.default() if config.session.transcript else None
         session = AgentSession(
             config=config,
@@ -68,6 +90,10 @@ def main(
             if args.command == "repl":
                 return _run_repl(session, status=status, input_func=input_func, monotonic_func=monotonic_func)
 
+            if args.command == "gateway":
+                GatewayRunner(config=config, model=session.model).run()
+                return 0
+
             return 2
         finally:
             session.close()
@@ -76,6 +102,9 @@ def main(
         return 1
     except ModelError as error:
         print(f"Model error: {error}", file=sys.stderr)
+        return 1
+    except WeixinChannelError as error:
+        print(f"Weixin channel error: {error}", file=sys.stderr)
         return 1
 
 
@@ -89,7 +118,7 @@ def _run_repl(
     last_activity = monotonic_func()
     history: list[str] = []
     while True:
-        idle_seconds = session.config.session.idle_exit_seconds
+        idle_seconds = session.config.session.idle_exit_seconds if session.config.session.idle_exit_enabled else 0
         if idle_seconds > 0 and monotonic_func() - last_activity >= idle_seconds:
             status.write("idle_exit", seconds=idle_seconds)
             return 0
@@ -301,6 +330,48 @@ def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> Non
         "ready",
         model=config.model.model,
     )
+
+
+def _active_config_path(path: Path | None) -> Path:
+    return path if path is not None else expand_user_path(DEFAULT_USER_CONFIG)
+
+
+def save_weixin_auth_config(path: Path, token: str, base_url: str) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    section = "\n".join(
+        [
+            "[channels.weixin]",
+            "enabled = true",
+            f"token = {_toml_string(token)}",
+            f"base_url = {_toml_string(base_url)}",
+            "",
+        ]
+    )
+    path.write_text(_replace_toml_section(text, "channels.weixin", section), encoding="utf-8")
+
+
+def _replace_toml_section(text: str, section_name: str, section_text: str) -> str:
+    lines = text.splitlines()
+    header = f"[{section_name}]"
+    start = next((index for index, line in enumerate(lines) if line.strip() == header), None)
+    if start is None:
+        prefix = text.rstrip()
+        return (prefix + "\n\n" if prefix else "") + section_text
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end = index
+            break
+    next_lines = lines[:start] + section_text.rstrip().splitlines() + lines[end:]
+    return "\n".join(next_lines).rstrip() + "\n"
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 if __name__ == "__main__":

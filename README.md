@@ -175,7 +175,32 @@ uv run python -m colibri.cli diagnostics
 
 Diagnostics reports Python/platform details, provider/model, enabled tools, memory and skills paths, project permission file state, RSS when available, and context limits.
 
-`session.idle_exit_seconds` controls REPL idle exit. Set it to `0` or a negative value to disable idle exit.
+`session.idle_exit_enabled` controls REPL idle exit and defaults to `false`. When enabled, `session.idle_exit_seconds` sets the timeout.
+
+## Gateway
+
+Colibri can run channel integrations through the gateway command:
+
+```bash
+uv run python -m colibri.cli gateway
+```
+
+The first gateway channel is Weixin personal account support through Tencent iLink API. Configure it in private config:
+
+```toml
+[gateway]
+enabled_channels = ["weixin"]
+max_sessions = 4
+session_idle_seconds = 600
+
+[channels.weixin]
+enabled = true
+token = "..."
+base_url = "https://ilinkai.weixin.qq.com/"
+allow_from = []
+```
+
+Run `uv run python -m colibri.cli auth weixin` to start the QR login flow and write the token to the active config file. In channel mode, Colibri asks tool permission questions in Weixin text and accepts `y`, `s`, `e`, `p`, or `n` replies.
 
 ## Tool Permissions
 

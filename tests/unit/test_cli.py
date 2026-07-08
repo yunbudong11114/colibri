@@ -70,7 +70,7 @@ def test_repl_exits_on_quit(capsys):
 
 
 def test_repl_exits_on_idle_timeout(capsys):
-    config = AgentConfig.default().with_overrides({"session": {"idle_exit_seconds": 1}})
+    config = AgentConfig.default().with_overrides({"session": {"idle_exit_enabled": True, "idle_exit_seconds": 1}})
     times = iter([0.0, 2.0])
 
     exit_code = main(
@@ -84,6 +84,70 @@ def test_repl_exits_on_idle_timeout(capsys):
 
     assert exit_code == 0
     assert "[colibri] idle_exit seconds=1" in captured.err
+
+
+def test_repl_idle_timeout_is_disabled_by_default(capsys):
+    inputs = iter(["/quit"])
+    times = iter([0.0, 999.0])
+
+    exit_code = main(
+        ["repl"],
+        input_func=lambda prompt: next(inputs),
+        monotonic_func=lambda: next(times),
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "idle_exit" not in captured.err
+
+
+def test_parser_accepts_gateway_command(monkeypatch):
+    called = []
+
+    class FakeGateway:
+        def __init__(self, config, model):
+            called.append((config, model))
+
+        def run(self):
+            called.append("run")
+
+    monkeypatch.setattr("colibri.cli.GatewayRunner", FakeGateway)
+
+    exit_code = main(["gateway"])
+
+    assert exit_code == 0
+    assert called[-1] == "run"
+
+
+def test_auth_weixin_saves_token_without_printing_secret(monkeypatch, tmp_path, capsys):
+    class AuthResult:
+        token = "secret-token"
+        user_id = "user-1"
+        account_id = "account-1"
+        base_url = "https://redirect.weixin.test/"
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[model]
+provider = "fake"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("colibri.cli.perform_weixin_auth", lambda base_url, timeout_seconds: AuthResult())
+
+    exit_code = main(["--config", str(config_path), "auth", "weixin"])
+
+    captured = capsys.readouterr()
+    saved = config_path.read_text(encoding="utf-8")
+    assert exit_code == 0
+    assert "secret-token" not in captured.out
+    assert "Config updated:" in captured.out
+    assert "[channels.weixin]" in saved
+    assert "enabled = true" in saved
+    assert 'token = "secret-token"' in saved
+    assert 'base_url = "https://redirect.weixin.test/"' in saved
 
 
 def test_read_repl_line_reads_unicode_from_plain_stream():

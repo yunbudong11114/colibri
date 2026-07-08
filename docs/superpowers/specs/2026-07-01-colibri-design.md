@@ -191,6 +191,7 @@ max_tool_rounds = 24
 recent_message_limit = 80
 compact_trigger_chars = 64000
 summary_max_chars = 10000
+idle_exit_enabled = false
 idle_exit_seconds = 300
 transcript = true
 
@@ -213,6 +214,19 @@ max_instruction_chars = 8000
 
 [console]
 status = true
+
+[gateway]
+enabled_channels = ["weixin"]
+max_sessions = 4
+session_idle_seconds = 600
+
+[channels.weixin]
+enabled = false
+token = ""
+base_url = "https://ilinkai.weixin.qq.com/"
+allow_from = []
+poll_timeout_seconds = 35
+auth_timeout_seconds = 300
 
 [web_search]
 engine = "baidu"

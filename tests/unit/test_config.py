@@ -15,6 +15,8 @@ def test_default_config_uses_small_device_limits():
     assert config.session.compact_trigger_chars == 64000
     assert config.session.summary_max_chars == 10000
     assert config.session.model_compact
+    assert not config.session.idle_exit_enabled
+    assert config.session.idle_exit_seconds == 300
     assert config.tools.max_result_chars == 16000
     assert "web" in config.tools.enabled
     assert config.skills.max_loaded == 3
@@ -28,6 +30,12 @@ def test_default_config_uses_small_device_limits():
     assert config.web_search.endpoint == "https://qianfan.baidubce.com/v2/ai_search/web_search"
     assert config.web_search.max_results == 10
     assert config.web_search.timeout_seconds == 10
+    assert config.gateway.enabled_channels == ["weixin"]
+    assert config.gateway.max_sessions == 4
+    assert config.gateway.session_idle_seconds == 600
+    assert not config.channels.weixin.enabled
+    assert config.channels.weixin.base_url == "https://ilinkai.weixin.qq.com/"
+    assert config.channels.weixin.allow_from == []
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
     assert not hasattr(config.shell, "allow")
     assert not hasattr(config.files, "confirm_write")
@@ -46,6 +54,8 @@ api_key = "inline-key"
 [session]
 recent_message_limit = 8
 model_compact = false
+idle_exit_enabled = true
+idle_exit_seconds = 12
 
 [files]
 roots = ["~/notes", "/tmp"]
@@ -63,6 +73,18 @@ engine = "baidu"
 api_key = "search-key"
 max_results = 5
 timeout_seconds = 7
+
+[gateway]
+enabled_channels = ["weixin"]
+max_sessions = 2
+session_idle_seconds = 30
+
+[channels.weixin]
+enabled = true
+token = "wx-token"
+allow_from = ["user-1"]
+poll_timeout_seconds = 11
+auth_timeout_seconds = 22
 """.strip(),
         encoding="utf-8",
     )
@@ -75,6 +97,8 @@ timeout_seconds = 7
     assert config.model.timeout_seconds == 45
     assert config.session.recent_message_limit == 8
     assert not config.session.model_compact
+    assert config.session.idle_exit_enabled
+    assert config.session.idle_exit_seconds == 12
     assert config.files.roots[0].name == "notes"
     assert config.files.roots[1] == Path("/tmp")
     assert config.skills.dirs[0].name == "skills"
@@ -84,6 +108,13 @@ timeout_seconds = 7
     assert config.web_search.api_key == "search-key"
     assert config.web_search.max_results == 5
     assert config.web_search.timeout_seconds == 7
+    assert config.gateway.max_sessions == 2
+    assert config.gateway.session_idle_seconds == 30
+    assert config.channels.weixin.enabled
+    assert config.channels.weixin.token == "wx-token"
+    assert config.channels.weixin.allow_from == ["user-1"]
+    assert config.channels.weixin.poll_timeout_seconds == 11
+    assert config.channels.weixin.auth_timeout_seconds == 22
 
 
 def test_load_without_path_reads_user_default_config(monkeypatch, tmp_path):

@@ -70,8 +70,9 @@ Idle timeout applies to interactive `repl`, not to single `ask`.
 
 Rules:
 
-- Use existing `session.idle_exit_seconds`.
-- `idle_exit_seconds <= 0` disables idle exit.
+- Use `session.idle_exit_enabled` plus `session.idle_exit_seconds`.
+- `idle_exit_enabled = false` disables idle exit and is the default.
+- `idle_exit_enabled = true` applies `idle_exit_seconds`.
 - If no user input arrives before the timeout, print `idle_exit` status and exit `0`.
 - Close transcript through the existing `finally` path.
 - Do not pair REPL idle timeout with a `Restart=always` systemd service.
