@@ -1,6 +1,6 @@
 from io import StringIO
 
-from colibri.cli import main, read_repl_line
+from colibri.cli import ReplLineEditor, main, read_repl_line
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
 
@@ -84,6 +84,22 @@ def test_read_repl_line_reads_unicode_from_plain_stream():
 
     assert text == "我有我"
     assert stdout.getvalue() == "colibri> "
+
+
+def test_repl_line_editor_backspace_removes_cjk_and_redraws_line():
+    stdout = StringIO()
+    editor = ReplLineEditor("colibri> ", stdout)
+
+    editor.start()
+    editor.feed_text("尿尿是豆阿斯顿")
+    editor.backspace()
+    editor.backspace()
+    editor.feed_text("斯顿")
+
+    assert editor.text == "尿尿是豆阿斯顿"
+    output = stdout.getvalue()
+    assert "\r\x1b[2Kcolibri> 尿尿是豆阿斯" in output
+    assert output.endswith("\r\x1b[2Kcolibri> 尿尿是豆阿斯顿")
 
 
 def test_diagnostics_prints_key_value_lines(capsys):

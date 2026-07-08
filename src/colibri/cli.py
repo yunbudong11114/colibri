@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 from pathlib import Path
 import select
 from time import monotonic
 import sys
+import termios
+import tty
 from typing import Callable, TextIO, Sequence
 
 from colibri.console import ConsoleStatusWriter, StatusTranscript
@@ -124,6 +127,8 @@ def read_repl_line(
     stdin: TextIO = sys.stdin,
     stdout: TextIO = sys.stdout,
 ) -> str | None:
+    if _is_tty(stdin):
+        return _read_repl_line_tty(prompt, timeout_seconds, stdin, stdout)
     stdout.write(prompt)
     stdout.flush()
     if timeout_seconds > 0 and _is_selectable(stdin):
@@ -136,12 +141,91 @@ def read_repl_line(
     return line.rstrip("\n")
 
 
+class ReplLineEditor:
+    def __init__(self, prompt: str, stdout: TextIO):
+        self.prompt = prompt
+        self.stdout = stdout
+        self._chars: list[str] = []
+
+    @property
+    def text(self) -> str:
+        return "".join(self._chars)
+
+    def start(self) -> None:
+        self.stdout.write(self.prompt)
+        self.stdout.flush()
+
+    def feed_text(self, text: str) -> None:
+        self._chars.extend(text)
+        self.redraw()
+
+    def backspace(self) -> None:
+        if self._chars:
+            self._chars.pop()
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.stdout.write(f"\r\x1b[2K{self.prompt}{self.text}")
+        self.stdout.flush()
+
+
+def _read_repl_line_tty(
+    prompt: str,
+    timeout_seconds: float,
+    stdin: TextIO,
+    stdout: TextIO,
+) -> str | None:
+    fd = stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    editor = ReplLineEditor(prompt, stdout)
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        tty.setraw(fd)
+        editor.start()
+        while True:
+            if timeout_seconds > 0:
+                ready, _write_ready, _error_ready = select.select([stdin], [], [], timeout_seconds)
+                if not ready:
+                    stdout.write("\n")
+                    stdout.flush()
+                    return None
+            data = stdin.buffer.read(1)
+            if data == b"":
+                raise EOFError
+            if data in {b"\r", b"\n"}:
+                stdout.write("\n")
+                stdout.flush()
+                return editor.text
+            if data == b"\x03":
+                raise KeyboardInterrupt
+            if data == b"\x04":
+                if not editor.text:
+                    raise EOFError
+                continue
+            if data in {b"\x7f", b"\b"}:
+                decoder.reset()
+                editor.backspace()
+                continue
+            text = decoder.decode(data, final=False)
+            if text:
+                editor.feed_text(text)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+
+
 def _is_selectable(stream: TextIO) -> bool:
     try:
         stream.fileno()
     except (OSError, ValueError, AttributeError):
         return False
     return True
+
+
+def _is_tty(stream: TextIO) -> bool:
+    try:
+        return stream.isatty()
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> None:

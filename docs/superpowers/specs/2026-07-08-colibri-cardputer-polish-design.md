@@ -80,8 +80,9 @@ Implementation approach:
 
 - Add a timeout-aware input helper for REPL.
 - Prefer `select.select()` on POSIX stdin when available.
-- Use a plain prompt write plus `stdin.readline()` instead of Python's built-in `input()`.
-- Avoid readline/libedit by default because CJK input and deletion can leave ghost characters or submit an empty buffer on some macOS terminals.
+- On interactive TTYs, use a tiny raw-mode line editor that reads UTF-8 characters, handles backspace, and redraws the full prompt line.
+- Clear and redraw the whole prompt line on edits so wide CJK characters cannot leave terminal ghost cells.
+- Avoid Python's built-in `input()` and readline/libedit by default because CJK input and deletion can leave ghost characters or submit an empty buffer on some macOS terminals.
 - Fall back to blocking `stdin.readline()` if the stream is not selectable.
 - Keep tests isolated by allowing a fake input function.
 
