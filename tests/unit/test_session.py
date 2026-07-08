@@ -3,7 +3,7 @@ from colibri.messages import ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
 from colibri.session import AgentSession
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
-from colibri.tools.permissions import PermissionPolicy, PermissionRequest
+from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
 
 
@@ -200,7 +200,27 @@ def test_denied_tool_call_adds_result_without_running_tool(tmp_path):
     assert response.text == "final answer"
     assert tool.calls == 0
     assert any(
-        message.role == "tool" and message.content == "permission_denied: Tool call denied"
+        message.role == "tool" and message.content == "permission_denied: User denied counting.tool"
+        for message in session.messages
+    )
+
+
+def test_session_returns_user_denial_to_model(tmp_path):
+    config = AgentConfig.default()
+    prompter = FakePrompter(reply="n")
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("shell.run", {"command": "pwd"}),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        permission_policy=policy,
+    )
+
+    response = session.submit("where am i")
+
+    assert "denied" in response.text.lower()
+    assert any(
+        message.role == "tool" and "User denied shell.run: pwd" in message.content
         for message in session.messages
     )
 
@@ -229,6 +249,29 @@ def test_session_writes_transcript_events(tmp_path):
         "tool_result",
         "assistant_message",
     ]
+
+
+def test_session_logs_dynamic_permission_payload(tmp_path):
+    config = AgentConfig.default()
+    transcript = MemoryTranscript()
+    prompter = FakePrompter(reply="y")
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("shell.run", {"command": "pwd"}),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        permission_policy=policy,
+        transcript=transcript,
+    )
+
+    session.submit("where am i")
+
+    event = [payload for name, payload in transcript.events if name == "permission_decision"][0]
+    assert event["tool_name"] == "shell.run"
+    assert event["subject_kind"] == "shell"
+    assert event["scope"] == "once"
+    assert event["allowed"] is True
+    assert event["shell_command"] == "pwd"
 
 
 def test_session_writes_round_limit_event(tmp_path):
@@ -272,7 +315,10 @@ def test_memory_write_uses_permission_confirmation(tmp_path):
     response = session.submit("remember device")
 
     assert response.text == "final answer"
-    assert prompter.requests == [PermissionRequest("memory.write", {"topic": "devices", "text": "Router upstairs"}, False)]
+    assert len(prompter.requests) == 1
+    assert prompter.requests[0].tool_name == "memory.write"
+    assert prompter.requests[0].arguments == {"topic": "devices", "text": "Router upstairs"}
+    assert prompter.requests[0].read_only is False
     assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "- Router upstairs\n"
 
 
@@ -305,9 +351,10 @@ read_only = false
     response = session.submit("run release render")
 
     assert response.text == "final answer"
-    assert prompter.requests == [
-        PermissionRequest("skill.run", {"skill": "release", "command": "render"}, False)
-    ]
+    assert len(prompter.requests) == 1
+    assert prompter.requests[0].tool_name == "skill.run"
+    assert prompter.requests[0].arguments == {"skill": "release", "command": "render"}
+    assert prompter.requests[0].read_only is False
 
 
 def test_session_injects_recalled_memory_without_persisting_it(tmp_path):
@@ -404,6 +451,23 @@ class SingleToolCallModel:
                 tool_calls=[ToolCall(id="call_1", name=self.tool_name, arguments={})],
             )
         return ModelResponse(text="final answer")
+
+
+class ScriptedToolThenFinalModel:
+    def __init__(self, tool_name: str, arguments: dict):
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text="",
+                tool_calls=[ToolCall(id="call_1", name=self.tool_name, arguments=self.arguments)],
+            )
+        last_tool = [message.content for message in messages if message.role == "tool"][-1]
+        return ModelResponse(text=f"final: {last_tool}")
 
 
 class ScriptedMemoryWriteModel:

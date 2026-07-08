@@ -15,7 +15,7 @@ from colibri.context import (
     summary_context,
 )
 from colibri.memory import MemoryRecall
-from colibri.messages import AgentResponse, Message, ModelLimits
+from colibri.messages import AgentResponse, Message, ModelLimits, ToolCall
 from colibri.model.base import ModelClient
 from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext, ToolResult
@@ -50,7 +50,7 @@ class AgentSession:
 
         registry = self.tools or ToolRegistry.from_config(self.config)
         if self.permission_policy is None:
-            self.permission_policy = PermissionPolicy.from_config(self.config)
+            self.permission_policy = PermissionPolicy.from_config(self.config, cwd=registry.cwd)
         policy = self.permission_policy
         context = ToolContext(config=self.config, cwd=registry.cwd)
         memory_result = MemoryRecall(self.config).recall(bounded_text, list(self.messages))
@@ -107,17 +107,25 @@ class AgentSession:
                 if tool is None:
                     result = registry.run(call, context)
                 else:
-                    allowed, decision = policy.decide(tool, call.arguments)
+                    decision = policy.decide(tool, call.arguments, context)
                     self._write_transcript(
                         "permission_decision",
-                        {"tool_name": call.name, "decision": decision, "allowed": allowed},
+                        {
+                            "tool_name": call.name,
+                            "subject_kind": _permission_subject_kind(call),
+                            "decision": decision.decision,
+                            "scope": decision.scope,
+                            "allowed": decision.allowed,
+                            "reason": decision.reason,
+                            "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
+                        },
                     )
-                    if allowed:
+                    if decision.allowed:
                         result = tool.run(call.arguments, context)
                     else:
                         result = ToolResult(
                             ok=False,
-                            text="Tool call denied",
+                            text=_denied_tool_text(call),
                             error_type="permission_denied",
                         )
                 self._write_transcript(
@@ -237,3 +245,15 @@ class AgentSession:
                 },
             )
         return budgeted
+
+
+def _permission_subject_kind(call: ToolCall) -> str:
+    return "shell" if call.name == "shell.run" else "tool"
+
+
+def _denied_tool_text(call: ToolCall) -> str:
+    if call.name == "shell.run":
+        command = call.arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            return f"User denied shell.run: {command.strip()}"
+    return f"User denied {call.name}"

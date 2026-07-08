@@ -3,6 +3,7 @@ from pathlib import Path
 from colibri.config import AgentConfig
 from colibri.messages import ToolCall
 from colibri.tools.base import ToolContext
+from colibri.tools.builtin import ShellRunTool
 from colibri.tools.registry import ToolRegistry
 
 
@@ -106,6 +107,18 @@ def test_shell_run_executes_allowlisted_command(tmp_path):
 
     assert result.ok
     assert result.text.strip() == "hi"
+
+
+def test_shell_run_does_not_require_allowlist_after_permission_phase(tmp_path):
+    config = AgentConfig.default().with_overrides(
+        {"shell": {"allow": [], "deny": ["rm", "sudo"]}, "tools": {"max_shell_seconds": 5}}
+    )
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = ShellRunTool().run({"command": "pwd"}, context)
+
+    assert result.ok
+    assert str(tmp_path) in result.text
 
 
 def test_shell_run_rejects_denied_command(tmp_path):

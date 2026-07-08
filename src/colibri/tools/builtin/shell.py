@@ -10,7 +10,7 @@ from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_tex
 class ShellRunTool:
     spec = ToolSpec(
         name="shell.run",
-        description="Run an allowlisted read-oriented shell command.",
+        description="Run a shell command after Colibri permission approval.",
         input_schema={
             "type": "object",
             "properties": {"command": {"type": "string"}},
@@ -33,8 +33,6 @@ class ShellRunTool:
         executable = argv[0]
         if executable in context.config.shell.deny:
             return ToolResult(ok=False, text="Command is denied", error_type="permission_denied")
-        if executable not in context.config.shell.allow and command not in context.config.shell.allow:
-            return ToolResult(ok=False, text="Command is not allowlisted", error_type="permission_denied")
 
         try:
             completed = subprocess.run(
