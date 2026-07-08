@@ -31,6 +31,7 @@ Current implementation provides:
 - Character-budgeted model input using `session.compact_trigger_chars`.
 - Local filesystem skills with progressive disclosure.
 - `skill.run` for configured local skill commands.
+- `web.search` for permissioned web search through a configured search provider.
 - SSH/serial-friendly console status lines.
 - REPL idle timeout.
 - Low-memory diagnostics command.
@@ -55,20 +56,20 @@ Colibri defaults to the deterministic fake model:
 uv run python -m colibri.cli ask "hello"
 ```
 
-To use an OpenAI-compatible chat completions API, copy `configs/openai.example.toml`, set `OPENAI_API_KEY` in the environment, and pass the config:
+To use an OpenAI-compatible chat completions API, copy `configs/openai.example.toml`, set `model.api_key` in your private config, or set `COLIBRI_API_KEY` in the environment:
 
 ```bash
 uv run python -m colibri.cli --config configs/openai.example.toml ask "say hi in five words"
 ```
 
-For the Qunhe GLM endpoint, set `COLIBRI_GLM_API_KEY` and use `configs/glm.example.toml`:
+For the Qunhe GLM endpoint, use `configs/glm.example.toml`:
 
 ```bash
-export COLIBRI_GLM_API_KEY="..."
+export COLIBRI_API_KEY="..."
 uv run python -m colibri.cli --config configs/glm.example.toml ask "用中文说一句你好"
 ```
 
-The runtime does not read API keys from config files. It reads the environment variable named by `model.api_key_env`.
+`model.api_key` takes precedence. If it is empty, Colibri reads `COLIBRI_API_KEY`.
 
 ## Configuration
 
@@ -87,6 +88,7 @@ When the configured model returns tool calls, Colibri can execute a small built-
 - `files.list`: list direct children under the startup workspace, configured `files.roots`, or an approved external directory.
 - `files.read`: read UTF-8 text files under the startup workspace, configured `files.roots`, or an approved external directory.
 - `shell.run`: run shell commands after Colibri permission approval.
+- `web.search`: search the web using the configured search engine. Baidu AI Search is the default provider.
 - `memory.list`: list Markdown memory topics.
 - `memory.read`: read a memory topic.
 - `memory.search`: search the memory index and topic files by keyword.

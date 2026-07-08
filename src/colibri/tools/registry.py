@@ -14,6 +14,7 @@ from colibri.tools.builtin import (
     MemorySearchTool,
     MemoryWriteTool,
     ShellRunTool,
+    WebSearchTool,
 )
 
 
@@ -32,6 +33,8 @@ class ToolRegistry:
             tools.extend([MemoryListTool(), MemoryReadTool(), MemorySearchTool(), MemoryWriteTool()])
         if "shell" in enabled:
             tools.append(ShellRunTool())
+        if "web" in enabled:
+            tools.append(WebSearchTool())
         if "skills" in enabled:
             tools.append(SkillRunTool())
         return cls(tools=tools, cwd=cwd)

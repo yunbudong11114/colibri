@@ -231,7 +231,7 @@ uv run python -m colibri.cli ask "hello colibri"
 Optional real model validation remains manual because it needs a user-provided API key:
 
 ```bash
-export COLIBRI_GLM_API_KEY="..."
+export COLIBRI_API_KEY="..."
 uv run python -m colibri.cli --config configs/glm.example.toml ask "list files in /tmp if you need a tool"
 ```
 

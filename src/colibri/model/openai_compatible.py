@@ -19,9 +19,9 @@ class OpenAICompatibleModelClient:
 
     @classmethod
     def from_config(cls, config: ModelConfig) -> "OpenAICompatibleModelClient":
-        api_key = os.environ.get(config.api_key_env, "")
+        api_key = config.api_key or os.environ.get("COLIBRI_API_KEY", "")
         if not api_key:
-            raise ConfigError(f"Missing API key environment variable: {config.api_key_env}")
+            raise ConfigError("Missing API key: set model.api_key or COLIBRI_API_KEY")
         return cls(base_url=config.base_url.rstrip("/"), model=config.model, api_key=api_key)
 
     def complete(

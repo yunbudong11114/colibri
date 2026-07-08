@@ -8,6 +8,7 @@ def test_default_config_uses_small_device_limits():
 
     assert config.model.provider == "fake"
     assert config.model.model == "fake-colibri-model"
+    assert config.model.api_key == ""
     assert config.model.max_output_tokens == 8192
     assert config.session.max_tool_rounds == 24
     assert config.session.recent_message_limit == 80
@@ -15,12 +16,18 @@ def test_default_config_uses_small_device_limits():
     assert config.session.summary_max_chars == 10000
     assert config.session.model_compact
     assert config.tools.max_result_chars == 16000
+    assert "web" in config.tools.enabled
     assert config.skills.max_loaded == 3
     assert config.skills.max_instruction_chars == 8000
     assert config.memory.max_search_results == 5
     assert config.memory.max_recall_topics == 3
     assert config.memory.max_recall_chars == 6000
     assert config.console.status
+    assert config.web_search.engine == "baidu"
+    assert config.web_search.api_key == ""
+    assert config.web_search.endpoint == "https://qianfan.baidubce.com/v2/ai_search/web_search"
+    assert config.web_search.max_results == 10
+    assert config.web_search.timeout_seconds == 10
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
     assert not hasattr(config.shell, "allow")
     assert not hasattr(config.files, "confirm_write")
@@ -34,6 +41,7 @@ def test_load_config_overrides_nested_values(tmp_path):
 provider = "openai_compatible"
 model = "gpt-4.1-mini"
 timeout_seconds = 45
+api_key = "inline-key"
 
 [session]
 recent_message_limit = 8
@@ -49,6 +57,12 @@ max_instruction_chars = 1234
 
 [console]
 status = false
+
+[web_search]
+engine = "baidu"
+api_key = "search-key"
+max_results = 5
+timeout_seconds = 7
 """.strip(),
         encoding="utf-8",
     )
@@ -57,6 +71,7 @@ status = false
 
     assert config.model.provider == "openai_compatible"
     assert config.model.model == "gpt-4.1-mini"
+    assert config.model.api_key == "inline-key"
     assert config.model.timeout_seconds == 45
     assert config.session.recent_message_limit == 8
     assert not config.session.model_compact
@@ -66,6 +81,9 @@ status = false
     assert config.skills.max_loaded == 2
     assert config.skills.max_instruction_chars == 1234
     assert not config.console.status
+    assert config.web_search.api_key == "search-key"
+    assert config.web_search.max_results == 5
+    assert config.web_search.timeout_seconds == 7
 
 
 def test_load_without_path_reads_user_default_config(monkeypatch, tmp_path):

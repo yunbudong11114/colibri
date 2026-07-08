@@ -182,7 +182,7 @@ Example:
 provider = "openai_compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4.1-mini"
-api_key_env = "OPENAI_API_KEY"
+api_key = ""
 timeout_seconds = 60
 max_output_tokens = 8192
 
@@ -195,7 +195,7 @@ idle_exit_seconds = 300
 transcript = true
 
 [tools]
-enabled = ["shell", "files", "http", "memory", "skills", "mcp"]
+enabled = ["shell", "files", "web", "memory", "skills", "mcp"]
 default_permission = "allow_read_confirm_write"
 max_result_chars = 16000
 max_shell_seconds = 30
@@ -213,6 +213,13 @@ max_instruction_chars = 8000
 
 [console]
 status = true
+
+[web_search]
+engine = "baidu"
+api_key = ""
+endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+max_results = 10
+timeout_seconds = 10
 
 [mcp]
 enabled = true

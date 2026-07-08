@@ -47,7 +47,7 @@ Reuse the existing `ModelConfig` fields:
 provider: str = "fake"
 base_url: str = "https://api.openai.com/v1"
 model: str = "fake-colibri-model"
-api_key_env: str = "OPENAI_API_KEY"
+api_key: str = ""
 timeout_seconds: int = 60
 max_output_tokens: int = 1024
 ```
@@ -60,9 +60,10 @@ Provider behavior:
 
 API key behavior:
 
-- Read the key from `os.environ[config.model.api_key_env]`.
+- Prefer `config.model.api_key`.
+- If it is empty, read `COLIBRI_API_KEY`.
 - If the environment variable is missing or empty, fail before creating the HTTP request.
-- Error text should name the missing environment variable but must not include secret values.
+- Error text should name `model.api_key` and `COLIBRI_API_KEY` but must not include secret values.
 
 Example config:
 
@@ -71,7 +72,7 @@ Example config:
 provider = "openai_compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-5.5"
-api_key_env = "OPENAI_API_KEY"
+api_key = ""
 timeout_seconds = 60
 max_output_tokens = 1024
 ```
@@ -246,7 +247,7 @@ PYTHONPATH=src python -m colibri.cli ask "hello"
 Optional real API smoke test, only when the user provides an API key in the environment:
 
 ```bash
-PYTHONPATH=src OPENAI_API_KEY=... python -m colibri.cli --config configs/openai.example.toml ask "say hi in five words"
+PYTHONPATH=src COLIBRI_API_KEY=... python -m colibri.cli --config configs/openai.example.toml ask "say hi in five words"
 ```
 
 The real API smoke test should not be required in CI or routine local validation.

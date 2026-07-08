@@ -2,7 +2,7 @@
 provider = "openai_compatible"
 base_url = "https://oneapi.qunhequnhe.com/v1"
 model = "ZHIPU/GLM-5.2"
-api_key_env = "COLIBRI_GLM_API_KEY"
+api_key = ""
 timeout_seconds = 60
 max_output_tokens = 8192
 
@@ -11,3 +11,10 @@ max_tool_rounds = 24
 recent_message_limit = 80
 compact_trigger_chars = 64000
 model_compact = true
+
+[web_search]
+engine = "baidu"
+api_key = ""
+endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+max_results = 10
+timeout_seconds = 10

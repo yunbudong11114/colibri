@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from colibri.config import AgentConfig
@@ -33,6 +34,7 @@ def test_registry_exposes_enabled_builtin_tool_specs(tmp_path):
         "memory.search",
         "memory.write",
         "skill.run",
+        "web.search",
     }.issubset(names)
 
 
@@ -144,6 +146,82 @@ def test_shell_run_times_out_slow_command(tmp_path):
 
     assert not result.ok
     assert result.error_type == "timeout"
+
+
+def test_web_search_builds_baidu_request_and_formats_results(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "references": [
+                        {
+                            "title": "杭州天气",
+                            "url": "https://example.test/weather",
+                            "snippet": "drop this bulky field",
+                            "summary": "晴",
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.delenv("DUMATE_SESSION_ID", raising=False)
+    monkeypatch.delenv("DUMATE_SCHEDULER_URL", raising=False)
+    monkeypatch.setattr("colibri.tools.builtin.web.urllib.request.urlopen", fake_urlopen)
+    config = make_config(
+        tmp_path,
+        web_search={
+            "api_key": "search-key",
+            "max_results": 7,
+            "timeout_seconds": 3,
+        },
+        tools={"max_result_chars": 1000, "max_shell_seconds": 1},
+    )
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(id="1", name="web.search", arguments={"query": "杭州天气", "count": 2, "freshness": "pd"}),
+        context,
+    )
+
+    assert result.ok
+    assert captured["url"] == "https://qianfan.baidubce.com/v2/ai_search/web_search"
+    assert captured["headers"]["authorization"] == "Bearer search-key"
+    assert captured["headers"]["x-appbuilder-from"] == "openclaw"
+    assert captured["body"]["messages"] == [{"content": "杭州天气", "role": "user"}]
+    assert captured["body"]["resource_type_filter"] == [{"type": "web", "top_k": 2}]
+    assert "range" in captured["body"]["search_filter"]
+    assert captured["timeout"] == 3
+    assert "杭州天气" in result.text
+    assert "snippet" not in result.text
+
+
+def test_web_search_requires_configured_baidu_api_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("DUMATE_SESSION_ID", raising=False)
+    monkeypatch.delenv("DUMATE_SCHEDULER_URL", raising=False)
+    config = make_config(tmp_path, web_search={"api_key": ""})
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(ToolCall(id="1", name="web.search", arguments={"query": "hello"}), context)
+
+    assert not result.ok
+    assert result.error_type == "invalid_config"
 
 
 def test_memory_list_returns_sorted_topic_names(tmp_path):

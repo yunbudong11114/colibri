@@ -18,11 +18,29 @@ def make_client() -> OpenAICompatibleModelClient:
 
 
 def test_from_config_requires_api_key(monkeypatch):
-    monkeypatch.delenv("COLIBRI_MISSING_KEY", raising=False)
-    config = ModelConfig(provider="openai_compatible", api_key_env="COLIBRI_MISSING_KEY")
+    monkeypatch.delenv("COLIBRI_API_KEY", raising=False)
+    config = ModelConfig(provider="openai_compatible")
 
-    with pytest.raises(ConfigError, match="COLIBRI_MISSING_KEY"):
+    with pytest.raises(ConfigError, match="model.api_key or COLIBRI_API_KEY"):
         OpenAICompatibleModelClient.from_config(config)
+
+
+def test_from_config_prefers_config_api_key(monkeypatch):
+    monkeypatch.setenv("COLIBRI_API_KEY", "env-key")
+    config = ModelConfig(provider="openai_compatible", api_key="config-key")
+
+    client = OpenAICompatibleModelClient.from_config(config)
+
+    assert client.api_key == "config-key"
+
+
+def test_from_config_falls_back_to_colibri_api_key(monkeypatch):
+    monkeypatch.setenv("COLIBRI_API_KEY", "env-key")
+    config = ModelConfig(provider="openai_compatible")
+
+    client = OpenAICompatibleModelClient.from_config(config)
+
+    assert client.api_key == "env-key"
 
 
 def test_complete_builds_chat_completion_request(monkeypatch):

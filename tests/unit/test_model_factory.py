@@ -13,12 +13,12 @@ def test_factory_returns_fake_model_for_default_provider():
 
 
 def test_factory_returns_openai_compatible_model(monkeypatch):
-    monkeypatch.setenv("COLIBRI_TEST_API_KEY", "test-key")
+    monkeypatch.delenv("COLIBRI_API_KEY", raising=False)
     config = ModelConfig(
         provider="openai_compatible",
         base_url="https://api.example.test/v1",
         model="test-model",
-        api_key_env="COLIBRI_TEST_API_KEY",
+        api_key="test-key",
     )
 
     client = build_model_client(config)
@@ -26,6 +26,7 @@ def test_factory_returns_openai_compatible_model(monkeypatch):
     assert isinstance(client, OpenAICompatibleModelClient)
     assert client.base_url == "https://api.example.test/v1"
     assert client.model == "test-model"
+    assert client.api_key == "test-key"
 
 
 def test_factory_rejects_unknown_provider():

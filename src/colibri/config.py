@@ -22,7 +22,7 @@ class ModelConfig:
     provider: str = "fake"
     base_url: str = "https://api.openai.com/v1"
     model: str = "fake-colibri-model"
-    api_key_env: str = "OPENAI_API_KEY"
+    api_key: str = ""
     timeout_seconds: int = 60
     max_output_tokens: int = 8192
 
@@ -40,7 +40,7 @@ class SessionConfig:
 
 @dataclass(frozen=True)
 class ToolsConfig:
-    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "http", "memory", "skills", "mcp"])
+    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "web", "memory", "skills", "mcp"])
     default_permission: str = "allow_read_confirm_write"
     max_result_chars: int = 16000
     max_shell_seconds: int = 30
@@ -78,6 +78,15 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class WebSearchConfig:
+    engine: str = "baidu"
+    api_key: str = ""
+    endpoint: str = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+    max_results: int = 10
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class McpConfig:
     enabled: bool = False
     startup: str = "lazy"
@@ -94,6 +103,7 @@ class AgentConfig:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     console: ConsoleConfig = field(default_factory=ConsoleConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
 
     @classmethod
@@ -122,6 +132,7 @@ class AgentConfig:
             skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
             console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(data.get("memory", {}), "root")),
+            web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
             mcp=_replace_dataclass(self.mcp, data.get("mcp", {})),
         )
 
