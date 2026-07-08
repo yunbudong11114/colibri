@@ -2,7 +2,7 @@ from io import StringIO
 
 import pytest
 
-from colibri.cli import ReplLineEditor, main, read_escape_sequence, read_repl_line, read_tty_byte
+from colibri.cli import ReplLineEditor, main, read_escape_sequence, read_repl_line, read_tty_byte, write_raw_tty_newline
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
 
@@ -159,6 +159,14 @@ def test_read_escape_sequence_consumes_arrow_key_bytes(monkeypatch):
     monkeypatch.setattr("colibri.cli.read_tty_byte", fake_read)
 
     assert read_escape_sequence(12) == b"\x1b[A"
+
+
+def test_write_raw_tty_newline_returns_cursor_to_column_zero():
+    stdout = StringIO()
+
+    write_raw_tty_newline(stdout)
+
+    assert stdout.getvalue() == "\r\n"
 
 
 def test_diagnostics_prints_key_value_lines(capsys):

@@ -84,6 +84,7 @@ Implementation approach:
 - Clear and redraw the whole prompt line on edits so wide CJK characters cannot leave terminal ghost cells.
 - Treat terminal escape sequences as controls, never as printable input. In particular, consume arrow-key sequences such as `ESC [ A` and `ESC [ B` so the terminal does not interpret replayed escape bytes as cursor movement during redraw.
 - Keep a small in-memory REPL history for the current process. Up/down arrows navigate submitted non-empty prompts; history is not persisted to disk in this milestone.
+- When completing a raw TTY input line, write `\r\n` rather than only `\n`. Raw mode disables normal output newline translation on some terminals, so a bare newline can leave the cursor under the end of the user's prompt and make status lines such as `[colibri] thinking` appear indented.
 - Avoid Python's built-in `input()` and readline/libedit by default because CJK input and deletion can leave ghost characters or submit an empty buffer on some macOS terminals.
 - In raw TTY mode, read bytes with unbuffered `os.read(fd, 1)` after `select.select()` on the same fd. Do not mix fd-level readiness with `TextIO` or `BufferedReader` reads, because Python buffering can hold the remaining bytes of a UTF-8 CJK character and delay display until the next key press.
 - Fall back to blocking `stdin.readline()` if the stream is not selectable.

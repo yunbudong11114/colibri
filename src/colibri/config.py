@@ -48,14 +48,12 @@ class ToolsConfig:
 
 @dataclass(frozen=True)
 class ShellConfig:
-    allow: list[str] = field(default_factory=lambda: ["ls", "cat", "sed", "rg", "python", "git status"])
     deny: list[str] = field(default_factory=lambda: ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"])
 
 
 @dataclass(frozen=True)
 class FilesConfig:
     roots: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri"), Path("/tmp")])
-    confirm_write: bool = True
 
 
 @dataclass(frozen=True)

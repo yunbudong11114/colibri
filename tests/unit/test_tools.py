@@ -12,7 +12,7 @@ def make_config(tmp_path: Path, **overrides) -> AgentConfig:
         "files": {"roots": [str(tmp_path)]},
         "memory": {"root": str(tmp_path / "memory"), "max_search_results": 2},
         "tools": {"max_result_chars": 40, "max_shell_seconds": 1},
-        "shell": {"allow": ["python"], "deny": ["rm"]},
+        "shell": {"deny": ["rm"]},
     }
     data.update(overrides)
     return AgentConfig.default().with_overrides(data)
@@ -95,7 +95,7 @@ def test_files_read_reads_allowed_file_and_truncates(tmp_path):
     assert len(result.text) <= config.tools.max_result_chars
 
 
-def test_shell_run_executes_allowlisted_command(tmp_path):
+def test_shell_run_executes_command_after_permission_phase(tmp_path):
     config = make_config(tmp_path)
     registry = ToolRegistry.from_config(config, cwd=tmp_path)
     context = ToolContext(config=config, cwd=tmp_path)
@@ -111,7 +111,7 @@ def test_shell_run_executes_allowlisted_command(tmp_path):
 
 def test_shell_run_does_not_require_allowlist_after_permission_phase(tmp_path):
     config = AgentConfig.default().with_overrides(
-        {"shell": {"allow": [], "deny": ["rm", "sudo"]}, "tools": {"max_shell_seconds": 5}}
+        {"shell": {"deny": ["rm", "sudo"]}, "tools": {"max_shell_seconds": 5}}
     )
     context = ToolContext(config=config, cwd=tmp_path)
 

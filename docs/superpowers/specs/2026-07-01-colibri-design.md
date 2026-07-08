@@ -201,12 +201,10 @@ max_result_chars = 16000
 max_shell_seconds = 30
 
 [shell]
-allow = ["ls", "cat", "sed", "rg", "python", "pipx", "git status"]
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 [files]
 roots = ["~/notes", "~/.colibri", "/tmp"]
-confirm_write = true
 
 [skills]
 dirs = ["~/.colibri/skills"]

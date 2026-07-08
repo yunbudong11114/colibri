@@ -219,15 +219,13 @@ def _read_repl_line_tty(
             if timeout_seconds > 0:
                 ready, _write_ready, _error_ready = select.select([stdin], [], [], timeout_seconds)
                 if not ready:
-                    stdout.write("\n")
-                    stdout.flush()
+                    write_raw_tty_newline(stdout)
                     return None
             data = read_tty_byte(fd)
             if data == b"":
                 raise EOFError
             if data in {b"\r", b"\n"}:
-                stdout.write("\n")
-                stdout.flush()
+                write_raw_tty_newline(stdout)
                 return editor.text
             if data == b"\x03":
                 raise KeyboardInterrupt
@@ -260,6 +258,11 @@ def _is_selectable(stream: TextIO) -> bool:
 
 def read_tty_byte(fd: int) -> bytes:
     return os.read(fd, 1)
+
+
+def write_raw_tty_newline(stdout: TextIO) -> None:
+    stdout.write("\r\n")
+    stdout.flush()
 
 
 def read_escape_sequence(fd: int) -> bytes:

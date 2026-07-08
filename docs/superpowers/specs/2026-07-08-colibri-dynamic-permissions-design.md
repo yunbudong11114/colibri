@@ -120,13 +120,12 @@ The model can then choose another tool, ask the user for information, or explain
 
 ## 6. Shell Policy Changes
 
-`shell.allow` should stop acting as a hard allowlist that blocks commands inside `ShellRunTool`.
+`shell.allow` is removed from the current configuration model. Colibri should no longer keep a legacy shell allowlist field because dynamic permissions now prompt for ungranted commands.
 
 New shell behavior:
 
 - `shell.run` remains visible when `"shell"` is enabled.
 - `ShellRunTool` validates the command string, parses it safely with `shlex.split()`, runs the command with `subprocess.run(argv, shell=False)`, enforces timeout, and bounds output.
-- `ShellRunTool` does not reject an otherwise valid command only because it is not in `shell.allow`.
 - `shell.deny` remains a hard-deny list for dangerous executables.
 - Hard-denied commands are blocked before prompting.
 
@@ -312,7 +311,7 @@ Required tests:
 
 ## 14. Migration Notes
 
-Existing configs can keep `shell.allow`, but after this milestone it should be treated as legacy or as optional pre-granted session defaults, not as a hard runtime allowlist.
+Existing configs should remove `shell.allow`; Colibri does not support it as a legacy compatibility field.
 
 `shell.deny` remains active.
 

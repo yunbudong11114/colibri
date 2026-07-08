@@ -85,7 +85,7 @@ class OpenAICompatibleModelClient:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
-            return self._perform_request(error)
+            return self._raise_http_error(error)
         except urllib.error.URLError as error:
             raise ModelError(f"Model request failed: {error.reason}") from error
         except TimeoutError as error:
@@ -93,7 +93,7 @@ class OpenAICompatibleModelClient:
         except json.JSONDecodeError as error:
             raise ModelError("Model response was not valid JSON") from error
 
-    def _perform_request(self, error: urllib.error.HTTPError) -> dict:
+    def _raise_http_error(self, error: urllib.error.HTTPError) -> dict:
         body = error.read().decode("utf-8", errors="replace")
         compact = body[:500]
         raise ModelError(f"Model request failed with HTTP {error.code}: {compact}") from error

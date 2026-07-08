@@ -206,7 +206,7 @@ def test_request_json_turns_http_error_into_model_error():
     )
 
     with pytest.raises(ModelError, match="HTTP 401"):
-        client._perform_request(error)
+        client._raise_http_error(error)
 
 
 class FakeErrorBody:

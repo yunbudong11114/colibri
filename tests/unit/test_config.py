@@ -22,6 +22,8 @@ def test_default_config_uses_small_device_limits():
     assert config.memory.max_recall_chars == 6000
     assert config.console.status
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
+    assert not hasattr(config.shell, "allow")
+    assert not hasattr(config.files, "confirm_write")
 
 
 def test_load_config_overrides_nested_values(tmp_path):

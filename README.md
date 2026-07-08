@@ -203,7 +203,7 @@ Project grants are stored in:
 .colibri/permissions.toml
 ```
 
-Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. Project-level file grants are recursive directory roots under `[files].roots`. `shell.deny` remains a hard deny list, and `.colibri/permissions.toml` should not be committed.
+Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. Project-level file grants are recursive directory roots under `[files].roots`. `shell.deny` remains a hard deny list. Colibri no longer supports a legacy `shell.allow` field, and `.colibri/permissions.toml` should not be committed.
 
 ## Transcripts
 
