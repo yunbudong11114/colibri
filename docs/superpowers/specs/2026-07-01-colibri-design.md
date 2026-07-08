@@ -278,10 +278,12 @@ for round_index in range(config.session.max_tool_rounds):
 
     session.compact_if_needed()
 
-return error("tool round limit reached")
+return round_limit_report(max_tool_rounds, recent_tool_results)
 ```
 
 First version executes tool calls sequentially. A later version can parallelize read-only tools, but sequential execution is simpler, lower memory, and easier to reason about on a small device.
+
+When the loop reaches `max_tool_rounds`, the user-facing response should include a compact summary of what happened instead of only a fixed error string. The report should mention the configured limit, recent tool names, recent tool result snippets, and that the user can continue or increase `session.max_tool_rounds`.
 
 ### 7.3 Model Adapter
 

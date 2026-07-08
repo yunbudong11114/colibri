@@ -191,10 +191,15 @@ for round_index in range(config.session.max_tool_rounds):
     for call in response.tool_calls:
         result = registry.run(call, context)
         append tool result message
-return "Tool round limit reached"
+return a concise round-limit report with:
+
+- the configured `max_tool_rounds`,
+- the most recent tool call names,
+- the most recent tool result summaries,
+- a short note that the user can continue the task or raise `session.max_tool_rounds`.
 ```
 
-The max-round message should be concise and deterministic for tests.
+The max-round message should be concise and deterministic for tests. It must not be a bare fixed string because that hides useful progress and makes debugging tool loops painful.
 
 ## 9. Testing
 

@@ -149,7 +149,11 @@ class AgentSession:
                 self._trim_recent_messages()
                 model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
 
-        limit_text = "Tool round limit reached"
+        limit_text = _round_limit_text(
+            self.messages,
+            max_tool_rounds=self.config.session.max_tool_rounds,
+            max_chars=self.config.tools.max_result_chars,
+        )
         self.messages.append(Message(role="assistant", content=limit_text))
         self._write_transcript(
             "round_limit",
@@ -256,3 +260,45 @@ def _denied_tool_text(call: ToolCall) -> str:
         if isinstance(command, str) and command.strip():
             return f"User denied shell.run: {command.strip()}"
     return f"User denied {call.name}"
+
+
+def _round_limit_text(messages: list[Message], max_tool_rounds: int, max_chars: int) -> str:
+    round_word = "round" if max_tool_rounds == 1 else "rounds"
+    lines = [
+        f"Tool round limit reached after {max_tool_rounds} {round_word}.",
+        "The task may still be incomplete.",
+    ]
+    recent = _recent_tool_summaries(messages)
+    if recent:
+        lines.append("Recent tool results:")
+        lines.extend(f"- {item}" for item in recent)
+    lines.append("You can continue the task, or increase session.max_tool_rounds if this is expected.")
+    return _bound_text_block("\n".join(lines), max_chars)
+
+
+def _recent_tool_summaries(messages: list[Message], limit: int = 4) -> list[str]:
+    tool_names_by_id: dict[str, str] = {}
+    for message in messages:
+        for call in message.tool_calls:
+            tool_names_by_id[call.id] = call.name
+
+    summaries: list[str] = []
+    for message in reversed(messages):
+        if message.role != "tool":
+            continue
+        tool_name = tool_names_by_id.get(message.tool_call_id or "", "unknown")
+        text = " ".join(message.content.split())
+        if len(text) > 120:
+            text = text[:116] + " ..."
+        summaries.append(f"{tool_name}: {text}")
+        if len(summaries) >= limit:
+            break
+    return list(reversed(summaries))
+
+
+def _bound_text_block(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    suffix = "\n...[truncated]"
+    keep = max(0, max_chars - len(suffix))
+    return text[:keep] + suffix

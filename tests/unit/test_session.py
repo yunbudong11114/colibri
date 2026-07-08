@@ -182,7 +182,9 @@ def test_submit_stops_at_max_tool_rounds(tmp_path):
 
     response = session.submit("loop")
 
-    assert response.text == "Tool round limit reached"
+    assert "Tool round limit reached after 1 round" in response.text
+    assert "Recent tool results:" in response.text
+    assert "files.list" in response.text
 
 
 def test_denied_tool_call_adds_result_without_running_tool(tmp_path):
@@ -315,8 +317,10 @@ def test_session_writes_round_limit_event(tmp_path):
 
     response = session.submit("loop")
 
-    assert response.text == "Tool round limit reached"
+    assert "Tool round limit reached after 1 round" in response.text
+    assert "files.list" in response.text
     assert transcript.events[-1][0] == "round_limit"
+    assert transcript.events[-1][1]["text"] == response.text
 
 
 def test_close_closes_transcript():
