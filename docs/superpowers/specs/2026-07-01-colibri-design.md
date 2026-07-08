@@ -184,20 +184,20 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4.1-mini"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 60
-max_output_tokens = 1024
+max_output_tokens = 8192
 
 [session]
-max_tool_rounds = 16
-recent_message_limit = 48
-compact_trigger_chars = 36000
-summary_max_chars = 6000
+max_tool_rounds = 24
+recent_message_limit = 80
+compact_trigger_chars = 64000
+summary_max_chars = 10000
 idle_exit_seconds = 300
 transcript = true
 
 [tools]
 enabled = ["shell", "files", "http", "memory", "skills", "mcp"]
 default_permission = "allow_read_confirm_write"
-max_result_chars = 12000
+max_result_chars = 16000
 max_shell_seconds = 30
 
 [shell]
@@ -211,7 +211,7 @@ confirm_write = true
 [skills]
 dirs = ["~/.colibri/skills"]
 max_loaded = 3
-max_instruction_chars = 6000
+max_instruction_chars = 8000
 
 [console]
 status = true

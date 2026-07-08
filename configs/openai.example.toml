@@ -4,10 +4,10 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-5.5"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 60
-max_output_tokens = 1024
+max_output_tokens = 8192
 
 [session]
-max_tool_rounds = 16
-recent_message_limit = 48
-compact_trigger_chars = 36000
+max_tool_rounds = 24
+recent_message_limit = 80
+compact_trigger_chars = 64000
 model_compact = true

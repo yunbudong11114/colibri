@@ -24,15 +24,15 @@ class ModelConfig:
     model: str = "fake-colibri-model"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: int = 60
-    max_output_tokens: int = 10240
+    max_output_tokens: int = 8192
 
 
 @dataclass(frozen=True)
 class SessionConfig:
-    max_tool_rounds: int = 16
-    recent_message_limit: int = 48
-    compact_trigger_chars: int = 36000
-    summary_max_chars: int = 6000
+    max_tool_rounds: int = 24
+    recent_message_limit: int = 80
+    compact_trigger_chars: int = 64000
+    summary_max_chars: int = 10000
     model_compact: bool = True
     idle_exit_seconds: int = 300
     transcript: bool = True
@@ -42,7 +42,7 @@ class SessionConfig:
 class ToolsConfig:
     enabled: list[str] = field(default_factory=lambda: ["shell", "files", "http", "memory", "skills", "mcp"])
     default_permission: str = "allow_read_confirm_write"
-    max_result_chars: int = 12000
+    max_result_chars: int = 16000
     max_shell_seconds: int = 30
 
 
@@ -62,7 +62,7 @@ class FilesConfig:
 class SkillsConfig:
     dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri/skills")])
     max_loaded: int = 3
-    max_instruction_chars: int = 6000
+    max_instruction_chars: int = 8000
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ class MemoryConfig:
     max_search_results: int = 5
     enabled: bool = True
     max_recall_topics: int = 3
-    max_recall_chars: int = 4000
+    max_recall_chars: int = 6000
 
 
 @dataclass(frozen=True)

@@ -8,13 +8,18 @@ def test_default_config_uses_small_device_limits():
 
     assert config.model.provider == "fake"
     assert config.model.model == "fake-colibri-model"
-    assert config.session.max_tool_rounds == 16
-    assert config.session.recent_message_limit == 48
-    assert config.session.compact_trigger_chars == 36000
+    assert config.model.max_output_tokens == 8192
+    assert config.session.max_tool_rounds == 24
+    assert config.session.recent_message_limit == 80
+    assert config.session.compact_trigger_chars == 64000
+    assert config.session.summary_max_chars == 10000
     assert config.session.model_compact
-    assert config.tools.max_result_chars == 12000
+    assert config.tools.max_result_chars == 16000
     assert config.skills.max_loaded == 3
-    assert config.skills.max_instruction_chars == 6000
+    assert config.skills.max_instruction_chars == 8000
+    assert config.memory.max_search_results == 5
+    assert config.memory.max_recall_topics == 3
+    assert config.memory.max_recall_chars == 6000
     assert config.console.status
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
 

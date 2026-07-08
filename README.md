@@ -93,7 +93,7 @@ When the configured model returns tool calls, Colibri can execute a small built-
 - `memory.write`: append a Markdown bullet to a memory topic.
 - `skill.run`: run a configured command from a local skill.
 
-Tool calls are bounded by `session.max_tool_rounds` (default `16`), and tool output is capped by `tools.max_result_chars`.
+Tool calls are bounded by `session.max_tool_rounds` (default `24`), and tool output is capped by `tools.max_result_chars`.
 
 ## Memory
 
@@ -145,7 +145,7 @@ Colibri does not install skills, fetch remote skills, or use a marketplace in v1
 
 ## Context Compacting
 
-Colibri keeps only `session.recent_message_limit` durable messages in memory (default `48`). Messages that fall out of that window are converted into a bounded rolling summary stored on the session.
+Colibri keeps only `session.recent_message_limit` durable messages in memory (default `80`). Messages that fall out of that window are converted into a bounded rolling summary stored on the session.
 
 When `session.model_compact = true` and the configured provider is not `fake`, Colibri asks the model to create a Claude Code style continuation summary. The compact request uses no tools and asks for plain text with an `<analysis>` scratchpad plus a `<summary>` section; Colibri strips the analysis block before storing the summary.
 
