@@ -71,7 +71,7 @@ class OpenAICompatibleModelClient:
         return api_message
 
     def _request_json(self, url: str, payload: dict, timeout_seconds: int) -> dict:
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             url=url,
             data=body,

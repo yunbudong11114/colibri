@@ -212,13 +212,15 @@ def test_gateway_runner_runs_all_enabled_channels(tmp_path, monkeypatch):
 
 
 def test_perform_weixin_auth_prints_terminal_qr(monkeypatch):
+    qr_payload = "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=4b69ff82f873485e97acae885b11437c&bot_type=3"
+
     class FakeAuthApi:
         def __init__(self, base_url, timeout_seconds):
             pass
 
         def get_qrcode(self):
             return {
-                "qrcode_img_content": "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=4b69ff82f873485e97acae885b11437c&bot_type=3",
+                "qrcode_img_content": qr_payload,
                 "qrcode": "qr-1",
             }
 
@@ -241,3 +243,4 @@ def test_perform_weixin_auth_prints_terminal_qr(monkeypatch):
     assert "Scan this Weixin QR code with WeChat:" in output
     assert "██" in output
     assert "QR payload:" in output
+    assert qr_payload in output

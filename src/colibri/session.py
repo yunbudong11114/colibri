@@ -25,9 +25,9 @@ from colibri.transcript import TranscriptSink
 
 
 SYSTEM_PROMPT = (
-    "Your name is Colibri.You are a lightweight personal agent running on a CardputerZero, a CM0 hardware. "
-    "Prefer short, practical responses and respect low memory, battery, and tool limits."
-    "You call me '主人'"
+    "Your name is Colibri. You are a lightweight personal agent running on a CardputerZero, a CM0 hardware. "
+    "Prefer short, practical responses and respect low memory, battery, and tool limits. "
+    "You call me '主人'."
 )
 
 
@@ -178,15 +178,24 @@ class AgentSession:
             self.transcript.close()
 
     def _trim_recent_messages(self) -> None:
-        limit = self.config.session.recent_message_limit
-        if len(self.messages) > limit:
-            dropped = self.messages[:-limit]
-            addition, mode = self._compact_dropped_messages(dropped)
+        trigger_limit = max(1, self.config.session.trigger_message_limit)
+        if len(self.messages) >= trigger_limit:
+            messages_before_compact = list(self.messages)
+            addition, mode = self._compact_dropped_messages(messages_before_compact)
             self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
-            self.messages = self.messages[-limit:]
+            self.messages = _retained_recent_messages(
+                messages_before_compact,
+                max(0, self.config.session.recent_message_limit),
+            )
             self._write_transcript(
                 "context_compact",
-                {"dropped_messages": len(dropped), "mode": mode, "summary_chars": len(self.summary)},
+                {
+                    "dropped_messages": len(messages_before_compact) - len(self.messages),
+                    "compacted_messages": len(messages_before_compact),
+                    "kept_messages": len(self.messages),
+                    "mode": mode,
+                    "summary_chars": len(self.summary),
+                },
             )
 
     def _compact_dropped_messages(self, dropped: list[Message]) -> tuple[str, str]:
@@ -265,6 +274,24 @@ def _denied_tool_text(call: ToolCall) -> str:
         if isinstance(command, str) and command.strip():
             return f"User denied shell.run: {command.strip()}"
     return f"User denied {call.name}"
+
+
+def _retained_recent_messages(messages: list[Message], recent_limit: int) -> list[Message]:
+    if not messages:
+        return []
+    kept_start = max(0, len(messages) - recent_limit)
+    kept = list(messages[kept_start:]) if recent_limit > 0 else []
+    latest_user_index = _latest_user_index(messages)
+    if latest_user_index is not None and latest_user_index < kept_start:
+        return [messages[latest_user_index], *kept]
+    return kept
+
+
+def _latest_user_index(messages: list[Message]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "user":
+            return index
+    return None
 
 
 def _round_limit_text(messages: list[Message], max_tool_rounds: int, max_chars: int) -> str:

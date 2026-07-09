@@ -1,7 +1,7 @@
 from colibri.config import AgentConfig
-from colibri.messages import ModelResponse, ToolCall
+from colibri.messages import Message, ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
-from colibri.session import AgentSession
+from colibri.session import SYSTEM_PROMPT, AgentSession
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
@@ -18,8 +18,13 @@ def test_submit_records_user_and_assistant_messages():
     assert session.messages[1].content == "fake: hello"
 
 
+def test_system_prompt_has_sentence_spacing():
+    assert "Colibri. You" in SYSTEM_PROMPT
+    assert "limits. You" in SYSTEM_PROMPT
+
+
 def test_session_keeps_only_recent_messages():
-    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4}})
+    config = AgentConfig.default().with_overrides({"session": {"trigger_message_limit": 6, "recent_message_limit": 4}})
     session = AgentSession(config=config, model=FakeModelClient())
 
     session.submit("one")
@@ -31,7 +36,14 @@ def test_session_keeps_only_recent_messages():
 
 def test_session_compacts_dropped_messages_into_summary():
     config = AgentConfig.default().with_overrides(
-        {"session": {"recent_message_limit": 4, "summary_max_chars": 200, "model_compact": False}}
+        {
+            "session": {
+                "trigger_message_limit": 6,
+                "recent_message_limit": 4,
+                "summary_max_chars": 400,
+                "model_compact": False,
+            }
+        }
     )
     session = AgentSession(config=config, model=FakeModelClient())
 
@@ -40,14 +52,55 @@ def test_session_compacts_dropped_messages_into_summary():
     session.submit("three")
 
     assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
-    assert session.summary == "user: one\nassistant: fake: one"
+    assert "user: one" in session.summary
+    assert "assistant: fake: one" in session.summary
+    assert "user: three" in session.summary
+    assert "assistant: fake: three" in session.summary
+
+
+def test_session_does_not_compact_before_trigger_message_limit():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 10, "recent_message_limit": 4, "model_compact": False}}
+    )
+    session = AgentSession(config=config, model=FakeModelClient())
+
+    session.submit("one")
+    session.submit("two")
+    session.submit("three")
+
+    assert len(session.messages) == 6
+    assert session.summary == ""
+
+
+def test_session_retains_latest_user_message_even_outside_recent_window():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 5, "recent_message_limit": 2, "model_compact": False}}
+    )
+    session = AgentSession(config=config, model=FakeModelClient())
+    session.messages = [
+        Message(role="user", content="active request"),
+        Message(role="assistant", content="", tool_calls=[ToolCall(id="1", name="files.read", arguments={})]),
+        Message(role="tool", content="result 1", tool_call_id="1"),
+        Message(role="assistant", content="", tool_calls=[ToolCall(id="2", name="files.list", arguments={})]),
+        Message(role="tool", content="result 2", tool_call_id="2"),
+    ]
+
+    session._trim_recent_messages()
+
+    assert [message.content for message in session.messages] == ["active request", "", "result 2"]
+    assert "user: active request" in session.summary
 
 
 def test_session_uses_model_assisted_compact_without_tools():
     config = AgentConfig.default().with_overrides(
         {
             "model": {"provider": "openai_compatible"},
-            "session": {"recent_message_limit": 3, "summary_max_chars": 1000, "model_compact": True},
+            "session": {
+                "trigger_message_limit": 4,
+                "recent_message_limit": 3,
+                "summary_max_chars": 1000,
+                "model_compact": True,
+            },
         }
     )
     transcript = MemoryTranscript()
@@ -71,7 +124,12 @@ def test_session_falls_back_when_model_assisted_compact_fails():
     config = AgentConfig.default().with_overrides(
         {
             "model": {"provider": "openai_compatible"},
-            "session": {"recent_message_limit": 3, "summary_max_chars": 1000, "model_compact": True},
+            "session": {
+                "trigger_message_limit": 4,
+                "recent_message_limit": 3,
+                "summary_max_chars": 1000,
+                "model_compact": True,
+            },
         }
     )
     transcript = MemoryTranscript()
@@ -90,7 +148,14 @@ def test_session_falls_back_when_model_assisted_compact_fails():
 
 def test_session_summary_is_injected_without_persisting_it():
     config = AgentConfig.default().with_overrides(
-        {"session": {"recent_message_limit": 4, "summary_max_chars": 200, "model_compact": False}}
+        {
+            "session": {
+                "trigger_message_limit": 5,
+                "recent_message_limit": 4,
+                "summary_max_chars": 400,
+                "model_compact": False,
+            }
+        }
     )
     model = SummaryAwareModel()
     session = AgentSession(config=config, model=model)
@@ -107,7 +172,9 @@ def test_session_summary_is_injected_without_persisting_it():
 
 
 def test_session_logs_context_compact_event():
-    config = AgentConfig.default().with_overrides({"session": {"recent_message_limit": 4, "model_compact": False}})
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 6, "recent_message_limit": 4, "model_compact": False}}
+    )
     transcript = MemoryTranscript()
     session = AgentSession(config=config, model=FakeModelClient(), transcript=transcript)
 
@@ -117,6 +184,8 @@ def test_session_logs_context_compact_event():
 
     compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
     assert sum(event["dropped_messages"] for event in compact_events) == 2
+    assert compact_events[-1]["compacted_messages"] == 6
+    assert compact_events[-1]["kept_messages"] == 4
     assert compact_events[-1]["summary_chars"] == len(session.summary)
 
 

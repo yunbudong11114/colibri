@@ -241,9 +241,10 @@ timeout_seconds = 60
 
 [session]
 max_tool_rounds = 32
-recent_message_limit = 96
-compact_trigger_chars = 24000
-summary_max_chars = 24000
+trigger_message_limit = 96
+recent_message_limit = 12
+compact_trigger_chars = 192000
+summary_max_chars = 12000
 model_compact = true
 transcript = true
 
@@ -255,7 +256,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-Old messages outside `recent_message_limit` are compacted into a bounded rolling summary. Model input is trimmed to fit `compact_trigger_chars` while preserving the latest user message.
+When the session reaches `trigger_message_limit` messages, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. Model input is trimmed to fit `compact_trigger_chars` while preserving the latest user message.
 
 ## Transcripts
 

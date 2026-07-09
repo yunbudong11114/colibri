@@ -8,9 +8,10 @@ max_output_tokens = 16384
 
 [session]
 max_tool_rounds = 32
-recent_message_limit = 96
-compact_trigger_chars = 24000
-summary_max_chars = 24000
+trigger_message_limit = 96
+recent_message_limit = 12
+compact_trigger_chars = 192000
+summary_max_chars = 12000
 model_compact = true
 idle_exit_enabled = false
 idle_exit_seconds = 300

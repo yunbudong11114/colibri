@@ -11,9 +11,10 @@ def test_default_config_uses_small_device_limits():
     assert config.model.api_key == ""
     assert config.model.max_output_tokens == 16384
     assert config.session.max_tool_rounds == 32
-    assert config.session.recent_message_limit == 96
-    assert config.session.compact_trigger_chars == 24000
-    assert config.session.summary_max_chars == 24000
+    assert config.session.trigger_message_limit == 96
+    assert config.session.recent_message_limit == 12
+    assert config.session.compact_trigger_chars == 192000
+    assert config.session.summary_max_chars == 12000
     assert config.session.model_compact
     assert not config.session.idle_exit_enabled
     assert config.session.idle_exit_seconds == 300
@@ -52,6 +53,7 @@ timeout_seconds = 45
 api_key = "inline-key"
 
 [session]
+trigger_message_limit = 20
 recent_message_limit = 8
 model_compact = false
 idle_exit_enabled = true
@@ -95,6 +97,7 @@ auth_timeout_seconds = 22
     assert config.model.model == "gpt-4.1-mini"
     assert config.model.api_key == "inline-key"
     assert config.model.timeout_seconds == 45
+    assert config.session.trigger_message_limit == 20
     assert config.session.recent_message_limit == 8
     assert not config.session.model_compact
     assert config.session.idle_exit_enabled

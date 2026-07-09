@@ -227,6 +227,39 @@ def test_request_json_turns_http_error_into_model_error():
         client._raise_http_error(error)
 
 
+def test_request_json_preserves_chinese_utf8(monkeypatch):
+    client = make_client()
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("colibri.model.openai_compatible.urllib.request.urlopen", fake_urlopen)
+
+    data = client._request_json(
+        "https://api.example.test/v1/chat/completions",
+        {"messages": [{"role": "user", "content": "杭州天气"}]},
+        timeout_seconds=9,
+    )
+
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert captured["timeout"] == 9
+    assert "杭州天气".encode("utf-8") in captured["body"]
+    assert b"\\u676d" not in captured["body"]
+
+
 class FakeErrorBody:
     def __init__(self, body: bytes):
         self.body = body

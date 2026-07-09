@@ -65,6 +65,18 @@ class GatewayProcessManager:
         status = self.status()
         if not status.running or status.pid is None:
             return status
+        if not _pid_matches_gateway(status.pid):
+            return GatewayProcessStatus(
+                running=status.running,
+                pid=status.pid,
+                state_path=status.state_path,
+                log_path=status.log_path,
+                config_path=status.config_path,
+                cwd=status.cwd,
+                started_at=status.started_at,
+                rss_kb=status.rss_kb,
+                reason="unverified_pid",
+            )
         os.kill(status.pid, signal.SIGTERM)
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -146,6 +158,35 @@ def _pid_running(pid: int | None) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _pid_matches_gateway(pid: int) -> bool:
+    command = _pid_command(pid)
+    if command is None:
+        return False
+    return "colibri.cli" in command and "gateway" in command and "run" in command
+
+
+def _pid_command(pid: int) -> str | None:
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    try:
+        text = proc_cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        if text:
+            return text
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = result.stdout.strip()
+    return text or None
 
 
 def _rss_kb(pid: int) -> int | None:

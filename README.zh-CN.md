@@ -243,9 +243,10 @@ timeout_seconds = 60
 
 [session]
 max_tool_rounds = 32
-recent_message_limit = 96
-compact_trigger_chars = 24000
-summary_max_chars = 24000
+trigger_message_limit = 96
+recent_message_limit = 12
+compact_trigger_chars = 192000
+summary_max_chars = 12000
 model_compact = true
 transcript = true
 
@@ -257,7 +258,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-超过 `recent_message_limit` 的旧消息会被压缩进滚动摘要。模型输入会按 `compact_trigger_chars` 裁剪，同时保留最新用户消息。
+当 session 达到 `trigger_message_limit` 条消息时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。模型输入会按 `compact_trigger_chars` 裁剪，同时保留最新用户消息。
 
 ## Transcript
 

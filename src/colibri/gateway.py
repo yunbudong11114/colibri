@@ -42,6 +42,7 @@ class GatewaySessionCache:
         self.transcript = transcript
         self.monotonic = monotonic_func
         self._entries: dict[str, GatewaySessionEntry] = {}
+        self._lock = threading.Lock()
 
     def get(
         self,
@@ -49,41 +50,44 @@ class GatewaySessionCache:
         policy: PermissionPolicy,
         transcript_metadata: dict[str, str] | None = None,
     ) -> AgentSession:
-        self._evict_idle()
-        now = self.monotonic()
-        entry = self._entries.get(key)
-        if entry is not None:
-            entry.last_activity_at = now
-            return entry.session
+        with self._lock:
+            self._evict_idle_locked()
+            now = self.monotonic()
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry.last_activity_at = now
+                return entry.session
 
-        while len(self._entries) >= self.max_sessions:
-            self._evict_oldest()
-        session = AgentSession(
-            config=self.config,
-            model=self.model,
-            tools=self.registry,
-            permission_policy=policy,
-            transcript=ScopedTranscriptWriter(self.transcript, transcript_metadata or {"session_key": key})
-            if self.transcript is not None
-            else None,
-        )
-        self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
-        return session
+            while len(self._entries) >= self.max_sessions:
+                self._evict_oldest_locked()
+            session = AgentSession(
+                config=self.config,
+                model=self.model,
+                tools=self.registry,
+                permission_policy=policy,
+                transcript=ScopedTranscriptWriter(self.transcript, transcript_metadata or {"session_key": key})
+                if self.transcript is not None
+                else None,
+            )
+            self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
+            return session
 
     def touch(self, key: str) -> None:
-        entry = self._entries.get(key)
-        if entry is not None:
-            entry.last_activity_at = self.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry.last_activity_at = self.monotonic()
 
     def close(self) -> None:
-        for entry in self._entries.values():
-            entry.session.close()
-        self._entries.clear()
-        if self.transcript is not None:
-            self.transcript.close()
-            self.transcript = None
+        with self._lock:
+            for entry in self._entries.values():
+                entry.session.close()
+            self._entries.clear()
+            if self.transcript is not None:
+                self.transcript.close()
+                self.transcript = None
 
-    def _evict_idle(self) -> None:
+    def _evict_idle_locked(self) -> None:
         if self.idle_seconds <= 0:
             return
         now = self.monotonic()
@@ -92,7 +96,7 @@ class GatewaySessionCache:
                 entry.session.close()
                 del self._entries[key]
 
-    def _evict_oldest(self) -> None:
+    def _evict_oldest_locked(self) -> None:
         if not self._entries:
             return
         oldest_key = min(self._entries, key=lambda key: self._entries[key].last_activity_at)

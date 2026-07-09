@@ -31,6 +31,7 @@ def build_diagnostics(
         f"project_permissions={project_permissions}",
         f"transcript={str(config.session.transcript).lower()} rss_kb={rss if rss is not None else 'unknown'}",
         (
+            f"trigger_message_limit={config.session.trigger_message_limit} "
             f"recent_message_limit={config.session.recent_message_limit} "
             f"compact_trigger_chars={config.session.compact_trigger_chars} "
             f"summary_max_chars={config.session.summary_max_chars}"

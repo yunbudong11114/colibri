@@ -188,9 +188,10 @@ max_output_tokens = 16384
 
 [session]
 max_tool_rounds = 32
-recent_message_limit = 96
-compact_trigger_chars = 24000
-summary_max_chars = 24000
+trigger_message_limit = 96
+recent_message_limit = 12
+compact_trigger_chars = 192000
+summary_max_chars = 12000
 idle_exit_enabled = false
 idle_exit_seconds = 300
 transcript = true
@@ -525,10 +526,12 @@ CardputerZero should not keep a desktop-scale transcript in RAM. The model conte
 
 The first compact strategy:
 
-- Keep the last `recent_message_limit` messages.
-- Maintain a rolling `summary` for older messages.
-- Trigger compact when estimated context chars exceed `compact_trigger_chars`.
-- Summarize old messages into at most `summary_max_chars`.
+- Trigger durable compacting when the session reaches `trigger_message_limit` messages.
+- Summarize the current message buffer into a rolling `summary`.
+- Keep the last `recent_message_limit` messages after compacting.
+- Also keep the latest user message if it is not inside that recent window.
+- Bound model input by `compact_trigger_chars` before each model call.
+- Keep the rolling summary within `summary_max_chars`.
 - Drop or shrink old tool results aggressively.
 
 Tool result budget:

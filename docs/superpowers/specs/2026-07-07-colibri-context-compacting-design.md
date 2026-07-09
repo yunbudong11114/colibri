@@ -70,9 +70,21 @@ The summary prompt should be close to Claude Code's compacting shape, but tuned 
 
 The model-assisted compact call must not expose normal tool specs. It should use `tools=[]`, disabled tool choice by omission, `system="You are a helpful AI assistant tasked with summarizing conversations."`, and a bounded output budget.
 
-Fallback compacting path:
+Durable message compacting path:
 
-When `AgentSession.messages` exceeds `session.recent_message_limit`, dropped messages are converted into short summary lines:
+When `AgentSession.messages` reaches `session.trigger_message_limit`, the session compacts the current message buffer into the rolling summary and then keeps a small recent window.
+
+Default values:
+
+```toml
+[session]
+trigger_message_limit = 96
+recent_message_limit = 12
+```
+
+Compacting must summarize the whole current message buffer, not only the portion that will be removed. After summary append, `AgentSession.messages` keeps the latest `session.recent_message_limit` messages. If that kept window does not contain the latest user message, Colibri must also retain the latest user message so the next model call always has the active request.
+
+Fallback compacting converts messages into short summary lines:
 
 ```text
 user: asked where the router is
@@ -87,6 +99,8 @@ Rules:
 - Tool messages are summarized as metadata, not full output, in fallback mode.
 - Tool metadata should include tool name when it can be found from the matching assistant tool call.
 - The rolling summary is trimmed from the front to stay within `session.summary_max_chars`.
+- `session.trigger_message_limit` controls when durable compacting happens.
+- `session.recent_message_limit` controls how many recent messages are retained after durable compacting.
 - Reset clears both recent messages and summary.
 - Empty model summaries, model errors, or context budget errors trigger fallback compacting rather than failing the user turn.
 

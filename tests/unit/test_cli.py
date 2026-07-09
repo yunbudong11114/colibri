@@ -2,9 +2,10 @@ from io import StringIO
 
 import pytest
 
-from colibri.cli import ReplLineEditor, main, read_escape_sequence, read_repl_line, read_tty_byte, write_raw_tty_newline
+from colibri.cli import main
 from colibri.config import AgentConfig
 from colibri.model.errors import ModelError
+from colibri.repl_input import ReplLineEditor, read_escape_sequence, read_repl_line, read_tty_byte, write_raw_tty_newline
 
 
 @pytest.fixture(autouse=True)
@@ -185,6 +186,62 @@ def test_gateway_status_uses_process_manager(monkeypatch, capsys, tmp_path):
     assert "reason=state_missing" in captured.out
 
 
+def test_gateway_status_does_not_load_config(monkeypatch, capsys, tmp_path):
+    class FakeStatus:
+        running = False
+        pid = None
+        rss_kb = None
+        config_path = "default"
+        cwd = ""
+        log_path = tmp_path / "gateway.log"
+        state_path = tmp_path / "gateway.json"
+        started_at = ""
+        reason = "state_missing"
+
+    class FakeManager:
+        def status(self):
+            return FakeStatus()
+
+    def fail_load(path):
+        raise AssertionError("gateway status should not load config")
+
+    monkeypatch.setattr("colibri.cli.GatewayProcessManager", lambda: FakeManager())
+
+    exit_code = main(["gateway", "status"], config_loader=fail_load)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "running=false" in captured.out
+
+
+def test_gateway_stop_does_not_load_config(monkeypatch, capsys, tmp_path):
+    class FakeStatus:
+        running = False
+        pid = None
+        rss_kb = None
+        config_path = "default"
+        cwd = ""
+        log_path = tmp_path / "gateway.log"
+        state_path = tmp_path / "gateway.json"
+        started_at = ""
+        reason = "state_missing"
+
+    class FakeManager:
+        def stop(self):
+            return FakeStatus()
+
+    def fail_load(path):
+        raise AssertionError("gateway stop should not load config")
+
+    monkeypatch.setattr("colibri.cli.GatewayProcessManager", lambda: FakeManager())
+
+    exit_code = main(["gateway", "stop"], config_loader=fail_load)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "running=false" in captured.out
+
+
 def test_auth_weixin_saves_token_without_printing_secret(monkeypatch, tmp_path, capsys):
     class AuthResult:
         token = "secret-token"
@@ -275,7 +332,7 @@ def test_read_tty_byte_uses_unbuffered_fd_read(monkeypatch):
         calls.append((fd, size))
         return b"\xe6"
 
-    monkeypatch.setattr("colibri.cli.os.read", fake_read)
+    monkeypatch.setattr("colibri.repl_input.os.read", fake_read)
 
     assert read_tty_byte(12) == b"\xe6"
     assert calls == [(12, 1)]
@@ -291,8 +348,8 @@ def test_read_escape_sequence_consumes_arrow_key_bytes(monkeypatch):
     def fake_read(fd):
         return bytes_to_read.pop(0)
 
-    monkeypatch.setattr("colibri.cli.select.select", fake_select)
-    monkeypatch.setattr("colibri.cli.read_tty_byte", fake_read)
+    monkeypatch.setattr("colibri.repl_input.select.select", fake_select)
+    monkeypatch.setattr("colibri.repl_input.read_tty_byte", fake_read)
 
     assert read_escape_sequence(12) == b"\x1b[A"
 

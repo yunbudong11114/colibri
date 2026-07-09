@@ -30,9 +30,10 @@ class ModelConfig:
 @dataclass(frozen=True)
 class SessionConfig:
     max_tool_rounds: int = 32
-    recent_message_limit: int = 96
-    compact_trigger_chars: int = 24000
-    summary_max_chars: int = 24000
+    trigger_message_limit: int = 96
+    recent_message_limit: int = 12
+    compact_trigger_chars: int = 192000
+    summary_max_chars: int = 12000
     model_compact: bool = True
     idle_exit_enabled: bool = False
     idle_exit_seconds: int = 300

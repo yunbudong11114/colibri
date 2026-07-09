@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from colibri.gateway_process import GatewayProcessManager, format_gateway_status
@@ -49,3 +50,47 @@ def test_format_gateway_status_is_key_value(tmp_path):
 
     assert "running=false" in lines
     assert f"state={manager.state_path}" in lines
+
+
+def test_gateway_process_stop_refuses_unverified_pid(monkeypatch, tmp_path):
+    kills = []
+    manager = GatewayProcessManager(home=tmp_path / "home", cwd=tmp_path / "project")
+    manager.run_dir.mkdir(parents=True)
+    manager.state_path.write_text(
+        json.dumps({"pid": 12345, "config": "default", "cwd": str(tmp_path), "log": str(manager.log_path)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("colibri.gateway_process._pid_running", lambda pid: pid == 12345)
+    monkeypatch.setattr("colibri.gateway_process._pid_matches_gateway", lambda pid: False)
+    monkeypatch.setattr("colibri.gateway_process._rss_kb", lambda pid: 1024)
+    monkeypatch.setattr("colibri.gateway_process.os.kill", lambda pid, sig: kills.append((pid, sig)))
+
+    status = manager.stop()
+
+    assert status.running
+    assert status.pid == 12345
+    assert status.reason == "unverified_pid"
+    assert kills == []
+
+
+def test_gateway_process_stop_terminates_verified_gateway_pid(monkeypatch, tmp_path):
+    kills = []
+    manager = GatewayProcessManager(home=tmp_path / "home", cwd=tmp_path / "project")
+    manager.run_dir.mkdir(parents=True)
+    manager.state_path.write_text(
+        json.dumps({"pid": 12345, "config": "default", "cwd": str(tmp_path), "log": str(manager.log_path)}),
+        encoding="utf-8",
+    )
+
+    def fake_pid_running(pid):
+        return pid == 12345 and not kills
+
+    monkeypatch.setattr("colibri.gateway_process._pid_running", fake_pid_running)
+    monkeypatch.setattr("colibri.gateway_process._pid_matches_gateway", lambda pid: True)
+    monkeypatch.setattr("colibri.gateway_process._rss_kb", lambda pid: 1024)
+    monkeypatch.setattr("colibri.gateway_process.os.kill", lambda pid, sig: kills.append((pid, sig)))
+
+    status = manager.stop()
+
+    assert not status.running
+    assert kills
