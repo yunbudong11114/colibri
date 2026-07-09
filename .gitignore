@@ -4,4 +4,7 @@ __pycache__/
 .venv/
 .superpowers/
 *.egg-info/
-.colibri/permissions.toml
+.colibri/
+docs/reference/claude-code-agent-core-analysis.md
+docs/reference/picoclaw-project-research.md
+docs/reference/zeroclaw-project-research.md
