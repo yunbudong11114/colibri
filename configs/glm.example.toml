@@ -1,6 +1,6 @@
 [model]
 provider = "openai_compatible"
-base_url = "https://oneapi.qunhequnhe.com/v1"
+base_url = "https://your-openai-compatible-api.example/v1"
 model = "ZHIPU/GLM-5.2"
 api_key = ""
 timeout_seconds = 60

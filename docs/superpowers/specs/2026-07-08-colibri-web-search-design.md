@@ -24,7 +24,7 @@ Real API keys should live in a user's private config such as `~/.colibri/config.
 ```toml
 [model]
 provider = "openai_compatible"
-base_url = "https://oneapi.qunhequnhe.com/v1"
+base_url = "https://your-openai-compatible-api.example/v1"
 model = "ZHIPU/GLM-5.2"
 api_key = ""
 
