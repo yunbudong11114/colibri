@@ -2,42 +2,53 @@
 
 Lightweight Python agent runtime for CardputerZero-class Linux devices.
 
-## Runtime Support
+Colibri is designed to run as a small, headless agent on a Linux card server. It can be used from a local CLI, an SSH session, or a long-running gateway process that connects external chat channels such as Weixin.
 
-Colibri must run on headless Linux servers over plain SSH. The core runtime and milestone work should stay usable through CLI/stdin/stdout only, without requiring a graphical desktop, browser, system tray, display server, audio device, or TUI framework.
+[中文文档](README.zh-CN.md)
 
-## Current Milestone
+## Highlights
 
-Current implementation provides:
+- Headless runtime: no browser, GUI, system tray, audio device, or TUI framework required.
+- Standard-library runtime: third-party packages are only needed for development tests.
+- OpenAI-compatible model adapter plus a deterministic fake model for tests.
+- Bounded tool loop with dynamic permissions.
+- Built-in tools for files, shell, memory, web search, and local skills.
+- Markdown-backed persistent memory with bounded recall injection.
+- Local skills with progressive disclosure.
+- Context compacting with model summaries and deterministic fallback.
+- JSONL transcripts for CLI and gateway sessions.
+- Weixin gateway channel through Tencent iLink.
+- Gateway process management: `run`, `start`, `stop`, `restart`, `status`.
 
-- Python package skeleton.
-- TOML config loader with CardputerZero-friendly defaults.
-- Message and model interfaces.
-- Deterministic fake model for tests and smoke runs.
-- `AgentSession.submit()` for a bounded single model turn.
-- CLI `ask` and `repl` commands.
-- OpenAI-compatible chat completions model adapter.
-- Model provider factory and concise CLI error handling.
-- Bounded agent tool loop.
-- Built-in tools: `files.list`, `files.read`, `shell.run`, memory tools, and `skill.run`.
-- Dynamic permission decisions before tool execution.
-- Headless stdin/stdout confirmation for ungranted tools and shell commands.
-- Session-scoped and project-scoped permission grants.
-- Compact JSONL transcript logging.
-- File-backed memory tools: `memory.list`, `memory.read`, `memory.search`, and `memory.write`.
-- Automatic memory recall from `MEMORY.md` and relevant topic files.
-- Model-assisted rolling summary compacting for messages outside the recent-message window.
-- Deterministic compacting fallback for fake/offline model runs.
-- Character-budgeted model input using `session.compact_trigger_chars`.
-- Local filesystem skills with progressive disclosure.
-- `skill.run` for configured local skill commands.
-- `web.search` for permissioned web search through a configured search provider.
-- SSH/serial-friendly console status lines.
-- REPL idle timeout.
-- Low-memory diagnostics command.
-- Conservative systemd service example.
+## Architecture
 
-## Development
+```mermaid
+flowchart TD
+    User["User / Channel"] --> CLI["colibri.cli"]
+    CLI --> Commands["ask / repl / diagnostics / auth / gateway"]
+    Commands --> Session["AgentSession"]
+    Commands --> GatewayProc["GatewayProcessManager"]
+    GatewayProc --> GatewayRun["gateway run"]
+    GatewayRun --> Gateway["GatewayRunner"]
+    Gateway --> Channels["Channel workers"]
+    Channels --> Weixin["Weixin iLink"]
+    Gateway --> Session
+    Session --> Model["ModelClient"]
+    Model --> Fake["Fake model"]
+    Model --> OpenAI["OpenAI-compatible API"]
+    Session --> Registry["ToolRegistry"]
+    Registry --> Tools["files / shell / web / memory / skill"]
+    Session --> Permissions["PermissionPolicy"]
+    Permissions --> ProjectPerms[".colibri/permissions.toml"]
+    Session --> Memory["MemoryRecall"]
+    Memory --> MemoryFiles["~/.colibri/memory"]
+    Session --> Skills["SkillIndex"]
+    Skills --> SkillFiles["~/.colibri/skills"]
+    Session --> Transcript["TranscriptWriter"]
+    Transcript --> TranscriptFiles["~/.colibri/transcripts/*.jsonl"]
+```
+
+## Install And Test
 
 ```bash
 uv run python -m pytest
@@ -46,146 +57,89 @@ uv run python -m colibri.cli repl
 uv run python -m colibri.cli diagnostics
 ```
 
-The runtime is standard-library only. `pytest` is only needed for development tests.
-
-## Model Providers
-
-Colibri defaults to the deterministic fake model:
-
-```bash
-uv run python -m colibri.cli ask "hello"
-```
-
-To use an OpenAI-compatible chat completions API, copy `configs/openai.example.toml`, set `model.api_key` in your private config, or set `COLIBRI_API_KEY` in the environment:
-
-```bash
-uv run python -m colibri.cli --config configs/openai.example.toml ask "say hi in five words"
-```
-
-For the Qunhe GLM endpoint, use `configs/glm.example.toml`:
-
-```bash
-export COLIBRI_API_KEY="..."
-uv run python -m colibri.cli --config configs/glm.example.toml ask "用中文说一句你好"
-```
-
-`model.api_key` takes precedence. If it is empty, Colibri reads `COLIBRI_API_KEY`.
+The runtime itself is standard-library only. `pytest` is used for development tests.
 
 ## Configuration
 
-If `--config` is omitted, Colibri tries to read:
+If `--config` is omitted, Colibri loads:
 
 ```text
 ~/.colibri/config.toml
 ```
 
-If that file does not exist, Colibri uses built-in defaults. An explicit `--config` path always takes precedence over the default user config file.
+If the file does not exist, built-in defaults are used. An explicit `--config` path always wins.
 
-## Built-In Tools
-
-When the configured model returns tool calls, Colibri can execute a small built-in tool set:
-
-- `files.list`: list direct children under the startup workspace, configured `files.roots`, or an approved external directory.
-- `files.read`: read UTF-8 text files under the startup workspace, configured `files.roots`, or an approved external directory.
-- `shell.run`: run shell commands after Colibri permission approval.
-- `web.search`: search the web using the configured search engine. Baidu AI Search is the default provider.
-- `memory.list`: list Markdown memory topics.
-- `memory.read`: read a memory topic.
-- `memory.search`: search the memory index and topic files by keyword.
-- `memory.write`: append a Markdown bullet to a memory topic.
-- `skill.run`: run a configured command from a local skill.
-
-Tool calls are bounded by `session.max_tool_rounds` (default `32`), and tool output is capped by `tools.max_result_chars`.
-
-## Memory
-
-Colibri stores persistent memory as plain Markdown under:
+Example configs live in:
 
 ```text
-~/.colibri/memory
+configs/agent.example.toml
+configs/openai.example.toml
+configs/glm.example.toml
 ```
 
-The default layout is:
+API keys should stay in private config files or environment variables. Do not commit private config files.
 
-```text
-memory/
-  MEMORY.md
-  topics/
-    devices.md
-    preferences.md
-```
+## Model Providers
 
-Memory tools use `memory.root` and `memory.max_search_results` from config. `memory.list`, `memory.read`, and `memory.search` are read-only. `memory.write` is not read-only, so the default permission policy asks before appending.
-
-When `memory.enabled = true`, Colibri also reads `MEMORY.md`, scores topic names and descriptions against the current turn, and injects the top relevant topic files into the model input as a temporary context block. The injected memory is not stored in `AgentSession.messages`.
-
-Recall is bounded by:
-
-- `memory.max_recall_topics`
-- `memory.max_recall_chars`
-
-## Local Skills
-
-Colibri loads user skills from configured local directories such as:
-
-```text
-~/.colibri/skills/<name>/SKILL.md
-```
-
-Optional `skill.toml` files can declare local commands for `skill.run`.
-
-Colibri also ships a tiny built-in guidance skill, `create-colibri-skill`, so users can ask how to create a new Colibri skill without first installing a skill that explains skills.
-
-Skill loading uses progressive disclosure: Colibri keeps a small metadata index in memory, selects relevant skills by keyword overlap for the current turn, then reads and injects only the selected skill instructions as temporary model context. The injected skill text is not stored in `AgentSession.messages`.
-
-Skill injection is bounded by:
-
-- `skills.max_loaded`
-- `skills.max_instruction_chars`
-
-Colibri does not install skills, fetch remote skills, or use a marketplace in v1.
-
-## Context Compacting
-
-Colibri keeps only `session.recent_message_limit` durable messages in memory (default `96`). Messages that fall out of that window are converted into a bounded rolling summary stored on the session.
-
-When `session.model_compact = true` and the configured provider is not `fake`, Colibri asks the model to create a Claude Code style continuation summary. The compact request uses no tools and asks for plain text with an `<analysis>` scratchpad plus a `<summary>` section; Colibri strips the analysis block before storing the summary.
-
-If model compacting fails, or when using the default fake provider, Colibri falls back to deterministic local compacting that keeps user/assistant text short and replaces old tool results with metadata.
-
-The summary is injected into model input as temporary context and is not stored as a normal conversation message. Model input is also trimmed to fit `session.compact_trigger_chars` while preserving the latest user message.
-
-## Console Status and Diagnostics
-
-When `console.status = true`, Colibri writes concise status lines to `stderr`:
-
-```text
-[colibri] ready model=fake-colibri-model
-[colibri] thinking
-[colibri] tool files.read ok chars=1284
-```
-
-Model answers remain on `stdout`, so shell pipelines can still consume normal responses.
-
-Run diagnostics with:
+The default provider is deterministic and local:
 
 ```bash
-uv run python -m colibri.cli diagnostics
+uv run python -m colibri.cli ask "hello"
 ```
 
-Diagnostics reports Python/platform details, provider/model, enabled tools, memory and skills paths, project permission file state, RSS when available, and context limits.
+For an OpenAI-compatible chat completions endpoint:
 
-`session.idle_exit_enabled` controls REPL idle exit and defaults to `false`. When enabled, `session.idle_exit_seconds` sets the timeout.
+```toml
+[model]
+provider = "openai_compatible"
+base_url = "https://your-openai-compatible-api.example/v1"
+model = "your-model"
+api_key = ""
+```
+
+`model.api_key` takes precedence. If it is empty, Colibri reads `COLIBRI_API_KEY`.
+
+## CLI
+
+```bash
+uv run python -m colibri.cli ask "hello"
+uv run python -m colibri.cli repl
+uv run python -m colibri.cli diagnostics
+uv run python -m colibri.cli auth weixin
+```
+
+`ask` runs one request and exits. `repl` keeps a multi-turn local session. `diagnostics` prints environment, paths, RSS, and context limits. `auth weixin` starts iLink QR login and writes the Weixin token to the active config file.
 
 ## Gateway
 
-Colibri can run channel integrations through the gateway command:
+Gateway is the process entry for external chat channels.
 
 ```bash
-uv run python -m colibri.cli gateway
+uv run python -m colibri.cli gateway run
+uv run python -m colibri.cli gateway start
+uv run python -m colibri.cli gateway stop
+uv run python -m colibri.cli gateway restart
+uv run python -m colibri.cli gateway status
 ```
 
-The first gateway channel is Weixin personal account support through Tencent iLink API. Configure it in private config:
+- `gateway run`: foreground runner for debugging or service managers.
+- `gateway start`: background runner; returns immediately.
+- `gateway stop`: stops the background gateway.
+- `gateway restart`: stop then start.
+- `gateway status`: prints process status, PID, RSS when available, config path, state path, and log path.
+
+Background state and logs:
+
+```text
+~/.colibri/run/gateway.json
+~/.colibri/logs/gateway.log
+```
+
+The bare `colibri gateway` command is only a command group and prints usage instead of blocking the terminal.
+
+## Weixin Channel
+
+Configure Weixin in private config:
 
 ```toml
 [gateway]
@@ -200,29 +154,48 @@ base_url = "https://ilinkai.weixin.qq.com/"
 allow_from = []
 ```
 
-Run `uv run python -m colibri.cli auth weixin` to start the QR login flow and write the token to the active config file. In channel mode, Colibri asks tool permission questions in Weixin text and accepts `y`, `s`, `e`, `p`, or `n` replies.
+Run QR auth:
 
-## Tool Permissions
+```bash
+uv run python -m colibri.cli auth weixin
+```
 
-Colibri checks permission before running each registered tool call.
+Gateway keeps one bounded `AgentSession` per channel user, keyed like `weixin:<sender_id>`. Permission prompts are sent back through Weixin text and accept `y`, `s`, `e`, `p`, or `n`.
 
-The default `tools.default_permission = "allow_read_confirm_write"` allows read-only non-shell tools inside their normal safe boundaries and asks for confirmation before non-read-only tools. Shell commands require a grant or prompt even when they look read-only, because shell commands can leak secrets, consume resources, or behave differently across systems.
+## Built-In Tools
 
-For `files.read` and `files.list`, the process startup directory is the default workspace root. Paths under that workspace root or configured `files.roots` are automatically allowed by the read-only default. Paths outside those roots use the dynamic permission prompt. A one-time approval allows only that call; session and project approvals allow the target's containing directory recursively, so Colibri does not ask again for every child path.
+When the model returns tool calls, Colibri can execute:
 
-Other supported values are:
+- `files.list`: list direct children under allowed roots.
+- `files.read`: read UTF-8 text files under allowed roots.
+- `shell.run`: run shell commands after permission approval.
+- `web.search`: search the web through the configured provider.
+- `memory.list`: list Markdown memory topics.
+- `memory.read`: read a memory topic.
+- `memory.search`: search memory index and topic files.
+- `memory.write`: append a Markdown bullet to a memory topic.
+- `skill.run`: run a configured local skill command.
 
-- `allow`: allow all registered tool calls.
-- `confirm`: confirm every registered tool call.
-- `deny`: deny every registered tool call.
+Tool calls are bounded by `session.max_tool_rounds` and tool output is capped by `tools.max_result_chars`.
 
-Confirmation works over stdin/stdout, so it is safe for SSH-only servers. Prompt choices are:
+## Permissions
 
-- `y`: allow this call once.
-- `s`: allow the same tool, exact shell command, or external file directory for this session.
-- `e`: for shell only, allow the same executable for this session.
-- `p`: allow the same tool, exact shell command, or external file directory for this project.
-- `n`: deny this call and return a denial result to the model.
+The default permission mode is:
+
+```toml
+[tools]
+default_permission = "allow_read_confirm_write"
+```
+
+Read-only non-shell tools are allowed inside their normal safe boundaries. Shell commands and writes ask for confirmation unless already granted.
+
+Prompt choices:
+
+- `y`: allow once.
+- `s`: allow for the current session.
+- `e`: shell only, allow the same executable for the current session.
+- `p`: allow for this project.
+- `n`: deny.
 
 Project grants are stored in:
 
@@ -230,24 +203,94 @@ Project grants are stored in:
 .colibri/permissions.toml
 ```
 
-Project-level shell grants are exact command matches. Allowing `git status` does not allow `git push`. Project-level file grants are recursive directory roots under `[files].roots`. `shell.deny` remains a hard deny list. Colibri no longer supports a legacy `shell.allow` field, and `.colibri/permissions.toml` should not be committed.
+That project runtime directory is ignored by git.
+
+## Memory
+
+Persistent memory is Markdown-backed:
+
+```text
+~/.colibri/memory/
+  MEMORY.md
+  topics/
+    devices.md
+```
+
+When `memory.enabled = true`, Colibri reads `MEMORY.md`, scores topics against the current turn, and injects the top relevant topic files as temporary model context. Memory injection is bounded by `memory.max_recall_topics` and `memory.max_recall_chars`.
+
+## Local Skills
+
+Skills live in configured directories such as:
+
+```text
+~/.colibri/skills/<name>/SKILL.md
+```
+
+Optional `skill.toml` files can declare commands for `skill.run`.
+
+Colibri also ships the built-in `create-colibri-skill` guidance skill. Skill loading uses progressive disclosure: metadata is indexed first, and only selected skill instructions are read into a turn.
+
+## Context And Memory Limits
+
+Important defaults:
+
+```toml
+[model]
+max_output_tokens = 16384
+timeout_seconds = 60
+
+[session]
+max_tool_rounds = 32
+recent_message_limit = 96
+compact_trigger_chars = 24000
+summary_max_chars = 24000
+model_compact = true
+transcript = true
+
+[tools]
+max_result_chars = 32000
+
+[gateway]
+max_sessions = 4
+session_idle_seconds = 600
+```
+
+Old messages outside `recent_message_limit` are compacted into a bounded rolling summary. Model input is trimmed to fit `compact_trigger_chars` while preserving the latest user message.
 
 ## Transcripts
 
-When `session.transcript = true`, the CLI writes compact JSONL events to:
+When `session.transcript = true`, Colibri writes compact JSONL events to:
 
 ```text
 ~/.colibri/transcripts/YYYY-MM-DD.jsonl
 ```
 
-Set `COLIBRI_HOME` to change the base directory. Transcript events include user messages, assistant messages, tool calls, permission decisions, tool results, model errors, and tool round limits. API keys are not logged by the runtime.
+CLI and gateway sessions both use transcript logging. Gateway transcript payloads include channel metadata such as `channel`, `sender_id`, and `session_key`.
+
+## Console Status And Diagnostics
+
+When `console.status = true`, concise status lines go to `stderr`:
+
+```text
+[colibri] ready model=fake-colibri-model
+[colibri] thinking
+[colibri] tool files.read ok chars=1284
+```
+
+Model answers stay on `stdout`.
+
+Diagnostics:
+
+```bash
+uv run python -m colibri.cli diagnostics
+```
 
 ## Systemd
 
-An example service is available at:
+An example service file is available:
 
 ```text
 deploy/systemd/colibri-repl.service
 ```
 
-The example uses `Restart=no` because REPL idle timeout and `Restart=always` would restart the process after normal idle exits. Long-running daemon mode is intentionally left for future work.
+For gateway deployments, use `gateway run` as the foreground command under a service manager.

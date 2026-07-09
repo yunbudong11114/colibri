@@ -4,7 +4,7 @@ base_url = "https://your-openai-compatible-api.example/v1"
 model = "ZHIPU/GLM-5.2"
 api_key = ""
 timeout_seconds = 60
-max_output_tokens = 8192
+max_output_tokens = 16384
 
 [session]
 max_tool_rounds = 32

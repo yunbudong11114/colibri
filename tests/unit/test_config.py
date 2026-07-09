@@ -9,7 +9,7 @@ def test_default_config_uses_small_device_limits():
     assert config.model.provider == "fake"
     assert config.model.model == "fake-colibri-model"
     assert config.model.api_key == ""
-    assert config.model.max_output_tokens == 8192
+    assert config.model.max_output_tokens == 16384
     assert config.session.max_tool_rounds == 32
     assert config.session.recent_message_limit == 96
     assert config.session.compact_trigger_chars == 24000

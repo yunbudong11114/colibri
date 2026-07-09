@@ -4,7 +4,7 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4.1-mini"
 api_key = ""
 timeout_seconds = 60
-max_output_tokens = 8192
+max_output_tokens = 16384
 
 [session]
 max_tool_rounds = 32

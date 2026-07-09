@@ -20,7 +20,7 @@ The project was originally created as `cardputer-agent`, then fully renamed to C
 - Approved design: `docs/superpowers/specs/2026-07-01-colibri-design.md`.
 - Completed Milestone 1 plan: `docs/superpowers/plans/2026-07-01-colibri-milestone-1.md`.
 - Hardware reference: `docs/reference/cardputerzero-summary.md`.
-- Claude Code architecture reference: `docs/reference/claude-code-agent-core-analysis.md`.
+- Local Claude Code, PicoClaw, and ZeroClaw research notes are private references and are intentionally not uploaded.
 
 Important project rule from the active user instructions: before modifying code, update the design documentation first, complete the design change, and only then modify code.
 
