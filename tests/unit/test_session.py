@@ -224,7 +224,7 @@ def test_submit_executes_tool_call_and_returns_final_text(tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("tool result text", encoding="utf-8")
     config = AgentConfig.default().with_overrides(
-        {"files": {"roots": [str(tmp_path)]}, "memory": {"root": str(tmp_path / "memory")}}
+        {"files": {"roots": [str(tmp_path)]}, "memory": {"enabled": False, "root": str(tmp_path / "memory")}}
     )
     model = ScriptedToolModel(path=str(note))
     session = AgentSession(
@@ -358,7 +358,7 @@ def test_session_writes_transcript_events(tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("tool result text", encoding="utf-8")
     config = AgentConfig.default().with_overrides(
-        {"files": {"roots": [str(tmp_path)]}, "memory": {"root": str(tmp_path / "memory")}}
+        {"files": {"roots": [str(tmp_path)]}, "memory": {"enabled": False, "root": str(tmp_path / "memory")}}
     )
     transcript = MemoryTranscript()
     session = AgentSession(

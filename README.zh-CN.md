@@ -225,6 +225,8 @@ default_permission = "allow_read_confirm_write"
 
 当 `memory.enabled = true` 时，Colibri 会把 `MEMORY.md` 和 `USER.md` 作为有界 always-on 上下文注入模型。详细记忆检索交给模型判断：模型先用 `memory.search` 搜索 `INDEX.md`，再用 `memory.read` 读取关联的 `topics/*.md` 文件。自动注入受 `memory.max_recall_chars` 限制。
 
+如果 memory 目录不存在，或目录中没有任何文件，Colibri 会在首次加载 memory 时创建样例 `MEMORY.md`、`USER.md`、`INDEX.md` 和 `topics/sample.md`。已有 memory 文件不会被覆盖。
+
 `USER.md` 应控制在 600 字符以内，`MEMORY.md` 应控制在 1800 字符以内。如果某次 `memory.write` 写入后导致文件超限，工具结果会提醒模型合并整理，并用 `mode="replace"` 重写。
 
 ## 本地 Skills

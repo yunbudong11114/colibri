@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from colibri.config import AgentConfig
 
@@ -8,6 +9,49 @@ from colibri.config import AgentConfig
 ALWAYS_ON_MEMORY_FILES = ("MEMORY.md", "USER.md")
 ALWAYS_ON_MEMORY_FILE_LIMITS = {"MEMORY.md": 1800, "USER.md": 600}
 _TRUNCATED_SUFFIX = "\n...[truncated]"
+_SAMPLE_MEMORY_FILES = {
+    "MEMORY.md": """---
+type: system
+description: Colibri 长期事实和项目上下文；首次真实写入时直接覆盖样例文本
+updated: 2026-07-09
+---
+
+- 用途：记录稳定事实、项目决策、运行环境和未来对话需要长期记住的上下文。
+- 修改规则：用户或大模型需要修改 memory 时，请先去重和合并，再用 `memory.write` 重写本文件；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+""",
+    "USER.md": """---
+type: user
+description: 用户偏好和协作方式；首次真实写入时直接覆盖样例文本
+updated: 2026-07-09
+---
+
+- 用途：记录用户画像、偏好、称呼、语言风格和协作习惯。
+- 修改规则：用户或大模型需要修改用户记忆时，请合并同类偏好并重写本文件，保持简短；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+""",
+    "INDEX.md": """---
+type: reference
+description: memory topic 索引；首次真实写入时直接覆盖样例文本
+updated: 2026-07-09
+---
+
+# Memory Index
+
+- [sample](topics/sample.md): sample 示例 topic 详细记忆 写法 维护 memory search index
+
+修改规则：新增或实质修改 `topics/*.md` 时，也要重写本索引中的对应条目。冒号后写多个关键词、别名和描述词，方便 `memory.search` 用子串匹配检索。首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+""",
+    "topics/sample.md": """---
+type: reference
+description: 样例详细记忆 topic；首次真实写入时直接覆盖样例文本
+updated: 2026-07-09
+---
+
+# Sample Topic
+
+- 用途：topic 文件用于保存比 `MEMORY.md` 更长、更细的专项信息，例如设备、项目设计、环境快照或长期任务背景。
+- 修改规则：用户或大模型需要修改该 topic 时，请去重、合并、重写相关段落；如果主题说明变化，也要同步更新 `INDEX.md`。首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+""",
+}
 
 
 @dataclass(frozen=True)
@@ -26,6 +70,7 @@ class MemoryContext:
             return MemoryContextResult(text="", files=[])
 
         root = self.config.memory.root.expanduser()
+        _bootstrap_memory_root(root)
         blocks: list[str] = ["Always-on memory:"]
         loaded_files: list[str] = []
         any_file_truncated = False
@@ -64,3 +109,17 @@ def _bound_file_content(filename: str, content: str) -> tuple[str, bool]:
         return content, False
     keep = max(0, limit - len(_TRUNCATED_SUFFIX))
     return content[:keep] + _TRUNCATED_SUFFIX, True
+
+
+def _bootstrap_memory_root(root: Path) -> None:
+    try:
+        if root.exists() and any(path.is_file() for path in root.rglob("*")):
+            return
+        for relative_name, content in _SAMPLE_MEMORY_FILES.items():
+            path = root / relative_name
+            if path.exists():
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+    except OSError:
+        return

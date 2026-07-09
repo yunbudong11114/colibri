@@ -64,12 +64,26 @@ Update `SYSTEM_PROMPT` and `shell.run` description:
 
 ### Permission Prompt UX
 
-Existing permission prompts already show path-based prompts for `file_path` subjects. By classifying shell write attempts as `file_path`, Weixin prompts become path-oriented rather than dumping only a giant command. The transcript will still retain the original shell command for auditing.
+Permission prompts should prefer human-checkable paths over raw tool arguments.
+
+Rules:
+
+- `files.write` should always classify as a `file_path` permission subject, even when the target is under the startup cwd or configured file roots. This keeps write approval prompts path-oriented.
+- `files.read` and `files.list` may keep the existing default read-only allow behavior for paths inside allowed roots; out-of-root paths still classify as `file_path`.
+- `file_path` prompts must show the resolved absolute path and, for shell redirection, the original shell command.
+- `files.write` prompts must not dump the full `content` argument. They should show content size and at most a short preview.
+- `memory.write` is a memory namespace operation, not a filesystem path operation. Its prompt should show `file`/`topic`, `mode`, and content size/preview rather than an absolute path.
+- Console and Weixin permission prompts should use the same formatter so channel behavior does not drift.
+
+The transcript may still retain raw tool-call arguments for auditing.
 
 ## Testing
 
 - Add tests that `files.write` writes inside an allowed root and rejects outside roots.
 - Add tests that out-of-root `files.write` prompts for `file_path` permission.
+- Add tests that in-root `files.write` prompts display a resolved absolute path and hide full content.
+- Add tests that `memory.write` prompts display memory target and content summary instead of full content.
+- Add tests that Weixin permission prompts use the same sanitized formatter.
 - Add tests that shell redirection to an out-of-root path produces a `file_path` permission subject.
 - Add tests that registry exposes `files.write`.
 - Run focused tests for tools, permissions, session, and registry behavior.

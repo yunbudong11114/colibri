@@ -134,6 +134,47 @@ def test_weixin_permission_prompter_sends_prompt_and_maps_reply():
     assert "pwd" in api.sent[0][2]
 
 
+def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content(tmp_path):
+    api = FakeWeixinApi(
+        [
+            {
+                "msgs": [
+                    {
+                        "message_type": 1,
+                        "message_state": 2,
+                        "from_user_id": "user-1",
+                        "item_list": [{"type": 1, "text_item": {"text": "y"}}],
+                    }
+                ]
+            }
+        ]
+    )
+    channel = WeixinChannel(WeixinChannelConfig(enabled=True, token="token"), api=api)
+    content = 'print("Hello, World!")\n'
+    request = PermissionRequest(
+        tool_name="files.write",
+        arguments={"path": "hello_world.py", "content": content},
+        read_only=False,
+        subject=PermissionSubject(
+            kind="file_path",
+            tool_name="files.write",
+            file_path=str((tmp_path / "hello_world.py").resolve()),
+            file_root=str(tmp_path.resolve()),
+            read_only=False,
+        ),
+    )
+
+    choice = WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
+
+    prompt = api.sent[0][2]
+    assert choice == "y"
+    assert f"path: {(tmp_path / 'hello_world.py').resolve()}" in prompt
+    assert "content:" in prompt
+    assert "chars" in prompt
+    assert "bytes" in prompt
+    assert content not in prompt
+
+
 def test_gateway_session_cache_reuses_and_evicts_oldest(tmp_path):
     config = AgentConfig.default()
     registry = ToolRegistry.from_config(config, cwd=tmp_path)

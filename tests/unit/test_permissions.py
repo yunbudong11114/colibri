@@ -6,7 +6,12 @@ from colibri.config import AgentConfig
 from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
 from colibri.tools.builtin import FilesListTool, FilesWriteTool, ShellRunTool
-from colibri.tools.permissions import PermissionPolicy, PermissionRequest
+from colibri.tools.permissions import (
+    PermissionPolicy,
+    PermissionRequest,
+    PermissionSubject,
+    format_permission_prompt_lines,
+)
 
 
 @dataclass
@@ -235,6 +240,45 @@ def test_out_of_root_files_write_prompts_as_file_path(tmp_path):
     assert result.subject_kind == "file_path"
     assert result.file_path == str(target.resolve())
     assert prompter.requests[0].subject.kind == "file_path"
+
+
+def test_in_root_files_write_prompts_with_absolute_path_and_content_summary(tmp_path):
+    config = AgentConfig.default()
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+    content = 'print("Hello, World!")\n'
+
+    result = policy.decide(FilesWriteTool(), {"path": "hello_world.py", "content": content}, context)
+
+    assert result.allowed
+    request = prompter.requests[0]
+    assert request.subject.kind == "file_path"
+    assert request.subject.file_path == str((tmp_path / "hello_world.py").resolve())
+    lines = format_permission_prompt_lines(request)
+    assert lines[0] == f"file: files.write {(tmp_path / 'hello_world.py').resolve()}"
+    assert any("content:" in line and "chars" in line and "bytes" in line for line in lines)
+    assert content not in "\n".join(lines)
+
+
+def test_memory_write_prompt_summarizes_content_without_absolute_path(tmp_path):
+    request = PermissionRequest(
+        tool_name="memory.write",
+        arguments={"file": "USER.md", "mode": "replace", "content": "喜欢中文回答" * 20},
+        read_only=False,
+        subject=PermissionSubject(kind="tool", tool_name="memory.write", read_only=False),
+    )
+
+    text = "\n".join(format_permission_prompt_lines(request))
+
+    assert "tool: memory.write" in text
+    assert "file: USER.md" in text
+    assert "mode: replace" in text
+    assert "content:" in text
+    assert "chars" in text
+    assert "bytes" in text
+    assert "喜欢中文回答" * 20 not in text
+    assert "/USER.md" not in text
 
 
 def test_shell_redirection_to_out_of_root_path_prompts_as_file_path(tmp_path):

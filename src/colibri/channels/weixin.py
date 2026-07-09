@@ -12,7 +12,7 @@ import urllib.request
 from colibri.channels.base import ChannelContext, InboundMessage
 from colibri.config import WeixinChannelConfig
 from colibri.terminal_qr import render_terminal_qr
-from colibri.tools.permissions import PermissionRequest
+from colibri.tools.permissions import PermissionRequest, format_permission_prompt_lines
 
 
 WEIXIN_CHANNEL_VERSION = "2.1.1"
@@ -290,14 +290,11 @@ def _api_error_text(action: str, response: dict[str, Any]) -> str:
 
 def _permission_prompt_text(request: PermissionRequest) -> str:
     lines = [f"Colibri wants to run {request.tool_name}."]
-    if request.subject.file_path:
-        lines.append(f"path: {request.subject.file_path}")
-        if request.subject.shell_command:
-            lines.append(f"command: {request.subject.shell_command}")
-    elif request.subject.shell_command:
-        lines.append(f"command: {request.subject.shell_command}")
-    else:
-        lines.append(f"arguments: {request.arguments}")
+    for line in format_permission_prompt_lines(request):
+        if request.subject.kind == "file_path" and line.startswith("file: "):
+            lines.append("path: " + line.removeprefix("file: ").split(" ", 1)[-1])
+        else:
+            lines.append(line)
     lines.extend(["", "Reply one of:"])
     if request.subject.kind == "shell":
         lines.append("y=once s=session e=executable-session p=project n=deny")

@@ -51,13 +51,12 @@ class PermissionPrompter(Protocol):
 
 class ConsolePermissionPrompter:
     def confirm(self, request: PermissionRequest) -> str:
+        for line in format_permission_prompt_lines(request):
+            print(line)
         if request.subject.kind == "shell":
-            print(f"shell: {request.subject.shell_command}")
             return input("[y] once [s] session [e] executable-session [p] project [n] deny: ").strip().lower()
         if request.subject.kind == "file_path":
-            print(f"file: {request.tool_name} {request.subject.file_path}")
             return input("[y] once [s] session-dir [p] project-dir [n] deny: ").strip().lower()
-        print(f"tool: {request.tool_name} {request.arguments}")
         return input("[y] once [s] session [p] project [n] deny: ").strip().lower()
 
 
@@ -235,7 +234,9 @@ def permission_subject_for(
         raw_path = arguments.get("path")
         if isinstance(raw_path, str) and raw_path:
             resolved = resolve_file_path(raw_path, context.cwd)
-            if resolved is not None and not is_under_workspace_file_root(resolved, context):
+            if resolved is not None and (
+                tool.spec.name == "files.write" or not is_under_workspace_file_root(resolved, context)
+            ):
                 return PermissionSubject(
                     kind="file_path",
                     tool_name=tool.spec.name,
@@ -253,6 +254,53 @@ def _shell_write_path(command_text: str, argv: list[str], context: ToolContext |
     if target is None:
         return None
     return resolve_file_path(target, context.cwd)
+
+
+def format_permission_prompt_lines(request: PermissionRequest) -> list[str]:
+    if request.subject.kind == "shell":
+        return [f"shell: {request.subject.shell_command or ''}"]
+
+    if request.subject.kind == "file_path":
+        lines = [f"file: {request.tool_name} {request.subject.file_path or ''}"]
+        if request.subject.shell_command:
+            lines.append(f"command: {request.subject.shell_command}")
+        if request.tool_name == "files.write":
+            lines.append(_content_summary(request.arguments.get("content")))
+        return lines
+
+    if request.tool_name == "memory.write":
+        lines = [f"tool: {request.tool_name}"]
+        target = request.arguments.get("file") or request.arguments.get("topic")
+        if isinstance(target, str) and target:
+            lines.append(f"file: {target}")
+        mode = request.arguments.get("mode")
+        if isinstance(mode, str) and mode:
+            lines.append(f"mode: {mode}")
+        lines.append(_content_summary(request.arguments.get("content")))
+        return lines
+
+    return [f"tool: {request.tool_name} {_summarized_arguments(request.arguments)}"]
+
+
+def _summarized_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    summarized: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key == "content":
+            summarized[key] = _content_summary(value).removeprefix("content: ")
+        else:
+            summarized[key] = value
+    return summarized
+
+
+def _content_summary(value: Any) -> str:
+    if not isinstance(value, str):
+        return "content: missing"
+    char_count = len(value)
+    byte_count = len(value.encode("utf-8"))
+    preview = value.replace("\n", "\\n")
+    if len(preview) > 40:
+        preview = preview[:37] + "..."
+    return f"content: {char_count} chars, {byte_count} bytes, preview={preview!r}"
 
 
 def _redirection_target(argv: list[str]) -> str | None:

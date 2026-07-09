@@ -47,6 +47,32 @@ File roles:
 
 `MEMORY.md` and `USER.md` must stay short. `INDEX.md` should stay a manifest, not a content dump.
 
+When Colibri runs with memory enabled and the memory root does not exist, or the memory root exists but contains no files, Colibri should bootstrap a sample layout:
+
+```text
+~/.colibri/memory/
+  MEMORY.md
+  USER.md
+  INDEX.md
+  topics/
+    sample.md
+```
+
+Bootstrap must never overwrite existing files. Sample files must follow the same frontmatter format as normal memory files and explain:
+
+- what the file is for,
+- when the user or model should update that file,
+- that memory changes should rewrite or consolidate the corresponding file instead of repeatedly appending duplicate notes.
+- that the first real write should replace the sample file content instead of preserving the example text.
+
+The sample `INDEX.md` entry should be shaped for `memory.search`, which performs a simple case-insensitive substring match over whole `INDEX.md` lines. The text after `:` should therefore contain multiple searchable keywords, aliases, and short description words, for example:
+
+```markdown
+- [sample](topics/sample.md): sample 示例 topic 详细记忆 写法 维护 memory search index
+```
+
+This bootstrap is allowed to happen during memory context loading, before reading `MEMORY.md` and `USER.md`.
+
 ## 3. Headless Requirement
 
 Memory must run on pure Linux servers over SSH.
@@ -318,6 +344,8 @@ Memory context loading should never block a user turn with an exception.
 Required tests:
 
 - automatic context loads `MEMORY.md` and `USER.md`,
+- automatic context bootstraps sample memory files when the memory root is absent or empty,
+- automatic context does not overwrite existing memory files,
 - automatic context ignores `INDEX.md` and `topics/*.md`,
 - automatic context obeys `memory.max_recall_chars`,
 - automatic context does not inject memory write guidance or per-file maintenance warnings,

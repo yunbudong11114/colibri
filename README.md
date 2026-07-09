@@ -222,6 +222,8 @@ Persistent memory is Markdown-backed:
 
 When `memory.enabled = true`, Colibri injects bounded always-on context from `MEMORY.md` and `USER.md`. Detailed memory lookup is model-driven: the model uses `memory.search` to search `INDEX.md`, then `memory.read` to inspect linked `topics/*.md` files when prior context is needed. Automatic injection is bounded by `memory.max_recall_chars`.
 
+If the memory directory is missing or contains no files, Colibri bootstraps sample `MEMORY.md`, `USER.md`, `INDEX.md`, and `topics/sample.md` files on first memory load. Existing memory files are never overwritten.
+
 Keep `USER.md` under 600 characters and `MEMORY.md` under 1800 characters. If a `memory.write` call leaves either file over its limit, the tool result asks the model to consolidate it and replace the file.
 
 ## Local Skills
