@@ -102,7 +102,16 @@ def test_repl_idle_timeout_is_disabled_by_default(capsys):
     assert "idle_exit" not in captured.err
 
 
-def test_parser_accepts_gateway_command(monkeypatch):
+def test_gateway_without_action_prints_usage(capsys):
+    exit_code = main(["gateway"])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "colibri gateway {run,start,stop,restart,status}" in captured.err
+
+
+def test_parser_accepts_gateway_run_command(monkeypatch):
     called = []
 
     class FakeGateway:
@@ -114,10 +123,66 @@ def test_parser_accepts_gateway_command(monkeypatch):
 
     monkeypatch.setattr("colibri.cli.GatewayRunner", FakeGateway)
 
-    exit_code = main(["gateway"])
+    exit_code = main(["gateway", "run"])
 
     assert exit_code == 0
     assert called[-1] == "run"
+
+
+def test_gateway_start_uses_process_manager(monkeypatch, capsys, tmp_path):
+    calls = []
+
+    class FakeStatus:
+        running = True
+        pid = 123
+        rss_kb = 456
+        config_path = "default"
+        cwd = str(tmp_path)
+        log_path = tmp_path / "gateway.log"
+        state_path = tmp_path / "gateway.json"
+        started_at = "2026-07-09T00:00:00Z"
+        reason = ""
+
+    class FakeManager:
+        def start(self, config_path=None):
+            calls.append(("start", config_path))
+            return FakeStatus()
+
+    monkeypatch.setattr("colibri.cli.GatewayProcessManager", lambda: FakeManager())
+
+    exit_code = main(["gateway", "start"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert calls == [("start", None)]
+    assert "running=true" in captured.out
+    assert "pid=123" in captured.out
+
+
+def test_gateway_status_uses_process_manager(monkeypatch, capsys, tmp_path):
+    class FakeStatus:
+        running = False
+        pid = None
+        rss_kb = None
+        config_path = "default"
+        cwd = ""
+        log_path = tmp_path / "gateway.log"
+        state_path = tmp_path / "gateway.json"
+        started_at = ""
+        reason = "state_missing"
+
+    class FakeManager:
+        def status(self):
+            return FakeStatus()
+
+    monkeypatch.setattr("colibri.cli.GatewayProcessManager", lambda: FakeManager())
+
+    exit_code = main(["gateway", "status"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "running=false" in captured.out
+    assert "reason=state_missing" in captured.out
 
 
 def test_auth_weixin_saves_token_without_printing_secret(monkeypatch, tmp_path, capsys):

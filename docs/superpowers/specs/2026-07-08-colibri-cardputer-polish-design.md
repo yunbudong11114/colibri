@@ -130,7 +130,7 @@ tools=shell,files,memory,skills
 memory_root=/home/cardputer/.colibri/memory exists=true
 skills_dirs=1 skills_found=3
 transcript=true rss_kb=28672
-recent_message_limit=16 compact_trigger_chars=36000 summary_max_chars=6000
+recent_message_limit=96 compact_trigger_chars=24000 summary_max_chars=24000
 ```
 
 ## 6. Systemd Example

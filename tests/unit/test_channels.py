@@ -1,12 +1,20 @@
 from pathlib import Path
+import json
+
+import pytest
 
 from colibri.channels.base import InboundMessage
-from colibri.channels.weixin import WeixinChannel, WeixinPermissionPrompter
+from colibri.channels.weixin import WeixinChannel, WeixinPermissionPrompter, perform_weixin_auth
 from colibri.config import AgentConfig, WeixinChannelConfig
 from colibri.gateway import GatewayRunner, GatewaySessionCache
 from colibri.model.fake import FakeModelClient
 from colibri.tools.permissions import PermissionRequest, PermissionSubject
 from colibri.tools.registry import ToolRegistry
+
+
+@pytest.fixture(autouse=True)
+def isolate_colibri_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLIBRI_HOME", str(tmp_path / "home"))
 
 
 class FakeWeixinApi:
@@ -162,6 +170,30 @@ def test_gateway_runner_handles_message_with_weixin_permission_policy(tmp_path):
     assert reply == "fake: hi"
 
 
+def test_gateway_runner_writes_channel_metadata_to_transcript(tmp_path, monkeypatch):
+    monkeypatch.setenv("COLIBRI_HOME", str(tmp_path / "home"))
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
+    channel = FakeChannel("weixin", [])
+    runner = GatewayRunner(
+        config=config,
+        model=FakeModelClient(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+
+    reply = runner.handle_message(channel, InboundMessage(channel="weixin", sender_id="user-1", text="hi"))
+    runner.sessions.close()
+
+    transcript_files = list((tmp_path / "home" / "transcripts").glob("*.jsonl"))
+    assert reply == "fake: hi"
+    assert len(transcript_files) == 1
+    event = json.loads(transcript_files[0].read_text(encoding="utf-8").splitlines()[0])
+    assert event["type"] == "user_message"
+    assert event["payload"]["text"] == "hi"
+    assert event["payload"]["channel"] == "weixin"
+    assert event["payload"]["sender_id"] == "user-1"
+    assert event["payload"]["session_key"] == "weixin:user-1"
+
+
 def test_gateway_runner_runs_all_enabled_channels(tmp_path, monkeypatch):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
     first = FakeChannel("first", [InboundMessage(channel="first", sender_id="user-1", text="one")])
@@ -177,3 +209,35 @@ def test_gateway_runner_runs_all_enabled_channels(tmp_path, monkeypatch):
 
     assert first.replies == ["fake: one"]
     assert second.replies == ["fake: two"]
+
+
+def test_perform_weixin_auth_prints_terminal_qr(monkeypatch):
+    class FakeAuthApi:
+        def __init__(self, base_url, timeout_seconds):
+            pass
+
+        def get_qrcode(self):
+            return {
+                "qrcode_img_content": "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=4b69ff82f873485e97acae885b11437c&bot_type=3",
+                "qrcode": "qr-1",
+            }
+
+        def get_qrcode_status(self, qrcode):
+            return {
+                "status": "confirmed",
+                "bot_token": "token",
+                "ilink_bot_id": "bot-1",
+                "ilink_user_id": "user-1",
+                "baseurl": "https://redirect.weixin.test/",
+            }
+
+    lines = []
+    monkeypatch.setattr("colibri.channels.weixin.WeixinApiClient", FakeAuthApi)
+
+    result = perform_weixin_auth("https://ilinkai.weixin.qq.com/", timeout_seconds=1, print_func=lines.append)
+
+    output = "\n".join(lines)
+    assert result.token == "token"
+    assert "Scan this Weixin QR code with WeChat:" in output
+    assert "██" in output
+    assert "QR payload:" in output

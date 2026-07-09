@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+
+@dataclass(frozen=True)
+class GatewayProcessStatus:
+    running: bool
+    pid: int | None
+    state_path: Path
+    log_path: Path
+    config_path: str
+    cwd: str
+    started_at: str
+    rss_kb: int | None = None
+    reason: str = ""
+
+
+class GatewayProcessManager:
+    def __init__(self, *, home: Path | None = None, cwd: Path | None = None):
+        self.home = home or _colibri_home()
+        self.cwd = cwd or Path.cwd()
+        self.run_dir = self.home / "run"
+        self.log_dir = self.home / "logs"
+        self.state_path = self.run_dir / "gateway.json"
+        self.log_path = self.log_dir / "gateway.log"
+
+    def start(self, config_path: Path | None = None) -> GatewayProcessStatus:
+        status = self.status()
+        if status.running:
+            return status
+
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        command = _gateway_run_command(config_path)
+        with self.log_path.open("ab") as log:
+            process = subprocess.Popen(
+                command,
+                cwd=self.cwd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        state = {
+            "pid": process.pid,
+            "config": str(config_path.expanduser()) if config_path is not None else "default",
+            "cwd": str(self.cwd),
+            "log": str(self.log_path),
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "command": command,
+        }
+        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return self.status()
+
+    def stop(self, *, timeout_seconds: float = 5.0) -> GatewayProcessStatus:
+        status = self.status()
+        if not status.running or status.pid is None:
+            return status
+        os.kill(status.pid, signal.SIGTERM)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if not _pid_running(status.pid):
+                return self.status()
+            time.sleep(0.1)
+        if _pid_running(status.pid):
+            os.kill(status.pid, signal.SIGKILL)
+        return self.status()
+
+    def restart(self, config_path: Path | None = None) -> GatewayProcessStatus:
+        self.stop()
+        return self.start(config_path)
+
+    def status(self) -> GatewayProcessStatus:
+        state = self._load_state()
+        pid = _int_or_none(state.get("pid"))
+        running = _pid_running(pid) if pid is not None else False
+        reason = ""
+        if not self.state_path.exists():
+            reason = "state_missing"
+        elif not running:
+            reason = "not_running"
+        return GatewayProcessStatus(
+            running=running,
+            pid=pid,
+            state_path=self.state_path,
+            log_path=Path(str(state.get("log") or self.log_path)),
+            config_path=str(state.get("config") or "default"),
+            cwd=str(state.get("cwd") or ""),
+            started_at=str(state.get("started_at") or ""),
+            rss_kb=_rss_kb(pid) if running and pid is not None else None,
+            reason=reason,
+        )
+
+    def _load_state(self) -> dict:
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+
+def format_gateway_status(status: GatewayProcessStatus) -> list[str]:
+    lines = [
+        f"running={str(status.running).lower()}",
+        f"pid={status.pid if status.pid is not None else 'unknown'}",
+        f"rss_kb={status.rss_kb if status.rss_kb is not None else 'unknown'}",
+        f"config={status.config_path}",
+        f"cwd={status.cwd or 'unknown'}",
+        f"log={status.log_path}",
+        f"state={status.state_path}",
+    ]
+    if status.started_at:
+        lines.append(f"started_at={status.started_at}")
+    if status.reason:
+        lines.append(f"reason={status.reason}")
+    return lines
+
+
+def _gateway_run_command(config_path: Path | None) -> list[str]:
+    command = [sys.executable, "-m", "colibri.cli"]
+    if config_path is not None:
+        command.extend(["--config", str(config_path)])
+    command.extend(["gateway", "run"])
+    return command
+
+
+def _colibri_home() -> Path:
+    return Path(os.environ.get("COLIBRI_HOME", "~/.colibri")).expanduser()
+
+
+def _pid_running(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _rss_kb(pid: int) -> int | None:
+    proc_status = Path("/proc") / str(pid) / "status"
+    try:
+        for line in proc_status.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1])
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = result.stdout.strip()
+    return int(text) if text.isdigit() else None
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

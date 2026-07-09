@@ -67,16 +67,34 @@ auth_timeout_seconds = 300
 
 ```bash
 colibri auth weixin
-colibri gateway
+colibri gateway run
+colibri gateway start
+colibri gateway stop
+colibri gateway restart
+colibri gateway status
 ```
 
-`auth weixin` starts the iLink QR login flow. Without third-party QR libraries, Colibri prints the QR payload URL. If the terminal or client can render it externally, the same payload is sufficient for login.
+`auth weixin` starts the iLink QR login flow. Colibri renders the QR payload directly in the terminal using a small built-in QR encoder and block-character renderer. The encoder is dependency-free and targets the short iLink login URLs returned by Weixin auth. If the payload is too large or rendering fails, Colibri still prints the raw payload URL as a fallback.
 
 On successful login, Colibri writes `channels.weixin.token`, `channels.weixin.base_url`, and `channels.weixin.enabled = true` into the active config path. If `--config` is omitted, it writes `~/.colibri/config.toml`.
 
 Auth config writes must preserve unrelated `channels.weixin` keys such as `allow_from`, `poll_timeout_seconds`, and `auth_timeout_seconds`.
 
-`gateway` loads config, starts all enabled channels from `gateway.enabled_channels`, and blocks until interrupted.
+`gateway run` loads config, starts all enabled channels from `gateway.enabled_channels`, and blocks until interrupted. It is the foreground entry for debugging and service managers such as systemd.
+
+`gateway start` starts the same gateway runner in the background and returns immediately. `gateway stop`, `gateway restart`, and `gateway status` manage that background process through a small state file:
+
+```text
+~/.colibri/run/gateway.json
+```
+
+Background gateway stdout and stderr are appended to:
+
+```text
+~/.colibri/logs/gateway.log
+```
+
+The bare `colibri gateway` command is a command group, not a foreground runner. It should print the available actions and return a usage error instead of blocking a terminal.
 
 ## Internal Interfaces
 
@@ -84,12 +102,27 @@ Auth config writes must preserve unrelated `channels.weixin` keys such as `allow
 
 - builds one model client,
 - builds one tool registry,
+- opens one shared transcript writer when `session.transcript = true`,
 - creates per-peer sessions lazily,
 - evicts idle sessions,
 - routes channel messages into `AgentSession.submit()`,
 - sends replies back through the originating channel.
 
 Gateway starts one lightweight worker thread per enabled channel. This keeps the first Weixin long-poll implementation simple while avoiding a design where one blocking channel prevents future channels from starting.
+
+Gateway transcript logging uses the same default path as CLI mode:
+
+```text
+~/.colibri/transcripts/YYYY-MM-DD.jsonl
+```
+
+Each channel user session receives a small transcript wrapper that injects channel metadata into every event payload:
+
+```json
+{"channel":"weixin","sender_id":"...","session_key":"weixin:..."}
+```
+
+The underlying writer is shared and thread-safe so multiple channel workers do not open competing file handles or interleave JSONL writes. Session wrappers do not close the shared writer; the gateway closes it once during shutdown.
 
 `colibri.channels.base` defines:
 

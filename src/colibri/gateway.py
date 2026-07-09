@@ -14,6 +14,7 @@ from colibri.model.base import ModelClient
 from colibri.session import AgentSession
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
+from colibri.transcript import ScopedTranscriptWriter, TranscriptSink, TranscriptWriter
 
 
 @dataclass
@@ -30,6 +31,7 @@ class GatewaySessionCache:
         registry: ToolRegistry,
         max_sessions: int,
         idle_seconds: int,
+        transcript: TranscriptSink | None = None,
         monotonic_func: Callable[[], float] = monotonic,
     ):
         self.config = config
@@ -37,10 +39,16 @@ class GatewaySessionCache:
         self.registry = registry
         self.max_sessions = max(1, max_sessions)
         self.idle_seconds = idle_seconds
+        self.transcript = transcript
         self.monotonic = monotonic_func
         self._entries: dict[str, GatewaySessionEntry] = {}
 
-    def get(self, key: str, policy: PermissionPolicy) -> AgentSession:
+    def get(
+        self,
+        key: str,
+        policy: PermissionPolicy,
+        transcript_metadata: dict[str, str] | None = None,
+    ) -> AgentSession:
         self._evict_idle()
         now = self.monotonic()
         entry = self._entries.get(key)
@@ -55,6 +63,9 @@ class GatewaySessionCache:
             model=self.model,
             tools=self.registry,
             permission_policy=policy,
+            transcript=ScopedTranscriptWriter(self.transcript, transcript_metadata or {"session_key": key})
+            if self.transcript is not None
+            else None,
         )
         self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
         return session
@@ -68,6 +79,9 @@ class GatewaySessionCache:
         for entry in self._entries.values():
             entry.session.close()
         self._entries.clear()
+        if self.transcript is not None:
+            self.transcript.close()
+            self.transcript = None
 
     def _evict_idle(self) -> None:
         if self.idle_seconds <= 0:
@@ -98,12 +112,14 @@ class GatewayRunner:
         self.config = config
         self.model = model
         self.registry = registry or ToolRegistry.from_config(config, cwd=cwd)
+        transcript = TranscriptWriter.default() if config.session.transcript else None
         self.sessions = GatewaySessionCache(
             config=config,
             model=model,
             registry=self.registry,
             max_sessions=config.gateway.max_sessions,
             idle_seconds=config.gateway.session_idle_seconds,
+            transcript=transcript,
         )
 
     def run(self, stop_requested: Callable[[], bool] = lambda: False) -> None:
@@ -156,7 +172,15 @@ class GatewayRunner:
             else None,
             cwd=self.registry.cwd,
         )
-        session = self.sessions.get(key, policy)
+        session = self.sessions.get(
+            key,
+            policy,
+            transcript_metadata={
+                "channel": message.channel,
+                "sender_id": message.sender_id,
+                "session_key": key,
+            },
+        )
         response = session.submit(message.text)
         self.sessions.touch(key)
         return response.text

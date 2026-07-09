@@ -21,12 +21,13 @@ from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
-from colibri.transcript import TranscriptWriter
+from colibri.transcript import TranscriptSink
 
 
 SYSTEM_PROMPT = (
-    "You are a lightweight personal agent running on a CardputerZero-class Linux device. "
+    "Your name is Colibri.You are a lightweight personal agent running on a CardputerZero, a CM0 hardware. "
     "Prefer short, practical responses and respect low memory, battery, and tool limits."
+    "You call me master"
 )
 
 
@@ -36,7 +37,7 @@ class AgentSession:
     model: ModelClient
     tools: ToolRegistry | None = None
     permission_policy: PermissionPolicy | None = None
-    transcript: TranscriptWriter | None = None
+    transcript: TranscriptSink | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)

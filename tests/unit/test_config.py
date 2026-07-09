@@ -10,14 +10,14 @@ def test_default_config_uses_small_device_limits():
     assert config.model.model == "fake-colibri-model"
     assert config.model.api_key == ""
     assert config.model.max_output_tokens == 8192
-    assert config.session.max_tool_rounds == 24
-    assert config.session.recent_message_limit == 80
-    assert config.session.compact_trigger_chars == 64000
-    assert config.session.summary_max_chars == 10000
+    assert config.session.max_tool_rounds == 32
+    assert config.session.recent_message_limit == 96
+    assert config.session.compact_trigger_chars == 24000
+    assert config.session.summary_max_chars == 24000
     assert config.session.model_compact
     assert not config.session.idle_exit_enabled
     assert config.session.idle_exit_seconds == 300
-    assert config.tools.max_result_chars == 16000
+    assert config.tools.max_result_chars == 32000
     assert "web" in config.tools.enabled
     assert config.skills.max_loaded == 3
     assert config.skills.max_instruction_chars == 8000

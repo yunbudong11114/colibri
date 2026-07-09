@@ -11,6 +11,7 @@ import urllib.request
 
 from colibri.channels.base import ChannelContext, InboundMessage
 from colibri.config import WeixinChannelConfig
+from colibri.terminal_qr import render_terminal_qr
 from colibri.tools.permissions import PermissionRequest
 
 
@@ -231,7 +232,13 @@ def perform_weixin_auth(base_url: str, timeout_seconds: int, print_func: Callabl
     if not qr_payload or not qr_id:
         raise WeixinChannelError("Weixin auth did not return a QR code")
 
-    print_func("Scan this Weixin QR payload with WeChat:")
+    print_func("Scan this Weixin QR code with WeChat:")
+    rendered_qr = render_terminal_qr(qr_payload)
+    if rendered_qr:
+        print_func(rendered_qr)
+    else:
+        print_func("(QR payload is too large for the built-in terminal renderer.)")
+    print_func("QR payload:")
     print_func(qr_payload)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:

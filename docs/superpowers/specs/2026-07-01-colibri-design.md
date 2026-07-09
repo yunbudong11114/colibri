@@ -187,10 +187,10 @@ timeout_seconds = 60
 max_output_tokens = 8192
 
 [session]
-max_tool_rounds = 24
-recent_message_limit = 80
-compact_trigger_chars = 64000
-summary_max_chars = 10000
+max_tool_rounds = 32
+recent_message_limit = 96
+compact_trigger_chars = 24000
+summary_max_chars = 24000
 idle_exit_enabled = false
 idle_exit_seconds = 300
 transcript = true
@@ -198,7 +198,7 @@ transcript = true
 [tools]
 enabled = ["shell", "files", "web", "memory", "skills", "mcp"]
 default_permission = "allow_read_confirm_write"
-max_result_chars = 16000
+max_result_chars = 32000
 max_shell_seconds = 30
 
 [shell]

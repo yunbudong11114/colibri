@@ -20,7 +20,7 @@ def test_build_diagnostics_reports_core_fields(tmp_path):
     assert "provider=fake model=fake-colibri-model" in joined
     assert f"memory_root={tmp_path / 'memory'} exists=false" in joined
     assert "skills_dirs=1 skills_found=2" in joined
-    assert "recent_message_limit=80 compact_trigger_chars=64000 summary_max_chars=10000" in joined
+    assert "recent_message_limit=96 compact_trigger_chars=24000 summary_max_chars=24000" in joined
 
 
 def test_diagnostics_reports_project_permissions_file(tmp_path):

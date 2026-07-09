@@ -7,12 +7,16 @@ timeout_seconds = 60
 max_output_tokens = 8192
 
 [session]
-max_tool_rounds = 24
-recent_message_limit = 80
-compact_trigger_chars = 64000
+max_tool_rounds = 32
+recent_message_limit = 96
+compact_trigger_chars = 24000
+summary_max_chars = 24000
 model_compact = true
 idle_exit_enabled = false
 idle_exit_seconds = 300
+
+[tools]
+max_result_chars = 32000
 
 [web_search]
 engine = "baidu"

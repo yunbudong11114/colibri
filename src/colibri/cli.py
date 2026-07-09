@@ -17,6 +17,7 @@ from colibri.config import DEFAULT_USER_CONFIG, AgentConfig, ConfigError, expand
 from colibri.channels.weixin import WeixinChannelError, perform_weixin_auth
 from colibri.diagnostics import build_diagnostics
 from colibri.gateway import GatewayRunner
+from colibri.gateway_process import GatewayProcessManager, format_gateway_status
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.session import AgentSession
@@ -33,7 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("repl")
     subparsers.add_parser("diagnostics")
-    subparsers.add_parser("gateway")
+    gateway = subparsers.add_parser("gateway")
+    gateway_subparsers = gateway.add_subparsers(dest="gateway_action")
+    for action in ("run", "start", "stop", "restart", "status"):
+        gateway_subparsers.add_parser(action)
 
     auth = subparsers.add_parser("auth")
     auth_subparsers = auth.add_subparsers(dest="auth_provider", required=True)
@@ -73,10 +77,37 @@ def main(
             print(f"Config updated: {config_path}")
             return 0
 
-        if args.command == "gateway":
+        if args.command == "gateway" and args.gateway_action is None:
+            print("Usage: colibri gateway {run,start,stop,restart,status}", file=sys.stderr)
+            return 2
+
+        if args.command == "gateway" and args.gateway_action == "run":
             _write_ready_status(config, status)
             GatewayRunner(config=config, model=build_model_client(config.model)).run()
             return 0
+
+        if args.command == "gateway":
+            manager = GatewayProcessManager()
+            if args.gateway_action == "start":
+                gateway_status = manager.start(_active_config_path(args.config) if args.config is not None else None)
+                for line in format_gateway_status(gateway_status):
+                    print(line)
+                return 0
+            if args.gateway_action == "stop":
+                gateway_status = manager.stop()
+                for line in format_gateway_status(gateway_status):
+                    print(line)
+                return 0
+            if args.gateway_action == "restart":
+                gateway_status = manager.restart(_active_config_path(args.config) if args.config is not None else None)
+                for line in format_gateway_status(gateway_status):
+                    print(line)
+                return 0
+            if args.gateway_action == "status":
+                gateway_status = manager.status()
+                for line in format_gateway_status(gateway_status):
+                    print(line)
+                return 0
 
         transcript = TranscriptWriter.default() if config.session.transcript else None
         session = AgentSession(

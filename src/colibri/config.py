@@ -24,15 +24,15 @@ class ModelConfig:
     model: str = "fake-colibri-model"
     api_key: str = ""
     timeout_seconds: int = 60
-    max_output_tokens: int = 8192
+    max_output_tokens: int = 16384
 
 
 @dataclass(frozen=True)
 class SessionConfig:
-    max_tool_rounds: int = 24
-    recent_message_limit: int = 80
-    compact_trigger_chars: int = 64000
-    summary_max_chars: int = 10000
+    max_tool_rounds: int = 32
+    recent_message_limit: int = 96
+    compact_trigger_chars: int = 24000
+    summary_max_chars: int = 24000
     model_compact: bool = True
     idle_exit_enabled: bool = False
     idle_exit_seconds: int = 300
@@ -43,7 +43,7 @@ class SessionConfig:
 class ToolsConfig:
     enabled: list[str] = field(default_factory=lambda: ["shell", "files", "web", "memory", "skills", "mcp"])
     default_permission: str = "allow_read_confirm_write"
-    max_result_chars: int = 16000
+    max_result_chars: int = 32000
     max_shell_seconds: int = 30
 
 
