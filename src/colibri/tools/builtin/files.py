@@ -107,3 +107,39 @@ class FilesReadTool:
         text = path.read_text(encoding="utf-8", errors="replace")
         bounded, truncated = bound_tool_text(text, context.config.tools.max_result_chars)
         return ToolResult(ok=True, text=bounded, truncated=truncated)
+
+
+class FilesWriteTool:
+    spec = ToolSpec(
+        name="files.write",
+        description=(
+            "Write a UTF-8 text file under an allowed root. Use this for generated artifacts and file edits; "
+            "do not use shell redirection or heredocs to create files."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+        read_only=False,
+    )
+
+    def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        raw_path = _path_argument(arguments)
+        content = arguments.get("content")
+        if raw_path is None:
+            return ToolResult(ok=False, text="Missing path", error_type="invalid_arguments")
+        if not isinstance(content, str):
+            return ToolResult(ok=False, text="Missing content", error_type="invalid_arguments")
+        path = _resolve_allowed_path(raw_path, context)
+        if path is None:
+            return ToolResult(ok=False, text="Path is outside allowed roots", error_type="permission_denied")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as error:
+            return ToolResult(ok=False, text=str(error), error_type="execution_error")
+        return ToolResult(ok=True, text=f"Wrote {len(content.encode('utf-8'))} bytes to {path}")

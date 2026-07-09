@@ -14,7 +14,7 @@ from colibri.context import (
     summarize_messages,
     summary_context,
 )
-from colibri.memory import MemoryRecall
+from colibri.memory import MemoryContext
 from colibri.messages import AgentResponse, Message, ModelLimits, ToolCall
 from colibri.model.base import ModelClient
 from colibri.skills import SkillIndex
@@ -25,9 +25,8 @@ from colibri.transcript import TranscriptSink
 
 
 SYSTEM_PROMPT = (
-    "Your name is Colibri. You are a lightweight personal agent running on a CardputerZero, a CM0 hardware. "
+    "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. "
     "Prefer short, practical responses and respect low memory, battery, and tool limits. "
-    "You call me '主人'."
 )
 
 
@@ -44,21 +43,21 @@ class AgentSession:
     last_activity_at: float = field(default_factory=monotonic)
 
     def submit(self, user_text: str) -> AgentResponse:
-        bounded_text = self._bound_text(user_text, self.config.session.compact_trigger_chars)
+        bounded_text = self._bound_text(user_text, self.config.session.model_input_char_limit)
         self.messages.append(Message(role="user", content=bounded_text))
         self._write_transcript("user_message", {"text": bounded_text})
-        self._trim_recent_messages()
+        self._compact_messages_if_needed()
 
         registry = self.tools or ToolRegistry.from_config(self.config)
         if self.permission_policy is None:
             self.permission_policy = PermissionPolicy.from_config(self.config, cwd=registry.cwd)
         policy = self.permission_policy
         context = ToolContext(config=self.config, cwd=registry.cwd)
-        memory_result = MemoryRecall(self.config).recall(bounded_text, list(self.messages))
+        memory_result = MemoryContext(self.config).load()
         if memory_result.text:
             self._write_transcript(
-                "memory_recall",
-                {"topics": memory_result.topics, "truncated": memory_result.truncated},
+                "memory_context",
+                {"files": memory_result.files, "truncated": memory_result.truncated},
             )
         skill_result = SkillIndex.scan(self.config.skills.dirs).context_for(bounded_text, self.config.skills)
         if skill_result.text:
@@ -93,7 +92,7 @@ class AgentSession:
                 "assistant_message",
                 {"text": assistant_text, "tool_call_count": len(model_response.tool_calls)},
             )
-            self._trim_recent_messages()
+            self._compact_messages_if_needed()
 
             if not model_response.tool_calls:
                 self.last_activity_at = monotonic()
@@ -151,7 +150,7 @@ class AgentSession:
                 self.messages.append(
                     Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
                 )
-                self._trim_recent_messages()
+                self._compact_messages_if_needed()
                 model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
 
         limit_text = _round_limit_text(
@@ -164,7 +163,7 @@ class AgentSession:
             "round_limit",
             {"max_tool_rounds": self.config.session.max_tool_rounds, "text": limit_text},
         )
-        self._trim_recent_messages()
+        self._compact_messages_if_needed()
         self.last_activity_at = monotonic()
         return AgentResponse(text=limit_text, messages=list(self.messages))
 
@@ -177,32 +176,32 @@ class AgentSession:
         if self.transcript is not None:
             self.transcript.close()
 
-    def _trim_recent_messages(self) -> None:
+    def _compact_messages_if_needed(self) -> None:
         trigger_limit = max(1, self.config.session.trigger_message_limit)
         if len(self.messages) >= trigger_limit:
-            messages_before_compact = list(self.messages)
-            addition, mode = self._compact_dropped_messages(messages_before_compact)
+            messages_to_compact = list(self.messages)
+            addition, mode = self._compact_messages(messages_to_compact)
             self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
-            self.messages = _retained_recent_messages(
-                messages_before_compact,
+            self.messages = _retained_messages_after_compact(
+                messages_to_compact,
                 max(0, self.config.session.recent_message_limit),
             )
             self._write_transcript(
                 "context_compact",
                 {
-                    "dropped_messages": len(messages_before_compact) - len(self.messages),
-                    "compacted_messages": len(messages_before_compact),
+                    "removed_messages": len(messages_to_compact) - len(self.messages),
+                    "compacted_messages": len(messages_to_compact),
                     "kept_messages": len(self.messages),
                     "mode": mode,
                     "summary_chars": len(self.summary),
                 },
             )
 
-    def _compact_dropped_messages(self, dropped: list[Message]) -> tuple[str, str]:
+    def _compact_messages(self, messages: list[Message]) -> tuple[str, str]:
         if self._should_model_compact():
             try:
                 compact_response = self.model.complete(
-                    messages=[compact_prompt_message(self.summary, dropped)],
+                    messages=[compact_prompt_message(self.summary, messages)],
                     tools=[],
                     system=COMPACT_SYSTEM_PROMPT,
                     limits=ModelLimits(
@@ -221,7 +220,7 @@ class AgentSession:
                     "context_compact_error",
                     {"error_type": type(error).__name__, "message": str(error), "fallback": True},
                 )
-        return summarize_messages(dropped), "fallback"
+        return summarize_messages(messages), "fallback"
 
     def _should_model_compact(self) -> bool:
         return self.config.session.model_compact and self.config.model.provider != "fake"
@@ -257,7 +256,7 @@ class AgentSession:
 
     def _budgeted_model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
         messages = self._model_messages(memory_text, skill_text)
-        budgeted, dropped = budget_model_messages(messages, self.config.session.compact_trigger_chars)
+        budgeted, dropped = budget_model_messages(messages, self.config.session.model_input_char_limit)
         if dropped:
             self._write_transcript(
                 "context_budget",
@@ -276,7 +275,7 @@ def _denied_tool_text(call: ToolCall) -> str:
     return f"User denied {call.name}"
 
 
-def _retained_recent_messages(messages: list[Message], recent_limit: int) -> list[Message]:
+def _retained_messages_after_compact(messages: list[Message], recent_limit: int) -> list[Message]:
     if not messages:
         return []
     kept_start = max(0, len(messages) - recent_limit)

@@ -1,27 +1,47 @@
 [model]
+# 模型提供方；真实模型使用 openai_compatible。
 provider = "openai_compatible"
+# OpenAI-compatible API 基础地址。
 base_url = "https://api.openai.com/v1"
+# 模型名称。
 model = "gpt-5.5"
+# 模型 API Key；为空时默认读取 COLIBRI_API_KEY 环境变量。
 api_key = ""
+# 单次模型请求超时时间，单位秒。
 timeout_seconds = 60
+# 单次模型回复的最大输出 token 数。
 max_output_tokens = 16384
 
 [session]
+# 单次用户请求内允许的最大工具调用轮数。
 max_tool_rounds = 32
+# session 内消息数达到该值时触发历史压缩。
 trigger_message_limit = 96
+# 压缩后保留的最近消息条数。
 recent_message_limit = 12
-compact_trigger_chars = 192000
+# 每次发送给模型的输入字符上限，也用于限制单条用户输入长度。
+model_input_char_limit = 192000
+# 滚动摘要最多保留的字符数。
 summary_max_chars = 12000
+# 是否优先调用模型生成历史摘要；失败时会自动回退到本地摘要。
 model_compact = true
+# REPL 空闲自动退出是否启用。
 idle_exit_enabled = false
+# REPL 空闲自动退出等待秒数。
 idle_exit_seconds = 300
 
 [tools]
+# 单次工具结果写入上下文前的最大字符数。
 max_result_chars = 32000
 
 [web_search]
+# Web 搜索引擎名称。
 engine = "baidu"
+# Web 搜索 API Key。
 api_key = ""
+# Web 搜索 API endpoint。
 endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+# 单次搜索默认返回结果数。
 max_results = 10
+# Web 搜索请求超时时间，单位秒。
 timeout_seconds = 10

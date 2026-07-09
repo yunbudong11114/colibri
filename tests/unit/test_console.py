@@ -25,16 +25,16 @@ def test_status_transcript_maps_selected_events(capsys):
     status = ConsoleStatusWriter(enabled=True)
     wrapped = StatusTranscript(transcript=transcript, status=status)
 
-    wrapped.write("memory_recall", {"topics": ["devices"], "truncated": False})
+    wrapped.write("memory_context", {"files": ["MEMORY.md", "USER.md"], "truncated": False})
     wrapped.write("tool_result", {"name": "files.read", "ok": True, "text": "abcd"})
-    wrapped.write("context_compact", {"mode": "model", "dropped_messages": 2, "summary_chars": 120})
+    wrapped.write("context_compact", {"mode": "model", "removed_messages": 2, "summary_chars": 120})
 
     captured = capsys.readouterr()
-    assert "[colibri] memory topics=devices" in captured.err
+    assert "[colibri] memory files=MEMORY.md,USER.md" in captured.err
     assert "[colibri] tool files.read ok chars=4" in captured.err
-    assert "[colibri] compact mode=model dropped=2 summary_chars=120" in captured.err
+    assert "[colibri] compact mode=model removed=2 summary_chars=120" in captured.err
     assert [event_type for event_type, _payload in transcript.events] == [
-        "memory_recall",
+        "memory_context",
         "tool_result",
         "context_compact",
     ]

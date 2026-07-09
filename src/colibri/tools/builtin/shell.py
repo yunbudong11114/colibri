@@ -10,7 +10,10 @@ from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_tex
 class ShellRunTool:
     spec = ToolSpec(
         name="shell.run",
-        description="Run a shell command after Colibri permission approval.",
+        description=(
+            "Run a shell command after Colibri permission approval. Do not use this to create or edit files; "
+            "use files.write for generated artifacts and text file changes."
+        ),
         input_schema={
             "type": "object",
             "properties": {"command": {"type": "string"}},

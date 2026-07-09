@@ -41,7 +41,7 @@ flowchart TD
     Registry --> Tools["files / shell / web / memory / skill"]
     Session --> Permissions["PermissionPolicy"]
     Permissions --> ProjectPerms[".colibri/permissions.toml"]
-    Session --> Memory["MemoryRecall"]
+    Session --> Memory["MemoryContext"]
     Memory --> MemoryFiles["~/.colibri/memory"]
     Session --> Skills["SkillIndex"]
     Skills --> SkillFiles["~/.colibri/skills"]
@@ -174,10 +174,10 @@ weixin:<sender_id>
 - `files.read`：读取允许目录下的 UTF-8 文本文件。
 - `shell.run`：经权限确认后执行 shell 命令。
 - `web.search`：通过配置的搜索引擎搜索网页。
-- `memory.list`：列出记忆 topic。
-- `memory.read`：读取记忆 topic。
-- `memory.search`：搜索记忆索引和 topic 文件。
-- `memory.write`：向记忆 topic 追加 Markdown bullet。
+- `memory.list`：列出 always-on 记忆文件和 topic 文件。
+- `memory.read`：读取 `MEMORY.md`、`USER.md`、`INDEX.md` 或 topic 文件。
+- `memory.search`：搜索 `INDEX.md` 目录行；详细 topic 需要再单独读取。
+- `memory.write`：经权限确认后追加或替换记忆文件。
 - `skill.run`：运行本地 skill 中配置的命令。
 
 工具调用受 `session.max_tool_rounds` 限制，工具输出受 `tools.max_result_chars` 限制。
@@ -216,11 +216,16 @@ default_permission = "allow_read_confirm_write"
 ```text
 ~/.colibri/memory/
   MEMORY.md
+  USER.md
+  INDEX.md
   topics/
-    devices.md
+    system-info.md
+    colibri-design.md
 ```
 
-当 `memory.enabled = true` 时，Colibri 会读取 `MEMORY.md`，根据当前问题选择相关 topic，把内容作为临时上下文注入模型。注入受 `memory.max_recall_topics` 和 `memory.max_recall_chars` 限制。
+当 `memory.enabled = true` 时，Colibri 会把 `MEMORY.md` 和 `USER.md` 作为有界 always-on 上下文注入模型。详细记忆检索交给模型判断：模型先用 `memory.search` 搜索 `INDEX.md`，再用 `memory.read` 读取关联的 `topics/*.md` 文件。自动注入受 `memory.max_recall_chars` 限制。
+
+`USER.md` 应控制在 600 字符以内，`MEMORY.md` 应控制在 1800 字符以内。如果某次 `memory.write` 写入后导致文件超限，工具结果会提醒模型合并整理，并用 `mode="replace"` 重写。
 
 ## 本地 Skills
 
@@ -245,7 +250,7 @@ timeout_seconds = 60
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-compact_trigger_chars = 192000
+model_input_char_limit = 192000
 summary_max_chars = 12000
 model_compact = true
 transcript = true
@@ -258,7 +263,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-当 session 达到 `trigger_message_limit` 条消息时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。模型输入会按 `compact_trigger_chars` 裁剪，同时保留最新用户消息。
+当 session 达到 `trigger_message_limit` 条消息时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。模型输入会按 `model_input_char_limit` 裁剪，同时保留最新用户消息。
 
 ## Transcript
 

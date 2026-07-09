@@ -13,7 +13,7 @@ def test_default_config_uses_small_device_limits():
     assert config.session.max_tool_rounds == 32
     assert config.session.trigger_message_limit == 96
     assert config.session.recent_message_limit == 12
-    assert config.session.compact_trigger_chars == 192000
+    assert config.session.model_input_char_limit == 192000
     assert config.session.summary_max_chars == 12000
     assert config.session.model_compact
     assert not config.session.idle_exit_enabled
@@ -38,6 +38,7 @@ def test_default_config_uses_small_device_limits():
     assert config.channels.weixin.base_url == "https://ilinkai.weixin.qq.com/"
     assert config.channels.weixin.allow_from == []
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
+    assert config.files.roots == [expand_user_path("~/.colibri/workspace"), Path("/tmp/colibri")]
     assert not hasattr(config.shell, "allow")
     assert not hasattr(config.files, "confirm_write")
 

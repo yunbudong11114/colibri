@@ -20,7 +20,10 @@ def test_submit_records_user_and_assistant_messages():
 
 def test_system_prompt_has_sentence_spacing():
     assert "Colibri. You" in SYSTEM_PROMPT
-    assert "limits. You" in SYSTEM_PROMPT
+    assert "low memory, battery, and tool limits." in SYSTEM_PROMPT
+    assert "memory.search" not in SYSTEM_PROMPT
+    assert "Create or edit files" not in SYSTEM_PROMPT
+    assert "files.write" not in SYSTEM_PROMPT
 
 
 def test_session_keeps_only_recent_messages():
@@ -34,7 +37,7 @@ def test_session_keeps_only_recent_messages():
     assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
 
 
-def test_session_compacts_dropped_messages_into_summary():
+def test_session_compacts_message_buffer_into_summary():
     config = AgentConfig.default().with_overrides(
         {
             "session": {
@@ -85,7 +88,7 @@ def test_session_retains_latest_user_message_even_outside_recent_window():
         Message(role="tool", content="result 2", tool_call_id="2"),
     ]
 
-    session._trim_recent_messages()
+    session._compact_messages_if_needed()
 
     assert [message.content for message in session.messages] == ["active request", "", "result 2"]
     assert "user: active request" in session.summary
@@ -183,7 +186,7 @@ def test_session_logs_context_compact_event():
     session.submit("three")
 
     compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
-    assert sum(event["dropped_messages"] for event in compact_events) == 2
+    assert sum(event["removed_messages"] for event in compact_events) == 2
     assert compact_events[-1]["compacted_messages"] == 6
     assert compact_events[-1]["kept_messages"] == 4
     assert compact_events[-1]["summary_chars"] == len(session.summary)
@@ -191,7 +194,7 @@ def test_session_logs_context_compact_event():
 
 def test_session_budgets_model_input_and_logs_event():
     config = AgentConfig.default().with_overrides(
-        {"session": {"compact_trigger_chars": 80, "recent_message_limit": 20}}
+        {"session": {"model_input_char_limit": 80, "recent_message_limit": 20}}
     )
     transcript = MemoryTranscript()
     model = BudgetAwareModel()
@@ -220,7 +223,9 @@ def test_reset_clears_messages_and_summary():
 def test_submit_executes_tool_call_and_returns_final_text(tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("tool result text", encoding="utf-8")
-    config = AgentConfig.default().with_overrides({"files": {"roots": [str(tmp_path)]}})
+    config = AgentConfig.default().with_overrides(
+        {"files": {"roots": [str(tmp_path)]}, "memory": {"root": str(tmp_path / "memory")}}
+    )
     model = ScriptedToolModel(path=str(note))
     session = AgentSession(
         config=config,
@@ -352,7 +357,9 @@ def test_session_file_directory_grant_passes_root_to_file_tool(tmp_path):
 def test_session_writes_transcript_events(tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("tool result text", encoding="utf-8")
-    config = AgentConfig.default().with_overrides({"files": {"roots": [str(tmp_path)]}})
+    config = AgentConfig.default().with_overrides(
+        {"files": {"roots": [str(tmp_path)]}, "memory": {"root": str(tmp_path / "memory")}}
+    )
     transcript = MemoryTranscript()
     session = AgentSession(
         config=config,
@@ -443,9 +450,13 @@ def test_memory_write_uses_permission_confirmation(tmp_path):
     assert response.text == "final answer"
     assert len(prompter.requests) == 1
     assert prompter.requests[0].tool_name == "memory.write"
-    assert prompter.requests[0].arguments == {"topic": "devices", "text": "Router upstairs"}
+    assert prompter.requests[0].arguments == {
+        "file": "topics/devices.md",
+        "content": "Router upstairs",
+        "mode": "append",
+    }
     assert prompter.requests[0].read_only is False
-    assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "- Router upstairs\n"
+    assert (tmp_path / "memory" / "topics" / "devices.md").read_text(encoding="utf-8") == "Router upstairs\n"
 
 
 def test_skill_run_uses_permission_confirmation(tmp_path):
@@ -483,11 +494,13 @@ read_only = false
     assert prompter.requests[0].read_only is False
 
 
-def test_session_injects_recalled_memory_without_persisting_it(tmp_path):
+def test_session_injects_always_on_memory_without_persisting_it(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text("- devices: Router and wifi notes.\n", encoding="utf-8")
+    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
+    (memory_root / "USER.md").write_text("- User prefers concise Chinese answers.\n", encoding="utf-8")
+    (memory_root / "INDEX.md").write_text("- [devices](topics/devices.md): Router notes.\n", encoding="utf-8")
     (memory_topics / "devices.md").write_text("- Router is upstairs.\n", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
     model = MemoryAwareModel()
@@ -497,25 +510,27 @@ def test_session_injects_recalled_memory_without_persisting_it(tmp_path):
 
     assert response.text == "memory used"
     assert model.first_messages[0].role == "system"
-    assert "Relevant memory:" in model.first_messages[0].content
-    assert "[devices]" in model.first_messages[0].content
+    assert "Always-on memory:" in model.first_messages[0].content
+    assert "[MEMORY.md]" in model.first_messages[0].content
+    assert "[USER.md]" in model.first_messages[0].content
+    assert "Router is upstairs" not in model.first_messages[0].content
     assert [message.role for message in session.messages] == ["user", "assistant"]
-    assert all("Relevant memory:" not in message.content for message in session.messages)
+    assert all("Always-on memory:" not in message.content for message in session.messages)
 
 
-def test_session_logs_memory_recall_event(tmp_path):
+def test_session_logs_memory_context_event(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text("- devices: Router and wifi notes.\n", encoding="utf-8")
-    (memory_topics / "devices.md").write_text("- Router is upstairs.\n", encoding="utf-8")
+    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
+    (memory_root / "USER.md").write_text("- User prefers concise Chinese answers.\n", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
     transcript = MemoryTranscript()
     session = AgentSession(config=config, model=MemoryAwareModel(), transcript=transcript)
 
     session.submit("where is the router?")
 
-    assert transcript.events[1] == ("memory_recall", {"topics": ["devices"], "truncated": False})
+    assert transcript.events[1] == ("memory_context", {"files": ["MEMORY.md", "USER.md"], "truncated": False})
 
 
 def test_session_injects_relevant_skill_without_persisting_it(tmp_path):
@@ -610,7 +625,7 @@ class ScriptedMemoryWriteModel:
                     ToolCall(
                         id="call_1",
                         name="memory.write",
-                        arguments={"topic": "devices", "text": "Router upstairs"},
+                        arguments={"file": "topics/devices.md", "content": "Router upstairs", "mode": "append"},
                     )
                 ],
             )
@@ -644,7 +659,8 @@ class MemoryAwareModel:
 
     def complete(self, messages, tools, system, limits):
         self.first_messages = list(messages)
-        assert any(message.role == "system" and "Router is upstairs" in message.content for message in messages)
+        assert any(message.role == "system" and "Colibri runs on CardputerZero" in message.content for message in messages)
+        assert not any(message.role == "system" and "Router is upstairs" in message.content for message in messages)
         return ModelResponse(text="memory used")
 
 

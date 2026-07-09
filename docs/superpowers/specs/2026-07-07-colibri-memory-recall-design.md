@@ -1,53 +1,81 @@
-# Colibri Memory Recall Design
+# Colibri Model-Driven File Memory Design
 
 Date: 2026-07-07
-Status: Approved by roadmap
+Updated: 2026-07-09
+Status: Approved by user
 Milestone: 5
-Scope: Automatic file memory recall and model context injection
+Scope: File-backed long-term memory, model-driven memory lookup, and bounded context injection
 
 ## 1. Goal
 
-Milestone 5 makes Colibri use file-backed memory automatically during model calls.
+Milestone 5 gives Colibri a Claude Code inspired but CardputerZero-friendly memory system.
 
 After this milestone, Colibri should:
 
-- read the memory index from `MEMORY.md`,
-- score indexed topic names and descriptions against the current user text and recent messages,
-- read the top relevant topic files within a strict character budget,
-- inject selected memory as a separate context block before the model call,
-- record selected memory references in transcript events.
+- keep always-on short memory in `MEMORY.md` and `USER.md`,
+- keep detailed searchable memories in `topics/*.md`,
+- keep topic discovery metadata in `INDEX.md`,
+- inject only bounded always-on memory automatically,
+- let the model decide when to search, read, or write detailed memory through tools,
+- constrain all memory files with simple Markdown formats and strict character budgets,
+- avoid embeddings, vector databases, SQLite, background daemons, and third-party packages.
 
-This milestone does not add embeddings, vector databases, model-based memory selection, memory rewriting, or skill loading.
+This replaces the earlier deterministic keyword-overlap auto-recall design. Colibri should no longer decide topic relevance itself.
 
-## 2. Headless Requirement
+## 2. Directory Layout
 
-Memory recall must run on pure Linux servers over SSH.
+Default memory root:
+
+```text
+~/.colibri/memory/
+  MEMORY.md
+  USER.md
+  INDEX.md
+  topics/
+    system-info.md
+    colibri-design.md
+```
+
+File roles:
+
+| File | Role | Loaded automatically |
+| --- | --- | --- |
+| `MEMORY.md` | Stable long-term facts and project-level context, max 1800 chars | yes |
+| `USER.md` | User profile, preferences, collaboration style, max 600 chars | yes |
+| `INDEX.md` | Short manifest of topic files | no, read through tools |
+| `topics/*.md` | Detailed topic memories | no, read through tools |
+
+`MEMORY.md` and `USER.md` must stay short. `INDEX.md` should stay a manifest, not a content dump.
+
+## 3. Headless Requirement
+
+Memory must run on pure Linux servers over SSH.
 
 Rules:
 
 - Use only Python standard library APIs.
-- Do not keep all memory files resident in process memory.
+- Do not keep all topic files resident in memory.
 - Do not require GUI, browser, audio, display, notification, or TUI frameworks.
-- Keep recall deterministic and testable without network access.
+- Keep startup memory loading deterministic and testable without network access.
+- Let existing model/tool loops handle model-driven search and write decisions.
 
-## 3. Configuration
+## 4. Configuration
 
-Extend `MemoryConfig`:
-
-```python
-enabled: bool = True
-max_recall_topics: int = 3
-max_recall_chars: int = 4000
-```
-
-Existing fields remain:
+`MemoryConfig` remains the owner of memory settings:
 
 ```python
 root: Path = ~/.colibri/memory
+enabled: bool = True
 max_search_results: int = 5
+max_recall_topics: int = 3
+max_recall_chars: int = 6000
 ```
 
-TOML overrides should support:
+`max_recall_topics` is retained for config compatibility and future model-assisted selectors, but the built-in deterministic auto-topic recall no longer uses it.
+
+`max_recall_chars` becomes the total character budget for automatically injected always-on memory.
+
+TOML override:
 
 ```toml
 [memory]
@@ -55,150 +83,262 @@ enabled = true
 root = "~/.colibri/memory"
 max_search_results = 5
 max_recall_topics = 3
-max_recall_chars = 4000
+max_recall_chars = 6000
 ```
 
-If `memory.enabled = false`, no automatic recall runs, but explicit memory tools still remain available when `"memory"` is in `tools.enabled`.
+If `memory.enabled = false`, no automatic memory context is injected. Explicit memory tools remain available when `"memory"` is enabled under `[tools]`.
 
-## 4. Index Format
+## 5. Memory File Format
 
-Recall reads `MEMORY.md` lines that look like Markdown bullets:
+All memory files may use lightweight YAML-style frontmatter followed by Markdown:
 
 ```markdown
-- devices: Home devices, hostnames, GPIO wiring, network notes.
-- preferences: User preferences and recurring constraints.
+---
+type: user|feedback|project|reference|system
+description: One sentence about what this file records.
+updated: 2026-07-09
+---
+
+# Title
+
+- Fact or preference.
+- Why: why it matters.
+- How to apply: when future Colibri should use it.
 ```
 
-Parsing rules:
+The runtime prompt must tell the model this format. The current Python implementation does not parse frontmatter for ranking; it is used as model-readable structure, future-compatible metadata, and a stable convention for writes.
 
-- Ignore blank lines and headings.
-- Only parse bullet lines beginning with `- `.
-- Split at the first `:`.
-- The topic name must match the same topic-name rules as memory tools: ASCII letters, digits, `_`, and `-`.
-- The text after `:` is the topic description.
+Allowed `type` values:
 
-Invalid lines are skipped.
+- `user`: user profile, role, goals, preferences.
+- `feedback`: guidance about how Colibri should behave.
+- `project`: ongoing project context not derivable from code.
+- `reference`: pointers to external systems or where to look.
+- `system`: local machine, runtime, deployment, or device facts.
 
-## 5. Scoring
+Memory should not store:
 
-Use deterministic keyword overlap.
+- facts easily derived from current source code,
+- full transcripts,
+- secrets or API keys,
+- large logs or command output,
+- temporary task state that only matters in the current conversation.
 
-Input text:
+## 6. INDEX.md Format
 
-- current user text,
-- recent user and assistant messages already in `AgentSession.messages`.
+`INDEX.md` is a short manifest. Each topic entry should be one line:
 
-Candidate text:
+```markdown
+# Memory Index
 
-- topic name,
-- topic description.
+- [system-info](topics/system-info.md): Current machine, OS, hardware, and runtime environment.
+- [colibri-design](topics/colibri-design.md): Colibri project design decisions and milestones.
+```
 
-Tokenization:
+Parsing is intentionally permissive. Tools may return raw `INDEX.md` content; the model decides which linked topic files are worth reading.
 
-- lowercase,
-- split on non-alphanumeric ASCII characters,
-- ignore tokens shorter than 2 characters.
-
-Score:
-
-- `2` points for topic-name token matches,
-- `1` point for description token matches.
-
-Sort by:
-
-1. higher score,
-2. topic name alphabetically.
-
-Only topics with score greater than zero are selected.
-
-## 6. Context Injection
+## 7. Automatic Context Injection
 
 Add a focused component:
 
 ```python
-MemoryRecallResult:
+MemoryContextResult:
     text: str
-    topics: list[str]
+    files: list[str]
     truncated: bool
 
-MemoryRecall:
-    recall(user_text: str, messages: list[Message]) -> MemoryRecallResult
+MemoryContext:
+    load() -> MemoryContextResult
 ```
 
-`AgentSession.submit()` should call recall once per user turn after appending the user message and before the tool loop.
+`AgentSession.submit()` calls `MemoryContext.load()` once per user turn before the model call.
 
-The selected memory block should be injected as a temporary system-style message before the existing conversation messages sent to the model:
+When available, memory is injected as a temporary system-style message before regular conversation messages:
 
 ```text
-Relevant memory:
+Always-on memory:
 
-[devices]
-- Router is upstairs.
+[MEMORY.md]
+...
 
-[preferences]
-- Keep answers concise.
+[USER.md]
+...
 ```
 
-This message must not be appended to `self.messages`; it is only part of the model input for that submit call.
+This message must not be appended to `AgentSession.messages`; it is only part of the model input for that submit call.
 
-If no relevant memory is found, do not inject a memory message.
+If no always-on memory exists, do not inject a memory message.
 
-## 7. Budgets
+`MemoryContext` only injects bounded file content. It does not inject memory-writing rules, file format rules, or per-file maintenance instructions. Those rules belong to the `memory.write` tool description and tool result text, so they are only shown when the model is considering or has just performed a memory write.
 
-Memory recall must obey:
+## 8. Model-Driven Lookup and Writes
 
-- `memory.max_recall_topics`,
-- `memory.max_recall_chars`,
-- `session.compact_trigger_chars` indirectly through existing message bounding.
+Colibri no longer performs deterministic topic selection. Instead:
 
-If selected topic content exceeds `max_recall_chars`, truncate the final memory block with the existing suffix:
+- `MemoryContext` owns always-on memory loading only,
+- `AgentSession` uses the core `SYSTEM_PROMPT` directly and does not build feature-specific prompt variants,
+- the `memory.write` tool description tells the model that detailed memory lives under `INDEX.md` and `topics/*.md`,
+- `memory.search` searches inside `INDEX.md` only; the model reads matching topic files explicitly with `memory.read`,
+- `memory.read` reads one of `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file,
+- `memory.write` writes one of the same file roles using model-supplied content.
+
+Memory usage guidance must not be hard-coded directly into the core `SYSTEM_PROMPT` constant. Keep ownership split:
+
+- `session.py`: core Colibri identity and low-memory behavior only.
+- `memory.py`: always-on memory loading and global context budget handling.
+- `tools/builtin/memory.py`: concrete memory tool implementation, memory file format guidance, write-routing guidance, topic index maintenance guidance, and short per-file length maintenance prompts.
+
+The model should:
+
+- read/search memory when the user references prior context, preferences, machine facts, project decisions, or asks Colibri to remember/recall something,
+- first inspect `INDEX.md` or use `memory.search` for detailed memories,
+- decide whether a write belongs in `USER.md`, `MEMORY.md`, or a dedicated `topics/*.md` file,
+- update `INDEX.md` whenever creating or materially changing a topic file,
+- keep `MEMORY.md` and `USER.md` concise,
+- consolidate stale or duplicate entries instead of appending forever.
+
+## 9. Tool Behavior
+
+### `memory.list`
+
+Read-only. Returns:
+
+- built-in memory files that exist: `MEMORY.md`, `USER.md`, `INDEX.md`,
+- topic names under `topics/*.md`.
+
+### `memory.read`
+
+Read-only. Accepts:
+
+- `file`: one of `MEMORY.md`, `USER.md`, `INDEX.md`, or `topics/<name>.md`,
+- or `topic`: compatibility shorthand for `topics/<topic>.md`.
+
+Invalid paths, path traversal, and non-Markdown files are rejected.
+
+### `memory.search`
+
+Read-only. Searches `INDEX.md` lines with case-insensitive substring matching. It does not search `MEMORY.md`, `USER.md`, or topic file contents directly.
+
+This keeps search cheap and forces the model to use the manifest first. If the model needs detailed content, it should call `memory.read` on the linked topic file.
+
+Input:
+
+```json
+{"query": "router"}
+```
+
+Return up to `memory.max_search_results` matches:
+
+```text
+INDEX.md:3: - [system-info](topics/system-info.md): Current machine, OS, hardware, and runtime environment.
+```
+
+### `memory.write`
+
+Write tool. Accepts:
+
+- `file`: target file,
+- `content`: complete replacement content,
+- `mode`: `replace` or `append`.
+
+`append` writes content at the end of the file with a separating newline.
+
+`replace` overwrites the file. The model is responsible for preserving valid frontmatter and keeping files concise.
+
+The `memory.write` tool description must include:
+
+- supported memory file roles:
+  - `USER.md`: user profile, preferences, collaboration style, max 600 characters,
+  - `MEMORY.md`: stable general, project, or system facts, max 1800 characters,
+  - `INDEX.md`: searchable topic manifest used by `memory.search`,
+  - `topics/<name>.md`: detailed topic notes;
+- frontmatter format:
+
+```markdown
+---
+type: user|feedback|project|reference|system
+description: one-line description
+updated: YYYY-MM-DD
+---
+```
+
+- routing guidance: choose `USER.md` for user preferences, `MEMORY.md` for short stable facts, and a topic file for longer details;
+- topic maintenance guidance: whenever a topic file is created or materially changed, also update `INDEX.md` with a searchable one-line pointer;
+- concise-memory guidance: consolidate or replace `USER.md`/`MEMORY.md` instead of appending forever.
+
+When writing `topics/<name>.md`, the model must also update `INDEX.md` so future searches can discover the topic. The tool should remind the model about this in the result text for topic writes, but the model owns the actual index entry wording.
+
+When `memory.write` detects that a write leaves `USER.md` over 600 characters or `MEMORY.md` over 1800 characters, the tool should still complete the write, but return an additional maintenance prompt telling the model to summarize/consolidate the file and call `memory.write` again with `mode="replace"`.
+
+Writes are permission-gated by the existing dynamic permission system.
+
+## 10. Budgets
+
+Automatic memory injection must obey `memory.max_recall_chars`.
+
+Suggested per-file split:
+
+- `MEMORY.md`: half of the budget after headers,
+- `USER.md`: remaining budget,
+- if one file is missing or short, the other file can use the remaining space.
+
+Topic files are never injected automatically. Tool results already obey `tools.max_result_chars`.
+
+If injected memory exceeds the budget, truncate with:
 
 ```text
 ...[truncated]
 ```
 
-## 8. Transcript Behavior
+## 11. Transcript Behavior
 
-When recall runs, `AgentSession` should write a `memory_recall` transcript event:
+When always-on memory is injected, `AgentSession` writes a `memory_context` transcript event:
 
 ```json
 {
-  "topics": ["devices", "preferences"],
+  "files": ["MEMORY.md", "USER.md"],
   "truncated": false
 }
 ```
 
 Do not log full memory content in transcript events.
 
-If memory recall is disabled, do not write `memory_recall`.
+When `memory.enabled = false`, do not write `memory_context`.
 
-## 9. Error Handling
+## 12. Error Handling
 
-Missing memory root, missing `MEMORY.md`, missing topic files, and invalid index lines are non-fatal.
+Missing memory root, missing files, invalid frontmatter, and unreadable files are non-fatal.
 
-If memory recall cannot read a file because of `OSError`, skip that file.
+Memory read/search tools return ordinary tool errors for invalid user/model arguments.
 
-Recall should never block a user turn with an exception.
+Memory context loading should never block a user turn with an exception.
 
-## 10. Testing
+## 13. Testing
 
 Required tests:
 
-- config loads `memory.enabled`, `memory.max_recall_topics`, and `memory.max_recall_chars`,
-- index parser skips invalid lines,
-- recall selects topics by keyword overlap,
-- recall obeys topic and character budgets,
-- disabled recall injects no memory,
-- `AgentSession` sends memory context to the model without persisting it in `session.messages`,
-- `AgentSession` logs `memory_recall` with topic names and truncation status,
+- automatic context loads `MEMORY.md` and `USER.md`,
+- automatic context ignores `INDEX.md` and `topics/*.md`,
+- automatic context obeys `memory.max_recall_chars`,
+- automatic context does not inject memory write guidance or per-file maintenance warnings,
+- disabled memory injects no automatic memory,
+- session sends memory context to the model without persisting it in `session.messages`,
+- session logs `memory_context` with file names and truncation status,
+- `memory.list` returns built-in files and topics,
+- `memory.read` reads built-in files and topic shorthand,
+- `memory.search` searches `INDEX.md` only,
+- `memory.write` supports append and replace while rejecting traversal,
+- `memory.write` description contains memory file format and routing guidance,
+- `memory.write` result warns when `USER.md` or `MEMORY.md` exceeds its character limit,
+- `memory.write` result reminds the model to update `INDEX.md` for topic writes,
 - all tests run with `uv run python -m pytest`.
 
-## 11. Future Work
+## 14. Future Work
 
-After this milestone:
+Future memory improvements may add:
 
-- summary compacting,
-- safer shell permission fixes,
-- local skill loading,
-- MCP bridge,
-- structured memory proposals.
+- optional model side-query selection similar to Claude Code,
+- optional SQLite FTS for larger memory stores,
+- file-size warnings for oversized always-on memory files,
+- automatic memory consolidation commands,
+- channel/session-specific memory roots.

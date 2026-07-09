@@ -86,7 +86,7 @@ class PermissionPolicy:
 
     def decide(self, tool: Tool, arguments: dict[str, Any], context: ToolContext) -> PermissionDecisionResult:
         subject = permission_subject_for(tool, arguments, context)
-        if subject.kind == "shell" and subject.shell_executable in context.config.shell.deny:
+        if subject.tool_name == "shell.run" and subject.shell_executable in context.config.shell.deny:
             return _decision(False, "deny", "none", subject, "hard_deny")
 
         project_grants = self.project_store.load()
@@ -211,7 +211,19 @@ def permission_subject_for(
             argv = shlex.split(command_text)
             executable = argv[0] if argv else None
         except ValueError:
+            argv = []
             executable = None
+        write_path = _shell_write_path(command_text, argv, context)
+        if write_path is not None:
+            return PermissionSubject(
+                kind="file_path",
+                tool_name=tool.spec.name,
+                shell_command=command_text,
+                shell_executable=executable,
+                file_path=str(write_path),
+                file_root=str(_grant_root_for(write_path)),
+                read_only=False,
+            )
         return PermissionSubject(
             kind="shell",
             tool_name=tool.spec.name,
@@ -219,7 +231,7 @@ def permission_subject_for(
             shell_executable=executable,
             read_only=False,
         )
-    if tool.spec.name in {"files.list", "files.read"} and context is not None:
+    if tool.spec.name in {"files.list", "files.read", "files.write"} and context is not None:
         raw_path = arguments.get("path")
         if isinstance(raw_path, str) and raw_path:
             resolved = resolve_file_path(raw_path, context.cwd)
@@ -232,6 +244,31 @@ def permission_subject_for(
                     read_only=tool.spec.read_only,
                 )
     return PermissionSubject(kind="tool", tool_name=tool.spec.name, read_only=tool.spec.read_only)
+
+
+def _shell_write_path(command_text: str, argv: list[str], context: ToolContext | None) -> Path | None:
+    if context is None or not command_text:
+        return None
+    target = _redirection_target(argv)
+    if target is None:
+        return None
+    return resolve_file_path(target, context.cwd)
+
+
+def _redirection_target(argv: list[str]) -> str | None:
+    redirect_ops = {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"}
+    for index, token in enumerate(argv):
+        if token in redirect_ops and index + 1 < len(argv):
+            return argv[index + 1]
+        for op in sorted(redirect_ops, key=len, reverse=True):
+            if token.startswith(op) and len(token) > len(op):
+                return token[len(op) :]
+    if argv and argv[0] == "tee":
+        for token in argv[1:]:
+            if token.startswith("-"):
+                continue
+            return token
+    return None
 
 
 def _decision(

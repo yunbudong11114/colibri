@@ -190,7 +190,7 @@ max_output_tokens = 16384
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-compact_trigger_chars = 192000
+model_input_char_limit = 192000
 summary_max_chars = 12000
 idle_exit_enabled = false
 idle_exit_seconds = 300
@@ -480,33 +480,33 @@ Use file-based memory:
 ```text
 memory/
   MEMORY.md
+  USER.md
+  INDEX.md
   topics/
-    preferences.md
-    devices.md
-    routines.md
+    system-info.md
+    colibri-design.md
 ```
 
-`MEMORY.md` is the index:
+`MEMORY.md` and `USER.md` are short always-on memory files. `INDEX.md` is the topic manifest:
 
 ```markdown
 # Memory Index
 
-- preferences: User preferences, tone, recurring constraints.
-- devices: Home devices, hostnames, GPIO wiring, network notes.
-- routines: Common workflows and reminders.
+- [system-info](topics/system-info.md): Current machine, OS, hardware, and runtime environment.
+- [colibri-design](topics/colibri-design.md): Colibri project design decisions and milestones.
 ```
 
-Recall algorithm v1:
+Recall algorithm v2:
 
-1. Load `MEMORY.md` index.
-2. Score topic names and descriptions with keyword overlap against current user input and recent messages.
-3. Read top 1-3 topic files within a strict character budget.
-4. Inject memory as a separate context block.
+1. Automatically load bounded `MEMORY.md` and `USER.md` content as always-on context.
+2. Let the model decide when detailed memory is needed.
+3. The model searches or reads `INDEX.md` and `topics/*.md` through memory tools.
+4. Do not run local keyword topic selection by default.
 
 Memory writes should not silently rewrite large files. Prefer append-style proposed updates:
 
 ```text
-memory.write(topic="devices", mode="append", text="...")
+memory.write(file="topics/system-info.md", mode="append", content="...")
 ```
 
 The user confirms memory writes by default.
@@ -519,7 +519,7 @@ CardputerZero should not keep a desktop-scale transcript in RAM. The model conte
 2. Device/runtime constraints.
 3. Current rolling summary.
 4. Recent conversation messages.
-5. Relevant memory snippets.
+5. Always-on memory context and model-selected memory snippets.
 6. Relevant skill instructions.
 7. Tool specs.
 8. Current user input.
@@ -530,7 +530,7 @@ The first compact strategy:
 - Summarize the current message buffer into a rolling `summary`.
 - Keep the last `recent_message_limit` messages after compacting.
 - Also keep the latest user message if it is not inside that recent window.
-- Bound model input by `compact_trigger_chars` before each model call.
+- Bound model input by `model_input_char_limit` before each model call.
 - Keep the rolling summary within `summary_max_chars`.
 - Drop or shrink old tool results aggressively.
 
@@ -765,13 +765,13 @@ Primary spec/plan:
 - `docs/superpowers/specs/2026-07-07-colibri-file-memory-tools-design.md`
 - `docs/superpowers/plans/2026-07-07-colibri-file-memory-tools.md`
 
-Milestone 5: memory recall injection
+Milestone 5: model-driven file memory
 
-- load `MEMORY.md` index within strict character limits
-- score topic names and descriptions against user input and recent messages
-- read top 1-3 relevant topic files within a memory context budget
-- inject selected memory as a separate context block before model calls
-- record selected memory references in transcript payloads
+- load bounded `MEMORY.md` and `USER.md` always-on memory
+- keep `INDEX.md` and `topics/*.md` for model-driven lookup
+- expose memory tools for list/read/search/write
+- inject always-on memory as a separate context block before model calls
+- record injected memory file references in transcript payloads
 
 Status: complete.
 

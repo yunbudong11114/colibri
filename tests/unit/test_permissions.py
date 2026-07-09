@@ -5,7 +5,7 @@ from typing import Any
 from colibri.config import AgentConfig
 from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
-from colibri.tools.builtin import FilesListTool, ShellRunTool
+from colibri.tools.builtin import FilesListTool, FilesWriteTool, ShellRunTool
 from colibri.tools.permissions import PermissionPolicy, PermissionRequest
 
 
@@ -180,6 +180,22 @@ def test_shell_hard_deny_blocks_without_prompt(tmp_path):
     assert prompter.requests == []
 
 
+def test_shell_hard_deny_wins_over_redirection_file_path_prompt(tmp_path):
+    config = AgentConfig.default()
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+
+    result = policy.decide(
+        ShellRunTool(),
+        {"command": "sudo tee /tmp/colibri/out.txt"},
+        tool_context(config, tmp_path),
+    )
+
+    assert not result.allowed
+    assert result.reason == "hard_deny"
+    assert prompter.requests == []
+
+
 def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     allowed_root = tmp_path / "allowed"
     outside = tmp_path / "outside"
@@ -197,6 +213,51 @@ def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     assert result.file_path == str(outside.resolve())
     assert prompter.requests[0].subject.kind == "file_path"
     assert prompter.requests[0].subject.file_path == str(outside.resolve())
+
+
+def test_out_of_root_files_write_prompts_as_file_path(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    target = outside / "artifact.html"
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+
+    result = policy.decide(
+        FilesWriteTool(),
+        {"path": str(target), "content": "<html></html>"},
+        tool_context(config, allowed_root),
+    )
+
+    assert result.allowed
+    assert result.subject_kind == "file_path"
+    assert result.file_path == str(target.resolve())
+    assert prompter.requests[0].subject.kind == "file_path"
+
+
+def test_shell_redirection_to_out_of_root_path_prompts_as_file_path(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    target = outside / "baidu.html"
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+
+    result = policy.decide(
+        ShellRunTool(),
+        {"command": f"cat << 'EOF' > {target}\n<html></html>\nEOF"},
+        tool_context(config, allowed_root),
+    )
+
+    assert result.allowed
+    assert result.subject_kind == "file_path"
+    assert result.file_path == str(target.resolve())
+    assert prompter.requests[0].subject.kind == "file_path"
+    assert prompter.requests[0].subject.shell_command is not None
 
 
 def test_files_under_startup_cwd_are_allowed_without_prompt(tmp_path):

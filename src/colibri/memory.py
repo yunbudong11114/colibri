@@ -1,122 +1,66 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 
 from colibri.config import AgentConfig
-from colibri.messages import Message
 
 
-_TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+ALWAYS_ON_MEMORY_FILES = ("MEMORY.md", "USER.md")
+ALWAYS_ON_MEMORY_FILE_LIMITS = {"MEMORY.md": 1800, "USER.md": 600}
 _TRUNCATED_SUFFIX = "\n...[truncated]"
 
 
 @dataclass(frozen=True)
-class MemoryTopic:
-    name: str
-    description: str
-
-
-@dataclass(frozen=True)
-class MemoryRecallResult:
+class MemoryContextResult:
     text: str
-    topics: list[str]
+    files: list[str]
     truncated: bool = False
 
 
-class MemoryRecall:
+class MemoryContext:
     def __init__(self, config: AgentConfig):
         self.config = config
 
-    def recall(self, user_text: str, messages: list[Message]) -> MemoryRecallResult:
+    def load(self) -> MemoryContextResult:
         if not self.config.memory.enabled:
-            return MemoryRecallResult(text="", topics=[])
+            return MemoryContextResult(text="", files=[])
 
-        topics = self._load_index()
-        if not topics:
-            return MemoryRecallResult(text="", topics=[])
+        root = self.config.memory.root.expanduser()
+        blocks: list[str] = ["Always-on memory:"]
+        loaded_files: list[str] = []
+        any_file_truncated = False
 
-        query_tokens = self._query_tokens(user_text, messages)
-        ranked = self._rank_topics(topics, query_tokens)
-        selected = ranked[: self.config.memory.max_recall_topics]
-        if not selected:
-            return MemoryRecallResult(text="", topics=[])
-
-        blocks: list[str] = ["Relevant memory:"]
-        included_topics: list[str] = []
-        for topic in selected:
-            content = self._read_topic(topic.name)
-            if content is None:
+        for filename in ALWAYS_ON_MEMORY_FILES:
+            path = root / filename
+            try:
+                if not path.is_file():
+                    continue
+                content = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
                 continue
-            included_topics.append(topic.name)
-            blocks.extend(["", f"[{topic.name}]", content])
+            if not content:
+                continue
+            loaded_files.append(filename)
+            content, file_truncated = _bound_file_content(filename, content)
+            any_file_truncated = any_file_truncated or file_truncated
+            blocks.extend(["", f"[{filename}]", content])
 
-        if not included_topics:
-            return MemoryRecallResult(text="", topics=[])
+        if not loaded_files:
+            return MemoryContextResult(text="", files=[])
 
-        return self._bound_result("\n".join(blocks), included_topics)
+        return self._bound_result("\n".join(blocks), loaded_files, any_file_truncated=any_file_truncated)
 
-    def _load_index(self) -> list[MemoryTopic]:
-        index_path = self.config.memory.root.expanduser() / "MEMORY.md"
-        try:
-            lines = index_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return []
-
-        topics: list[MemoryTopic] = []
-        for line in lines:
-            topic = self._parse_index_line(line)
-            if topic is not None:
-                topics.append(topic)
-        return topics
-
-    @staticmethod
-    def _parse_index_line(line: str) -> MemoryTopic | None:
-        stripped = line.strip()
-        if not stripped.startswith("- ") or ":" not in stripped:
-            return None
-        name, description = stripped[2:].split(":", 1)
-        name = name.strip()
-        description = description.strip()
-        if not _TOPIC_RE.fullmatch(name):
-            return None
-        return MemoryTopic(name=name, description=description)
-
-    @staticmethod
-    def _query_tokens(user_text: str, messages: list[Message]) -> set[str]:
-        parts = [user_text]
-        parts.extend(message.content for message in messages if message.role in {"user", "assistant"})
-        return _tokens("\n".join(parts))
-
-    @staticmethod
-    def _rank_topics(topics: list[MemoryTopic], query_tokens: set[str]) -> list[MemoryTopic]:
-        scored: list[tuple[int, str, MemoryTopic]] = []
-        for topic in topics:
-            name_tokens = _tokens(topic.name)
-            description_tokens = _tokens(topic.description)
-            score = 2 * len(query_tokens & name_tokens) + len(query_tokens & description_tokens)
-            if score > 0:
-                scored.append((-score, topic.name, topic))
-        scored.sort()
-        return [topic for _score, _name, topic in scored]
-
-    def _read_topic(self, topic_name: str) -> str | None:
-        path = self.config.memory.root.expanduser() / "topics" / f"{topic_name}.md"
-        try:
-            if not path.is_file():
-                return None
-            return path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
-
-    def _bound_result(self, text: str, topics: list[str]) -> MemoryRecallResult:
+    def _bound_result(self, text: str, files: list[str], *, any_file_truncated: bool = False) -> MemoryContextResult:
         max_chars = self.config.memory.max_recall_chars
         if len(text) <= max_chars:
-            return MemoryRecallResult(text=text, topics=topics, truncated=False)
+            return MemoryContextResult(text=text, files=files, truncated=any_file_truncated)
         keep = max(0, max_chars - len(_TRUNCATED_SUFFIX))
-        return MemoryRecallResult(text=text[:keep] + _TRUNCATED_SUFFIX, topics=topics, truncated=True)
+        return MemoryContextResult(text=text[:keep] + _TRUNCATED_SUFFIX, files=files, truncated=True)
 
 
-def _tokens(text: str) -> set[str]:
-    return {match.group(0).lower() for match in _TOKEN_RE.finditer(text) if len(match.group(0)) >= 2}
+def _bound_file_content(filename: str, content: str) -> tuple[str, bool]:
+    limit = ALWAYS_ON_MEMORY_FILE_LIMITS[filename]
+    if len(content) <= limit:
+        return content, False
+    keep = max(0, limit - len(_TRUNCATED_SUFFIX))
+    return content[:keep] + _TRUNCATED_SUFFIX, True

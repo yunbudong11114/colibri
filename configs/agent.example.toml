@@ -1,70 +1,117 @@
 [model]
+# 模型提供方；fake 用于本地测试，openai_compatible 用于真实 OpenAI-compatible API。
 provider = "openai_compatible"
+# 模型 API 的基础地址，结尾通常是 /v1。
 base_url = "https://api.openai.com/v1"
+# 实际请求的模型名称。
 model = "gpt-4.1-mini"
+# 模型 API Key；为空时默认读取 COLIBRI_API_KEY 环境变量。
 api_key = ""
+# 单次模型请求超时时间，单位秒。
 timeout_seconds = 60
+# 单次模型回复的最大输出 token 数。
 max_output_tokens = 16384
 
 [session]
+# 单次用户请求内允许的最大工具调用轮数。
 max_tool_rounds = 32
+# session 内消息数达到该值时触发历史压缩。
 trigger_message_limit = 96
+# 压缩后保留的最近消息条数。
 recent_message_limit = 12
-compact_trigger_chars = 192000
+# 每次发送给模型的输入字符上限，也用于限制单条用户输入长度。
+model_input_char_limit = 192000
+# 滚动摘要最多保留的字符数。
 summary_max_chars = 12000
+# 是否优先调用模型生成历史摘要；失败时会自动回退到本地摘要。
 model_compact = true
+# REPL 空闲自动退出是否启用。
 idle_exit_enabled = false
+# REPL 空闲自动退出等待秒数。
 idle_exit_seconds = 300
+# 是否写入 transcript JSONL 日志。
 transcript = true
 
 [tools]
+# 启用的工具类别。
 enabled = ["shell", "files", "web", "memory", "skills", "mcp"]
+# 默认权限策略；当前值表示只读默认允许、写入/执行需要确认。
 default_permission = "allow_read_confirm_write"
+# 单次工具结果写入上下文前的最大字符数。
 max_result_chars = 32000
+# shell.run 单次命令超时时间，单位秒。
 max_shell_seconds = 30
 
 [shell]
+# 永远拒绝执行的 shell 可执行名。
 deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 
 [files]
-roots = ["~/.colibri", "/tmp"]
+# 默认允许文件工具访问的根目录；启动目录也会被默认允许，生成产物优先放入 workspace。
+roots = ["~/.colibri/workspace", "/tmp/colibri"]
 
 [skills]
+# 本地 skill 搜索目录。
 dirs = ["~/.colibri/skills"]
+# 每轮最多加载的相关 skill 数量。
 max_loaded = 3
+# 单个 skill 指令注入上下文前的最大字符数。
 max_instruction_chars = 8000
 
 [console]
+# 是否在 stderr 输出 [colibri] 状态行。
 status = true
 
 [memory]
+# 是否启用长期记忆。
 enabled = true
+# 长期记忆根目录。
 root = "~/.colibri/memory"
+# memory.search 工具最多返回的搜索结果数。
 max_search_results = 5
+# 保留给未来模型辅助记忆选择的 topic 数量上限；当前不做本地关键词召回。
 max_recall_topics = 3
+# MEMORY.md 和 USER.md 作为 always-on 记忆注入上下文前的最大字符数。
 max_recall_chars = 6000
 
 [web_search]
+# Web 搜索引擎名称。
 engine = "baidu"
+# Web 搜索 API Key。
 api_key = ""
+# Web 搜索 API endpoint。
 endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+# 单次搜索默认返回结果数。
 max_results = 10
+# Web 搜索请求超时时间，单位秒。
 timeout_seconds = 10
 
 [gateway]
+# gateway 启用的 channel 列表。
 enabled_channels = ["weixin"]
+# gateway 同时保留在内存中的 channel session 数量上限。
 max_sessions = 4
+# channel session 空闲驱逐时间，单位秒。
 session_idle_seconds = 600
 
 [channels.weixin]
+# 是否启用微信 channel。
 enabled = false
+# 微信 iLink bot token，由 colibri auth weixin 写入。
 token = ""
+# 微信 iLink API 基础地址。
 base_url = "https://ilinkai.weixin.qq.com/"
+# 允许访问的微信用户 ID 列表；空列表表示不限制。
 allow_from = []
+# 微信长轮询请求超时时间，单位秒。
 poll_timeout_seconds = 35
+# 微信扫码授权等待时间，单位秒。
 auth_timeout_seconds = 300
 
 [mcp]
+# 是否启用 MCP。
 enabled = false
+# MCP 启动策略；lazy 表示按需启动。
 startup = "lazy"
+# 同时活跃的 MCP server 数量上限。
 max_active_servers = 1

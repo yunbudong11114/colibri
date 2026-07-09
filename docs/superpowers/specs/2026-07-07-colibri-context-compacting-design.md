@@ -15,7 +15,7 @@ After this milestone, Colibri should:
 - use the configured model to create Claude Code style continuation summaries when enabled,
 - inject the rolling summary into model input as temporary context,
 - keep the summary bounded by `session.summary_max_chars`,
-- cap model input messages by `session.compact_trigger_chars`,
+- cap model input messages by `session.model_input_char_limit`,
 - replace old tool results in summaries with compact metadata,
 - record compact events in transcript logs.
 
@@ -39,7 +39,7 @@ Rules:
 
 Preferred compacting path:
 
-1. Build a compact request from the previous rolling summary and the dropped messages.
+1. Build a compact request from the previous rolling summary and the message buffer being compacted.
 2. Call the configured model with no tools and a compact-specific system prompt.
 3. Ask the model for plain text in this shape:
 
@@ -82,7 +82,7 @@ trigger_message_limit = 96
 recent_message_limit = 12
 ```
 
-Compacting must summarize the whole current message buffer, not only the portion that will be removed. After summary append, `AgentSession.messages` keeps the latest `session.recent_message_limit` messages. If that kept window does not contain the latest user message, Colibri must also retain the latest user message so the next model call always has the active request.
+Compacting must summarize the whole current message buffer, not only the portion that will be removed. The session method should use a trigger-aware name such as `_compact_messages_if_needed` rather than a dropped-message-specific or trim-only name. After summary append, `AgentSession.messages` keeps the latest `session.recent_message_limit` messages. If that kept window does not contain the latest user message, Colibri must also retain the latest user message so the next model call always has the active request.
 
 Fallback compacting converts messages into short summary lines:
 
@@ -127,7 +127,7 @@ The summary context is sent as a temporary `system` message and must not be appe
 
 ## 5. Input Character Budget
 
-Before each model call, `AgentSession` should ensure temporary model input is bounded by `session.compact_trigger_chars`.
+Before each model call, `AgentSession` should ensure temporary model input is bounded by `session.model_input_char_limit`.
 
 Budget rules:
 
@@ -145,7 +145,7 @@ When messages are compacted into summary, write:
 
 ```json
 {
-  "dropped_messages": 2,
+  "removed_messages": 2,
   "mode": "model",
   "summary_chars": 320
 }
@@ -157,7 +157,7 @@ Event type:
 context_compact
 ```
 
-When model input is trimmed to fit `compact_trigger_chars`, write:
+When model input is trimmed to fit `model_input_char_limit`, write:
 
 ```json
 {
@@ -193,7 +193,7 @@ context_compact_error
 
 Required tests:
 
-- dropped old messages update `AgentSession.summary`,
+- compacted message buffers update `AgentSession.summary`,
 - summary is bounded by `session.summary_max_chars`,
 - summary is injected into model input without being persisted as a normal message,
 - tool result summary uses metadata rather than full tool output,

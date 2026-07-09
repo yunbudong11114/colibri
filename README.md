@@ -40,7 +40,7 @@ flowchart TD
     Registry --> Tools["files / shell / web / memory / skill"]
     Session --> Permissions["PermissionPolicy"]
     Permissions --> ProjectPerms[".colibri/permissions.toml"]
-    Session --> Memory["MemoryRecall"]
+    Session --> Memory["MemoryContext"]
     Memory --> MemoryFiles["~/.colibri/memory"]
     Session --> Skills["SkillIndex"]
     Skills --> SkillFiles["~/.colibri/skills"]
@@ -168,12 +168,13 @@ When the model returns tool calls, Colibri can execute:
 
 - `files.list`: list direct children under allowed roots.
 - `files.read`: read UTF-8 text files under allowed roots.
-- `shell.run`: run shell commands after permission approval.
+- `files.write`: write UTF-8 text files under allowed roots; generated artifacts should use this instead of shell redirection.
+- `shell.run`: run commands after permission approval; do not use it to create or edit files.
 - `web.search`: search the web through the configured provider.
-- `memory.list`: list Markdown memory topics.
-- `memory.read`: read a memory topic.
-- `memory.search`: search memory index and topic files.
-- `memory.write`: append a Markdown bullet to a memory topic.
+- `memory.list`: list always-on memory files and topic files.
+- `memory.read`: read `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file.
+- `memory.search`: search `INDEX.md` manifest lines; read matching topic files separately.
+- `memory.write`: append to or replace a memory file after permission approval.
 - `skill.run`: run a configured local skill command.
 
 Tool calls are bounded by `session.max_tool_rounds` and tool output is capped by `tools.max_result_chars`.
@@ -212,11 +213,16 @@ Persistent memory is Markdown-backed:
 ```text
 ~/.colibri/memory/
   MEMORY.md
+  USER.md
+  INDEX.md
   topics/
-    devices.md
+    system-info.md
+    colibri-design.md
 ```
 
-When `memory.enabled = true`, Colibri reads `MEMORY.md`, scores topics against the current turn, and injects the top relevant topic files as temporary model context. Memory injection is bounded by `memory.max_recall_topics` and `memory.max_recall_chars`.
+When `memory.enabled = true`, Colibri injects bounded always-on context from `MEMORY.md` and `USER.md`. Detailed memory lookup is model-driven: the model uses `memory.search` to search `INDEX.md`, then `memory.read` to inspect linked `topics/*.md` files when prior context is needed. Automatic injection is bounded by `memory.max_recall_chars`.
+
+Keep `USER.md` under 600 characters and `MEMORY.md` under 1800 characters. If a `memory.write` call leaves either file over its limit, the tool result asks the model to consolidate it and replace the file.
 
 ## Local Skills
 
@@ -243,7 +249,7 @@ timeout_seconds = 60
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-compact_trigger_chars = 192000
+model_input_char_limit = 192000
 summary_max_chars = 12000
 model_compact = true
 transcript = true
@@ -256,7 +262,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-When the session reaches `trigger_message_limit` messages, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. Model input is trimmed to fit `compact_trigger_chars` while preserving the latest user message.
+When the session reaches `trigger_message_limit` messages, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. Model input is trimmed to fit `model_input_char_limit` while preserving the latest user message.
 
 ## Transcripts
 

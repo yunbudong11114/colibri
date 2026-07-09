@@ -91,6 +91,10 @@ The system prompt string should preserve normal sentence spacing.
 
 The OpenAI-compatible adapter should serialize request JSON with `ensure_ascii=False`. This avoids expanding Chinese text into escaped Unicode sequences and keeps request bodies smaller without changing the API shape.
 
+## Config Source Documentation
+
+`src/colibri/config.py` is the source of truth for supported configuration keys. Each config dataclass field should have a short Chinese comment explaining what the value controls. Example TOML files may keep longer usage-oriented comments, but the Python config definitions should remain readable without opening external documentation.
+
 ## Terminal QR Behavior
 
 The built-in QR renderer stays dependency-free and best-effort. It targets the short iLink auth payloads used by Weixin login. The auth command must always print both:

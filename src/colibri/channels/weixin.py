@@ -290,10 +290,12 @@ def _api_error_text(action: str, response: dict[str, Any]) -> str:
 
 def _permission_prompt_text(request: PermissionRequest) -> str:
     lines = [f"Colibri wants to run {request.tool_name}."]
-    if request.subject.shell_command:
-        lines.append(f"command: {request.subject.shell_command}")
-    elif request.subject.file_path:
+    if request.subject.file_path:
         lines.append(f"path: {request.subject.file_path}")
+        if request.subject.shell_command:
+            lines.append(f"command: {request.subject.shell_command}")
+    elif request.subject.shell_command:
+        lines.append(f"command: {request.subject.shell_command}")
     else:
         lines.append(f"arguments: {request.arguments}")
     lines.extend(["", "Reply one of:"])
