@@ -41,6 +41,7 @@ class ToolContext:
     cwd: Path
     allowed_file_roots: frozenset[str] = frozenset()
     media_sender: Callable[[MediaPart], None] | None = None
+    image_analyzer: Callable[[Path, str], str] | None = None
 
 
 class Tool(Protocol):

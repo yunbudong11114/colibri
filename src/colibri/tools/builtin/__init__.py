@@ -3,6 +3,7 @@ from colibri.tools.builtin.memory import MemoryListTool, MemoryReadTool, MemoryS
 from colibri.tools.builtin.shell import ShellRunTool
 from colibri.tools.builtin.skills import SkillRunTool
 from colibri.tools.builtin.web import WebSearchTool
+from colibri.tools.builtin.image import ImageUnderstandTool
 
 __all__ = [
     "FilesListTool",
@@ -16,4 +17,5 @@ __all__ = [
     "ShellRunTool",
     "SkillRunTool",
     "WebSearchTool",
+    "ImageUnderstandTool",
 ]

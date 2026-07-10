@@ -12,11 +12,12 @@ from colibri.context import (
     compact_prompt_message,
     format_model_summary,
     model_input_chars,
+    retain_recent_message_groups,
     summarize_messages,
     summary_context,
 )
 from colibri.memory import MemoryContext
-from colibri.messages import AgentResponse, Message, ModelLimits, ToolCall
+from colibri.messages import AgentResponse, Message, ModelLimits, ModelResponse, ToolCall
 from colibri.media import MediaPart
 from colibri.model.base import ModelClient
 from colibri.skills import SkillIndex
@@ -24,6 +25,7 @@ from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
 from colibri.transcript import TranscriptSink
+from colibri.vision import ImageAnalyzer
 
 
 SYSTEM_PROMPT = (
@@ -40,124 +42,175 @@ class AgentSession:
     permission_policy: PermissionPolicy | None = None
     transcript: TranscriptSink | None = None
     media_sender: Callable[[MediaPart], None] | None = None
+    history_loader: Callable[[], list[Message]] | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)
     last_activity_at: float = field(default_factory=monotonic)
+    _history_loaded: bool = field(default=False, init=False, repr=False)
+    _image_analyzer: ImageAnalyzer | None = field(default=None, init=False, repr=False)
 
-    def submit(self, user_text: str) -> AgentResponse:
-        bounded_text = self._bound_text(user_text, self.config.session.model_input_char_limit)
+    def submit(self, user_text: str, media: list[MediaPart] | None = None) -> AgentResponse:
+        self._restore_history_once()
+        bounded_text = self._prepare_user_message(user_text, media or [])
+        registry, policy, image_analyzer = self._runtime_dependencies()
+        context = self._tool_context(registry, image_analyzer)
+        memory_text, skill_text = self._load_dynamic_context(bounded_text)
+        model_messages = self._budgeted_model_messages(memory_text, skill_text)
+
+        for _round_index in range(self.config.session.max_tool_rounds):
+            model_response = self._complete_model(model_messages, registry)
+            assistant_text = self._record_assistant_message(model_response)
+
+            if not model_response.tool_calls:
+                return self._finish_response(assistant_text)
+
+            for call in model_response.tool_calls:
+                self._execute_tool_call(call, registry, policy, context)
+                model_messages = self._budgeted_model_messages(memory_text, skill_text)
+
+        return self._round_limit_response()
+
+    def reset(self) -> None:
+        self.messages.clear()
+        self.summary = ""
+        self.last_activity_at = monotonic()
+
+    def close(self) -> None:
+        if self.transcript is not None:
+            self.transcript.close()
+
+    def _prepare_user_message(self, user_text: str, media: list[MediaPart]) -> str:
+        text_with_media = _user_text_with_media(user_text, media)
+        bounded_text = self._bound_text(text_with_media, self.config.session.model_input_char_limit)
         self.messages.append(Message(role="user", content=bounded_text))
-        self._write_transcript("user_message", {"text": bounded_text})
+        self._write_transcript(
+            "user_message",
+            {"text": bounded_text, "media": [_media_payload(part) for part in media]},
+        )
         self._compact_messages_if_needed()
+        return bounded_text
 
-        registry = self.tools or ToolRegistry.from_config(self.config)
-        if self.permission_policy is None:
-            self.permission_policy = PermissionPolicy.from_config(self.config, cwd=registry.cwd)
-        policy = self.permission_policy
-        context = ToolContext(config=self.config, cwd=registry.cwd, media_sender=self.media_sender)
+    def _tool_context(self, registry: ToolRegistry, image_analyzer: ImageAnalyzer) -> ToolContext:
+        return ToolContext(
+            config=self.config,
+            cwd=registry.cwd,
+            media_sender=self.media_sender,
+            image_analyzer=image_analyzer,
+        )
+
+    def _load_dynamic_context(self, user_text: str) -> tuple[str, str]:
         memory_result = MemoryContext(self.config).load()
         if memory_result.text:
             self._write_transcript(
                 "memory_context",
                 {"files": memory_result.files, "truncated": memory_result.truncated},
             )
-        skill_result = SkillIndex.scan(self.config.skills.dirs).context_for(bounded_text, self.config.skills)
+        skill_result = SkillIndex.scan(self.config.skills.dirs).context_for(user_text, self.config.skills)
         if skill_result.text:
             self._write_transcript(
                 "skill_recall",
                 {"skills": skill_result.skills, "truncated": skill_result.truncated},
             )
-        model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
+        return memory_result.text, skill_result.text
 
-        for _round_index in range(self.config.session.max_tool_rounds):
-            try:
-                model_response = self.model.complete(
-                    messages=list(model_messages),
-                    tools=registry.specs(),
-                    system=SYSTEM_PROMPT,
-                    limits=ModelLimits(
-                        timeout_seconds=self.config.model.timeout_seconds,
-                        max_output_tokens=self.config.model.max_output_tokens,
-                    ),
-                )
-            except Exception as error:
-                self._write_transcript(
-                    "model_error",
-                    {"error_type": type(error).__name__, "message": str(error)},
-                )
-                raise
-            assistant_text = self._bound_text(model_response.text, self.config.tools.max_result_chars)
-            self.messages.append(
-                Message(role="assistant", content=assistant_text, tool_calls=list(model_response.tool_calls))
+    def _complete_model(self, messages: list[Message], registry: ToolRegistry) -> ModelResponse:
+        try:
+            return self.model.complete(
+                messages=list(messages),
+                tools=registry.specs(),
+                system=SYSTEM_PROMPT,
+                limits=ModelLimits(
+                    timeout_seconds=self.config.model.timeout_seconds,
+                    max_output_tokens=self.config.model.max_output_tokens,
+                ),
             )
+        except Exception as error:
             self._write_transcript(
-                "assistant_message",
-                {"text": assistant_text, "tool_call_count": len(model_response.tool_calls)},
+                "model_error",
+                {"error_type": type(error).__name__, "message": str(error)},
             )
-            self._compact_messages_if_needed()
+            raise
 
-            if not model_response.tool_calls:
-                self.last_activity_at = monotonic()
-                return AgentResponse(text=assistant_text, messages=list(self.messages))
+    def _record_assistant_message(self, response: ModelResponse) -> str:
+        assistant_text = self._bound_text(response.text, self.config.tools.max_result_chars)
+        self.messages.append(
+            Message(role="assistant", content=assistant_text, tool_calls=list(response.tool_calls))
+        )
+        self._write_transcript(
+            "assistant_message",
+            {"text": assistant_text, "tool_call_count": len(response.tool_calls)},
+        )
+        self._compact_messages_if_needed()
+        return assistant_text
 
-            for call in model_response.tool_calls:
-                self._write_transcript(
-                    "tool_call",
-                    {"id": call.id, "name": call.name, "arguments": call.arguments},
-                )
-                tool = registry.get(call.name)
-                if tool is None:
-                    result = registry.run(call, context)
-                else:
-                    decision = policy.decide(tool, call.arguments, context)
-                    self._write_transcript(
-                        "permission_decision",
-                        {
-                            "tool_name": call.name,
-                            "subject_kind": decision.subject_kind,
-                            "decision": decision.decision,
-                            "scope": decision.scope,
-                            "allowed": decision.allowed,
-                            "reason": decision.reason,
-                            "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
-                            "file_path": decision.file_path,
-                            "file_root": decision.file_root,
-                        },
+    def _execute_tool_call(
+        self,
+        call: ToolCall,
+        registry: ToolRegistry,
+        policy: PermissionPolicy,
+        context: ToolContext,
+    ) -> None:
+        self._write_transcript(
+            "tool_call",
+            {"id": call.id, "name": call.name, "arguments": call.arguments},
+        )
+        tool = registry.get(call.name)
+        if tool is None:
+            result = registry.run(call, context)
+        else:
+            decision = policy.decide(tool, call.arguments, context)
+            self._write_transcript(
+                "permission_decision",
+                {
+                    "tool_name": call.name,
+                    "subject_kind": decision.subject_kind,
+                    "decision": decision.decision,
+                    "scope": decision.scope,
+                    "allowed": decision.allowed,
+                    "reason": decision.reason,
+                    "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
+                    "file_path": decision.file_path,
+                    "file_root": decision.file_root,
+                },
+            )
+            if decision.allowed:
+                run_context = context
+                if decision.file_root is not None:
+                    run_context = replace(
+                        context,
+                        allowed_file_roots=frozenset({decision.file_root}),
                     )
-                    if decision.allowed:
-                        run_context = context
-                        if decision.file_root is not None:
-                            run_context = replace(
-                                context,
-                                allowed_file_roots=frozenset({decision.file_root}),
-                            )
-                        result = tool.run(call.arguments, run_context)
-                    else:
-                        result = ToolResult(
-                            ok=False,
-                            text=_denied_tool_text(call),
-                            error_type="permission_denied",
-                        )
-                result = self._send_media_result_if_needed(result)
-                self._write_transcript(
-                    "tool_result",
-                    {
-                        "id": call.id,
-                        "name": call.name,
-                        "ok": result.ok,
-                        "error_type": result.error_type,
-                        "text": self._bound_text(result.text, self.config.tools.max_result_chars),
-                        "truncated": result.truncated,
-                        "media": _media_payload(result.media),
-                    },
+                result = tool.run(call.arguments, run_context)
+            else:
+                result = ToolResult(
+                    ok=False,
+                    text=_denied_tool_text(call),
+                    error_type="permission_denied",
                 )
-                self.messages.append(
-                    Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
-                )
-                self._compact_messages_if_needed()
-                model_messages = self._budgeted_model_messages(memory_result.text, skill_result.text)
+        result = self._send_media_result_if_needed(result)
+        self._write_transcript(
+            "tool_result",
+            {
+                "id": call.id,
+                "name": call.name,
+                "ok": result.ok,
+                "error_type": result.error_type,
+                "text": self._bound_text(result.text, self.config.tools.max_result_chars),
+                "truncated": result.truncated,
+                "media": _media_payload(result.media),
+            },
+        )
+        self.messages.append(
+            Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
+        )
+        self._compact_messages_if_needed()
 
+    def _finish_response(self, text: str) -> AgentResponse:
+        self.last_activity_at = monotonic()
+        return AgentResponse(text=text, messages=list(self.messages))
+
+    def _round_limit_response(self) -> AgentResponse:
         limit_text = _round_limit_text(
             self.messages,
             max_tool_rounds=self.config.session.max_tool_rounds,
@@ -169,17 +222,31 @@ class AgentSession:
             {"max_tool_rounds": self.config.session.max_tool_rounds, "text": limit_text},
         )
         self._compact_messages_if_needed()
-        self.last_activity_at = monotonic()
-        return AgentResponse(text=limit_text, messages=list(self.messages))
+        return self._finish_response(limit_text)
 
-    def reset(self) -> None:
-        self.messages.clear()
-        self.summary = ""
-        self.last_activity_at = monotonic()
+    def _restore_history_once(self) -> None:
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        if self.history_loader is None:
+            return
+        try:
+            self.messages.extend(self.history_loader())
+        except Exception as error:
+            self._write_transcript(
+                "history_restore_error",
+                {"error_type": type(error).__name__, "message": str(error)},
+            )
+            return
 
-    def close(self) -> None:
-        if self.transcript is not None:
-            self.transcript.close()
+    def _runtime_dependencies(self) -> tuple[ToolRegistry, PermissionPolicy, ImageAnalyzer]:
+        if self.tools is None:
+            self.tools = ToolRegistry.from_config(self.config)
+        if self.permission_policy is None:
+            self.permission_policy = PermissionPolicy.from_config(self.config, cwd=self.tools.cwd)
+        if self._image_analyzer is None:
+            self._image_analyzer = ImageAnalyzer(self.config, self.model)
+        return self.tools, self.permission_policy, self._image_analyzer
 
     def _compact_messages_if_needed(self) -> None:
         trigger_limit = max(1, self.config.session.trigger_message_limit)
@@ -187,7 +254,7 @@ class AgentSession:
             messages_to_compact = list(self.messages)
             addition, mode = self._compact_messages(messages_to_compact)
             self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
-            self.messages = _retained_messages_after_compact(
+            self.messages = retain_recent_message_groups(
                 messages_to_compact,
                 max(0, self.config.session.recent_message_limit),
             )
@@ -307,22 +374,20 @@ def _media_payload(media: MediaPart | None) -> dict | None:
     }
 
 
-def _retained_messages_after_compact(messages: list[Message], recent_limit: int) -> list[Message]:
-    if not messages:
-        return []
-    kept_start = max(0, len(messages) - recent_limit)
-    kept = list(messages[kept_start:]) if recent_limit > 0 else []
-    latest_user_index = _latest_user_index(messages)
-    if latest_user_index is not None and latest_user_index < kept_start:
-        return [messages[latest_user_index], *kept]
-    return kept
-
-
-def _latest_user_index(messages: list[Message]) -> int | None:
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role == "user":
-            return index
-    return None
+def _user_text_with_media(user_text: str, media: list[MediaPart]) -> str:
+    if not media:
+        return user_text
+    lines = ["Attachments saved locally:"]
+    for index, part in enumerate(media, start=1):
+        label = part.type or "file"
+        filename = part.filename or part.path.name
+        content_type = f", content_type={part.content_type}" if part.content_type else ""
+        lines.append(f"{index}. {label}: {filename} at {part.path}{content_type}")
+    text = user_text.strip()
+    attachment_text = "\n".join(lines)
+    if not text:
+        return attachment_text
+    return f"{text}\n\n{attachment_text}"
 
 
 def _round_limit_text(messages: list[Message], max_tool_rounds: int, max_chars: int) -> str:

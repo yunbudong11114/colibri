@@ -101,15 +101,36 @@ def budget_model_messages(messages: list[Message], max_chars: int) -> tuple[list
     if _message_chars(messages) <= max_chars:
         return messages, 0
 
-    kept = list(messages)
+    kept = _message_groups(messages)
     dropped = 0
-    while len(kept) > 1 and _message_chars(kept) > max_chars:
-        drop_index = _oldest_droppable_index(kept)
+    while len(kept) > 1 and _message_chars(_flatten_groups(kept)) > max_chars:
+        drop_index = _oldest_droppable_group_index(kept)
         if drop_index is None:
             break
+        dropped += len(kept[drop_index])
         kept.pop(drop_index)
-        dropped += 1
-    return kept, dropped
+    return _flatten_groups(kept), dropped
+
+
+def retain_recent_message_groups(messages: list[Message], recent_limit: int) -> list[Message]:
+    if not messages:
+        return []
+
+    groups = _message_groups(messages)
+    kept_reversed: list[list[Message]] = []
+    kept_messages = 0
+    if recent_limit > 0:
+        for group in reversed(groups):
+            if kept_reversed and kept_messages + len(group) > recent_limit:
+                break
+            kept_reversed.append(group)
+            kept_messages += len(group)
+
+    kept_groups = list(reversed(kept_reversed))
+    latest_user_group = _latest_user_group(groups)
+    if latest_user_group is not None and all(group is not latest_user_group for group in kept_groups):
+        kept_groups.insert(0, latest_user_group)
+    return _flatten_groups(kept_groups)
 
 
 def model_input_chars(messages: list[Message]) -> int:
@@ -161,19 +182,42 @@ def _message_chars(messages: list[Message]) -> int:
     return sum(len(message.role) + len(message.content) for message in messages)
 
 
-def _oldest_droppable_index(messages: list[Message]) -> int | None:
-    latest_user_index = _latest_user_index(messages)
-    for index, message in enumerate(messages):
-        if message.role == "system":
+def _message_groups(messages: list[Message]) -> list[list[Message]]:
+    groups: list[list[Message]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        group = [message]
+        index += 1
+        if message.role == "assistant" and message.tool_calls:
+            call_ids = {call.id for call in message.tool_calls}
+            while index < len(messages):
+                candidate = messages[index]
+                if candidate.role != "tool" or candidate.tool_call_id not in call_ids:
+                    break
+                group.append(candidate)
+                index += 1
+        groups.append(group)
+    return groups
+
+
+def _flatten_groups(groups: list[list[Message]]) -> list[Message]:
+    return [message for group in groups for message in group]
+
+
+def _oldest_droppable_group_index(groups: list[list[Message]]) -> int | None:
+    latest_user_group = _latest_user_group(groups)
+    for index, group in enumerate(groups):
+        if any(message.role == "system" for message in group):
             continue
-        if index == latest_user_index:
+        if group is latest_user_group:
             continue
         return index
     return None
 
 
-def _latest_user_index(messages: list[Message]) -> int | None:
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role == "user":
-            return index
+def _latest_user_group(groups: list[list[Message]]) -> list[Message] | None:
+    for group in reversed(groups):
+        if any(message.role == "user" for message in group):
+            return group
     return None

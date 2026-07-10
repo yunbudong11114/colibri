@@ -197,7 +197,7 @@ idle_exit_seconds = 300
 transcript = true
 
 [tools]
-enabled = ["shell", "files", "web", "memory", "skills", "mcp"]
+enabled = ["shell", "files", "web", "image", "memory", "skills"]
 default_permission = "allow_read_confirm_write"
 max_result_chars = 32000
 max_shell_seconds = 30
@@ -236,19 +236,10 @@ endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
 max_results = 10
 timeout_seconds = 10
 
-[mcp]
-enabled = true
-startup = "lazy"
-max_active_servers = 1
-
-[[mcp.servers]]
-name = "home"
-transport = "stdio"
-command = "python"
-args = ["-m", "home_mcp_server"]
-permission = "confirm"
-idle_ttl_seconds = 60
 ```
+
+MCP configuration is intentionally absent from the active schema while
+Milestone 8 remains deferred. Existing unknown `[mcp]` sections are ignored.
 
 On CardputerZero, the default config should favor small outputs and short timeouts. Desktop development can override these limits.
 

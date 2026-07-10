@@ -14,3 +14,11 @@ class ModelClient(Protocol):
         limits: ModelLimits,
     ) -> ModelResponse:
         ...
+
+    def complete_image(
+        self,
+        prompt: str,
+        image_data_url: str,
+        limits: ModelLimits,
+    ) -> ModelResponse:
+        ...

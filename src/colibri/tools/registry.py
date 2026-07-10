@@ -10,6 +10,7 @@ from colibri.tools.builtin import (
     FilesReadTool,
     FilesSendTool,
     FilesWriteTool,
+    ImageUnderstandTool,
     MemoryListTool,
     MemoryReadTool,
     MemorySearchTool,
@@ -37,6 +38,8 @@ class ToolRegistry:
             tools.append(ShellRunTool())
         if "web" in enabled:
             tools.append(WebSearchTool())
+        if "image" in enabled:
+            tools.append(ImageUnderstandTool())
         if "skills" in enabled:
             tools.append(SkillRunTool())
         return cls(tools=tools, cwd=cwd)

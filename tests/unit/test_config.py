@@ -10,6 +10,11 @@ def test_default_config_uses_small_device_limits():
     assert config.model.model == "fake-colibri-model"
     assert config.model.api_key == ""
     assert config.model.max_output_tokens == 16384
+    assert config.vision.model == ""
+    assert config.vision.base_url == ""
+    assert config.vision.api_key == ""
+    assert config.vision.timeout_seconds == 60
+    assert config.vision.max_image_bytes == 4 * 1024 * 1024
     assert config.session.max_tool_rounds == 32
     assert config.session.trigger_message_limit == 96
     assert config.session.recent_message_limit == 12
@@ -18,13 +23,20 @@ def test_default_config_uses_small_device_limits():
     assert config.session.model_compact
     assert not config.session.idle_exit_enabled
     assert config.session.idle_exit_seconds == 300
+    assert config.session.restore_transcript
+    assert config.session.restore_message_limit == 24
+    assert config.session.restore_char_limit == 24000
+    assert config.session.restore_scan_bytes == 2097152
+    assert config.session.transcript_retention_days == 30
+    assert config.session.transcript_max_total_bytes == 134217728
     assert config.tools.max_result_chars == 32000
     assert "web" in config.tools.enabled
+    assert "mcp" not in config.tools.enabled
     assert config.skills.max_loaded == 3
     assert config.skills.max_instruction_chars == 8000
     assert config.memory.max_search_results == 5
-    assert config.memory.max_recall_topics == 3
     assert config.memory.max_recall_chars == 6000
+    assert not hasattr(config.memory, "max_recall_topics")
     assert config.console.status
     assert config.web_search.engine == "baidu"
     assert config.web_search.api_key == ""
@@ -37,10 +49,12 @@ def test_default_config_uses_small_device_limits():
     assert not config.channels.weixin.enabled
     assert config.channels.weixin.base_url == "https://ilinkai.weixin.qq.com/"
     assert config.channels.weixin.allow_from == []
+    assert not hasattr(config.channels.weixin, "message_debounce_seconds")
     assert config.shell.deny[:3] == ["rm", "shutdown", "reboot"]
     assert config.files.roots == [expand_user_path("~/.colibri/workspace"), Path("/tmp/colibri")]
     assert not hasattr(config.shell, "allow")
     assert not hasattr(config.files, "confirm_write")
+    assert not hasattr(config, "mcp")
 
 
 def test_load_config_overrides_nested_values(tmp_path):
@@ -53,12 +67,25 @@ model = "gpt-4.1-mini"
 timeout_seconds = 45
 api_key = "inline-key"
 
+[vision]
+model = "vision-model"
+base_url = "https://vision.example/v1"
+api_key = "vision-key"
+timeout_seconds = 33
+max_image_bytes = 1234
+
 [session]
 trigger_message_limit = 20
 recent_message_limit = 8
 model_compact = false
 idle_exit_enabled = true
 idle_exit_seconds = 12
+restore_transcript = false
+restore_message_limit = 10
+restore_char_limit = 9000
+restore_scan_bytes = 123456
+transcript_retention_days = 7
+transcript_max_total_bytes = 7654321
 
 [files]
 roots = ["~/notes", "/tmp"]
@@ -98,11 +125,22 @@ auth_timeout_seconds = 22
     assert config.model.model == "gpt-4.1-mini"
     assert config.model.api_key == "inline-key"
     assert config.model.timeout_seconds == 45
+    assert config.vision.model == "vision-model"
+    assert config.vision.base_url == "https://vision.example/v1"
+    assert config.vision.api_key == "vision-key"
+    assert config.vision.timeout_seconds == 33
+    assert config.vision.max_image_bytes == 1234
     assert config.session.trigger_message_limit == 20
     assert config.session.recent_message_limit == 8
     assert not config.session.model_compact
     assert config.session.idle_exit_enabled
     assert config.session.idle_exit_seconds == 12
+    assert not config.session.restore_transcript
+    assert config.session.restore_message_limit == 10
+    assert config.session.restore_char_limit == 9000
+    assert config.session.restore_scan_bytes == 123456
+    assert config.session.transcript_retention_days == 7
+    assert config.session.transcript_max_total_bytes == 7654321
     assert config.files.roots[0].name == "notes"
     assert config.files.roots[1] == Path("/tmp")
     assert config.skills.dirs[0].name == "skills"
@@ -189,6 +227,10 @@ max_search_results = 3
 enabled = false
 max_recall_topics = 2
 max_recall_chars = 1234
+
+[mcp]
+enabled = true
+startup = "eager"
 """.strip(),
         encoding="utf-8",
     )
@@ -198,8 +240,9 @@ max_recall_chars = 1234
     assert config.memory.root == memory_root
     assert config.memory.max_search_results == 3
     assert not config.memory.enabled
-    assert config.memory.max_recall_topics == 2
     assert config.memory.max_recall_chars == 1234
+    assert not hasattr(config.memory, "max_recall_topics")
+    assert not hasattr(config, "mcp")
 
 
 def test_expand_user_path_expands_home():

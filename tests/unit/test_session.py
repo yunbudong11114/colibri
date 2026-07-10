@@ -19,6 +19,123 @@ def test_submit_records_user_and_assistant_messages():
     assert session.messages[1].content == "fake: hello"
 
 
+def test_submit_restores_history_once_before_new_user_message():
+    calls = 0
+
+    def load_history():
+        nonlocal calls
+        calls += 1
+        return [Message(role="user", content="previous"), Message(role="assistant", content="previous answer")]
+
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=AgentConfig.default(),
+        model=FakeModelClient(),
+        transcript=transcript,
+        history_loader=load_history,
+    )
+
+    session.submit("current")
+    session.submit("next")
+
+    assert calls == 1
+    assert [message.content for message in session.messages[:4]] == [
+        "previous",
+        "previous answer",
+        "current",
+        "fake: current",
+    ]
+    assert [payload["text"] for event_type, payload in transcript.events if event_type == "user_message"] == [
+        "current",
+        "next",
+    ]
+
+
+def test_reset_does_not_restore_old_transcript_again():
+    calls = 0
+
+    def load_history():
+        nonlocal calls
+        calls += 1
+        return [Message(role="user", content="previous"), Message(role="assistant", content="previous answer")]
+
+    session = AgentSession(config=AgentConfig.default(), model=FakeModelClient(), history_loader=load_history)
+    session.submit("current")
+
+    session.reset()
+    session.submit("fresh")
+
+    assert calls == 1
+    assert [message.content for message in session.messages] == ["fresh", "fake: fresh"]
+
+
+def test_session_reuses_lazy_runtime_dependencies_across_submits(monkeypatch, tmp_path):
+    registry_calls = 0
+    analyzer_calls = 0
+
+    def build_registry(cls, config, cwd=None):
+        nonlocal registry_calls
+        registry_calls += 1
+        return ToolRegistry(tools=[], cwd=tmp_path)
+
+    def build_analyzer(config, model):
+        nonlocal analyzer_calls
+        analyzer_calls += 1
+        return object()
+
+    monkeypatch.setattr(ToolRegistry, "from_config", classmethod(build_registry))
+    monkeypatch.setattr("colibri.session.ImageAnalyzer", build_analyzer)
+    session = AgentSession(config=AgentConfig.default(), model=FakeModelClient())
+
+    session.submit("first")
+    session.submit("second")
+
+    assert registry_calls == 1
+    assert analyzer_calls == 1
+
+
+def test_history_restore_error_is_logged_and_does_not_block_submit():
+    def fail_restore():
+        raise OSError("history unavailable")
+
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=AgentConfig.default(),
+        model=FakeModelClient(),
+        transcript=transcript,
+        history_loader=fail_restore,
+    )
+
+    response = session.submit("current")
+
+    assert response.text == "fake: current"
+    assert (
+        "history_restore_error",
+        {"error_type": "OSError", "message": "history unavailable"},
+    ) in transcript.events
+
+
+def test_submit_appends_media_paths_to_user_message(tmp_path):
+    session = AgentSession(config=AgentConfig.default(), model=FakeModelClient())
+    image_path = tmp_path / "photo.png"
+
+    response = session.submit(
+        "这张图里有什么",
+        media=[
+            MediaPart(
+                type="image",
+                path=image_path,
+                filename="photo.png",
+                content_type="image/png",
+            )
+        ],
+    )
+
+    assert "Attachments saved locally:" in session.messages[0].content
+    assert f"image: photo.png at {image_path}, content_type=image/png" in session.messages[0].content
+    assert response.text == f"fake: 这张图里有什么\n\nAttachments saved locally:\n1. image: photo.png at {image_path}, content_type=image/png"
+
+
 def test_system_prompt_has_sentence_spacing():
     assert "Colibri. You" in SYSTEM_PROMPT
     assert "low memory, battery, and tool limits." in SYSTEM_PROMPT
@@ -93,6 +210,54 @@ def test_session_retains_latest_user_message_even_outside_recent_window():
 
     assert [message.content for message in session.messages] == ["active request", "", "result 2"]
     assert "user: active request" in session.summary
+
+
+def test_session_recent_limit_keeps_complete_tool_call_group():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 4, "recent_message_limit": 1, "model_compact": False}}
+    )
+    session = AgentSession(config=config, model=FakeModelClient())
+    session.messages = [
+        Message(role="user", content="active request"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="files.read", arguments={})],
+        ),
+        Message(role="tool", content="result", tool_call_id="call_1"),
+        Message(role="assistant", content="done"),
+    ]
+
+    session._compact_messages_if_needed()
+
+    assert [(message.role, message.tool_call_id) for message in session.messages] == [
+        ("user", None),
+        ("assistant", None),
+    ]
+
+
+def test_session_recent_limit_keeps_tool_group_whole_when_group_exceeds_limit():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 3, "recent_message_limit": 1, "model_compact": False}}
+    )
+    session = AgentSession(config=config, model=FakeModelClient())
+    session.messages = [
+        Message(role="user", content="active request"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="files.read", arguments={})],
+        ),
+        Message(role="tool", content="result", tool_call_id="call_1"),
+    ]
+
+    session._compact_messages_if_needed()
+
+    assert [(message.role, message.tool_call_id) for message in session.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call_1"),
+    ]
 
 
 def test_session_uses_model_assisted_compact_without_tools():
@@ -496,7 +661,7 @@ def test_close_closes_transcript():
 def test_memory_write_uses_permission_confirmation(tmp_path):
     config = AgentConfig.default().with_overrides({"memory": {"root": str(tmp_path / "memory")}})
     prompter = FakePrompter(reply="yes")
-    policy = PermissionPolicy.from_config(config, prompter=prompter)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     session = AgentSession(
         config=config,
         model=ScriptedMemoryWriteModel(),

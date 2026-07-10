@@ -169,22 +169,24 @@ Recommended Colibri design:
 - Extend the channel inbound message shape with a `media` list of references.
 - Store incoming media under a bounded temporary media directory, not in session
   history as raw bytes.
-- Register each downloaded file in the same small `MediaStore` used by outbound
-  media.
-- Add content placeholders to the text prompt so non-vision models still know an
-  attachment arrived:
+- Do not make image understanding a separate first-class tool in this milestone,
+  and do not automatically pass image bytes to the LLM. Colibri's default model
+  can be text-only, so the main path is to expose saved local paths and let the
+  model decide whether to call existing file tools or ask for a different model.
+- Add content placeholders to the text prompt so the model knows an attachment
+  arrived:
 
 ```text
-[image]
-[file: report.pdf]
+[image: photo.png] saved at /tmp/colibri/media/...
+[file: report.pdf] saved at /tmp/colibri/media/...
 [video]
 [audio]
 ```
 
-- If the active model supports image input, the session/model adapter may resolve
-  image `media://...` refs into the provider's accepted image input format.
-- For non-image files, expose a separate read/analyze tool path instead of
-  blindly injecting file bytes into the prompt.
+- For both image and non-image files, expose the local temp path instead of
+  blindly injecting bytes into the prompt. The model can then decide whether to
+  use `files.read`, another future tool, or explain that the current model cannot
+  inspect a binary image directly.
 - Enforce max download size and cleanup policy. Inbound attachments should be
   deleted when their media scope expires.
 
@@ -192,14 +194,47 @@ Minimal first version:
 
 ```text
 Weixin inbound:
-  image -> media://... plus [image]
-  file  -> media://... plus [file: filename]
+  image -> temp file path plus [image: filename]
+  file  -> temp file path plus [file: filename]
 
 Deferred:
   video
   voice/SILK transcoding
   multiple attachments in one Weixin message
 ```
+
+Implementation boundary for the first Colibri inbound change:
+
+- Extend `InboundMessage` with a `media` list of `MediaPart` values. Existing
+  text-only channel handlers can keep the default empty list.
+- Download at most one Weixin inbound attachment per message, matching the
+  current PicoClaw priority order but limiting this milestone to image and file.
+- Store downloaded bytes under a bounded local temp media directory:
+
+```text
+/tmp/colibri/media/weixin-inbound-<random>.<ext>
+```
+
+- Decrypt CDN bytes when Weixin provides an AES key. AES key parsing follows the
+  outbound-compatible format: base64 of raw 16 bytes or base64 of a 32-byte hex
+  string. Decryption uses AES-ECB and PKCS7 unpadding through `pycryptodome`.
+- Keep raw bytes out of session history and model prompts. The channel passes
+  structured `MediaPart` values to the session, and the session appends a small
+  attachment list to the user message:
+
+```text
+[image: image.png] saved at /tmp/colibri/media/...
+[file: report.pdf] saved at /tmp/colibri/media/...
+```
+
+- The temp path is under the default file root `/tmp/colibri`, so a later model
+  tool call can inspect text files through existing file permission behavior.
+  Binary images are preserved as files but are not injected into the model as
+  bytes. If the model cannot understand images directly, it should say so or use
+  future tools only when available.
+- If media download fails, the message should still be processed as text when
+  text exists. Media-only messages whose download fails are dropped rather than
+  sending broken attachment references.
 
 Security notes:
 
@@ -208,3 +243,21 @@ Security notes:
 - Make tool descriptions clear that `media://...` refs come from chat channels
   and may need user confirmation before being copied, read, transformed, or sent
   elsewhere.
+
+## 3. Dispatch Weixin Messages Independently
+
+Weixin may deliver an image and its accompanying text as separate messages.
+The API exposes no reliable attachment-group identifier, so Colibri does not
+wait for, infer, or merge a complementary message. Every parsed inbound message
+becomes an independent agent turn in receive order.
+
+The receive loop remains the only owner of `getupdates` and publishes messages
+directly to a bounded queue. A single worker consumes that queue, invokes the
+gateway handler, and sends replies. This keeps network reception independent
+from model and tool latency while preserving serialized access to an
+`AgentSession`.
+
+Permission confirmation does not start a competing poll loop. When the worker
+waits for permission, the receive loop routes the next eligible text reply to
+the registered sender waiter. This waiter is only for an explicit permission
+interaction; it does not aggregate attachments or ordinary chat messages.

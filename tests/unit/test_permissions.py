@@ -5,7 +5,7 @@ from typing import Any
 from colibri.config import AgentConfig
 from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
-from colibri.tools.builtin import FilesListTool, FilesWriteTool, ShellRunTool
+from colibri.tools.builtin import FilesListTool, FilesWriteTool, ImageUnderstandTool, ShellRunTool
 from colibri.tools.permissions import (
     PermissionPolicy,
     PermissionRequest,
@@ -218,6 +218,27 @@ def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     assert result.file_path == str(outside.resolve())
     assert prompter.requests[0].subject.kind == "file_path"
     assert prompter.requests[0].subject.file_path == str(outside.resolve())
+
+
+def test_out_of_root_image_path_prompts_instead_of_default_allow(tmp_path):
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed_root.mkdir()
+    outside.mkdir()
+    config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
+    prompter = FakePrompter(replies=["y"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
+
+    result = policy.decide(
+        ImageUnderstandTool(),
+        {"path": str(outside / "photo.png")},
+        tool_context(config, allowed_root),
+    )
+
+    assert result.allowed
+    assert result.scope == "once"
+    assert result.subject_kind == "file_path"
+    assert prompter.requests[0].tool_name == "image.understand"
 
 
 def test_out_of_root_files_write_prompts_as_file_path(tmp_path):

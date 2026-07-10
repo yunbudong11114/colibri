@@ -230,7 +230,7 @@ def permission_subject_for(
             shell_executable=executable,
             read_only=False,
         )
-    if tool.spec.name in {"files.list", "files.read", "files.write", "files.send"} and context is not None:
+    if tool.spec.name in {"files.list", "files.read", "files.write", "files.send", "image.understand"} and context is not None:
         raw_path = arguments.get("path")
         if isinstance(raw_path, str) and raw_path:
             resolved = resolve_file_path(raw_path, context.cwd)

@@ -17,6 +17,7 @@ from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.repl_input import read_repl_line
 from colibri.session import AgentSession
+from colibri.session_history import TranscriptHistoryLoader
 from colibri.transcript import TranscriptWriter
 
 
@@ -97,11 +98,21 @@ def main(
             GatewayRunner(config=config, model=build_model_client(config.model)).run()
             return 0
 
-        transcript = TranscriptWriter.default() if config.session.transcript else None
+        transcript = (
+            TranscriptWriter.default(
+                retention_days=config.session.transcript_retention_days,
+                max_total_bytes=config.session.transcript_max_total_bytes,
+            )
+            if config.session.transcript
+            else None
+        )
         session = AgentSession(
             config=config,
             model=build_model_client(config.model),
             transcript=StatusTranscript(transcript, status),
+            history_loader=TranscriptHistoryLoader.default(config.session)
+            if config.session.restore_transcript
+            else None,
         )
         _write_ready_status(config, status)
 

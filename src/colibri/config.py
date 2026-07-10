@@ -35,6 +35,20 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class VisionConfig:
+    # 视觉模型名称；为空时复用 model.model。
+    model: str = ""
+    # 视觉模型 API 基础地址；为空时复用 model.base_url。
+    base_url: str = ""
+    # 视觉模型 API Key；为空时依次复用 model.api_key 和 COLIBRI_API_KEY。
+    api_key: str = ""
+    # 视觉模型请求超时时间，单位秒。
+    timeout_seconds: int = 60
+    # 单张图片允许发送给模型的最大字节数。
+    max_image_bytes: int = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True)
 class SessionConfig:
     # 单次用户请求内允许的最大工具调用轮数。
     max_tool_rounds: int = 32
@@ -54,12 +68,24 @@ class SessionConfig:
     idle_exit_seconds: int = 300
     # 是否写入 transcript JSONL 日志。
     transcript: bool = True
+    # 新建 session 首次对话前是否从共享 transcript 恢复近期完整问答。
+    restore_transcript: bool = True
+    # 从 transcript 恢复的最大消息条数；按完整问答轮次截取。
+    restore_message_limit: int = 24
+    # 从 transcript 恢复内容的最大字符数；按完整问答轮次截取。
+    restore_char_limit: int = 24000
+    # 启动恢复最多扫描的 transcript 尾部字节数。
+    restore_scan_bytes: int = 2 * 1024 * 1024
+    # transcript 文件保留天数；设为 0 时不按时间清理。
+    transcript_retention_days: int = 30
+    # transcript 目录允许占用的总字节数；设为 0 时不按容量清理。
+    transcript_max_total_bytes: int = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
 class ToolsConfig:
     # 启用的工具类别列表。
-    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "web", "memory", "skills", "mcp"])
+    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "web", "image", "memory", "skills"])
     # 默认权限策略；allow_read_confirm_write 表示只读默认允许、写入/执行需要确认。
     default_permission: str = "allow_read_confirm_write"
     # 单次工具结果写入上下文前的最大字符数。
@@ -104,8 +130,6 @@ class MemoryConfig:
     max_search_results: int = 5
     # 是否启用长期记忆。
     enabled: bool = True
-    # 保留给未来模型辅助记忆选择的 topic 数量上限；当前不做本地关键词召回。
-    max_recall_topics: int = 3
     # MEMORY.md 和 USER.md 作为 always-on 记忆注入上下文前的最大字符数。
     max_recall_chars: int = 6000
 
@@ -157,19 +181,11 @@ class ChannelsConfig:
 
 
 @dataclass(frozen=True)
-class McpConfig:
-    # 是否启用 MCP。
-    enabled: bool = False
-    # MCP 启动策略；lazy 表示按需启动。
-    startup: str = "lazy"
-    # 同时活跃的 MCP server 数量上限。
-    max_active_servers: int = 1
-
-
-@dataclass(frozen=True)
 class AgentConfig:
     # 模型配置。
     model: ModelConfig = field(default_factory=ModelConfig)
+    # 图片理解模型配置；空值时回退到 model 配置。
+    vision: VisionConfig = field(default_factory=VisionConfig)
     # session、压缩、transcript 配置。
     session: SessionConfig = field(default_factory=SessionConfig)
     # 工具总配置。
@@ -190,8 +206,6 @@ class AgentConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     # 各 channel 配置集合。
     channels: ChannelsConfig = field(default_factory=ChannelsConfig)
-    # MCP 配置。
-    mcp: McpConfig = field(default_factory=McpConfig)
 
     @classmethod
     def default(cls) -> "AgentConfig":
@@ -209,20 +223,22 @@ class AgentConfig:
         return cls.default().with_overrides(data)
 
     def with_overrides(self, data: dict[str, Any]) -> "AgentConfig":
+        memory_overrides = dict(data.get("memory", {}))
+        memory_overrides.pop("max_recall_topics", None)
         return replace(
             self,
             model=_replace_dataclass(self.model, data.get("model", {})),
+            vision=_replace_dataclass(self.vision, data.get("vision", {})),
             session=_replace_dataclass(self.session, data.get("session", {})),
             tools=_replace_dataclass(self.tools, data.get("tools", {})),
             shell=_replace_dataclass(self.shell, data.get("shell", {})),
             files=_replace_dataclass(self.files, _path_list_overrides(data.get("files", {}), "roots")),
             skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
             console=_replace_dataclass(self.console, data.get("console", {})),
-            memory=_replace_dataclass(self.memory, _path_overrides(data.get("memory", {}), "root")),
+            memory=_replace_dataclass(self.memory, _path_overrides(memory_overrides, "root")),
             web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
             gateway=_replace_dataclass(self.gateway, data.get("gateway", {})),
             channels=_replace_channels(self.channels, data.get("channels", {})),
-            mcp=_replace_dataclass(self.mcp, data.get("mcp", {})),
         )
 
 

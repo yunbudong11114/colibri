@@ -61,3 +61,21 @@ def test_budget_model_messages_drops_oldest_non_system_and_keeps_latest_user():
 
     assert dropped == 2
     assert [message.content for message in budgeted] == ["summary", "latest user"]
+
+
+def test_budget_model_messages_drops_complete_tool_call_group():
+    call = ToolCall(id="call_1", name="files.read", arguments={"path": "notes.txt"})
+    messages = [
+        Message(role="user", content="u"),
+        Message(role="assistant", content="", tool_calls=[call]),
+        Message(role="tool", content="result", tool_call_id="call_1"),
+        Message(role="assistant", content="done"),
+    ]
+
+    budgeted, dropped = budget_model_messages(messages, max_chars=30)
+
+    assert dropped == 2
+    assert [(message.role, message.tool_call_id) for message in budgeted] == [
+        ("user", None),
+        ("assistant", None),
+    ]

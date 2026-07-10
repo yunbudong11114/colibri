@@ -12,6 +12,18 @@ timeout_seconds = 60
 # 单次模型回复的最大输出 token 数。
 max_output_tokens = 16384
 
+[vision]
+# 视觉模型名称；为空时复用 [model].model。
+model = ""
+# 视觉模型 API 地址；为空时复用 [model].base_url。
+base_url = ""
+# 视觉模型 API Key；为空时复用 [model].api_key 或 COLIBRI_API_KEY。
+api_key = ""
+# 视觉模型请求超时时间，单位秒。
+timeout_seconds = 60
+# 单张图片发送给模型的最大字节数。
+max_image_bytes = 4194304
+
 [session]
 # 单次用户请求内允许的最大工具调用轮数。
 max_tool_rounds = 32
@@ -29,6 +41,18 @@ model_compact = true
 idle_exit_enabled = false
 # REPL 空闲自动退出等待秒数。
 idle_exit_seconds = 300
+# 新建 session 首次对话前是否从共享 transcript 恢复近期完整问答。
+restore_transcript = true
+# 从 transcript 恢复的最大消息条数；按完整问答轮次截取。
+restore_message_limit = 24
+# 从 transcript 恢复内容的最大字符数；按完整问答轮次截取。
+restore_char_limit = 24000
+# 启动恢复最多扫描的 transcript 尾部字节数。
+restore_scan_bytes = 2097152
+# transcript 文件保留天数；设为 0 时不按时间清理。
+transcript_retention_days = 30
+# transcript 目录允许占用的总字节数；设为 0 时不按容量清理。
+transcript_max_total_bytes = 134217728
 
 [tools]
 # 单次工具结果写入上下文前的最大字符数。

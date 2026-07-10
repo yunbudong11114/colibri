@@ -38,6 +38,7 @@ def test_registry_exposes_enabled_builtin_tool_specs(tmp_path):
         "memory.write",
         "skill.run",
         "web.search",
+        "image.understand",
     }.issubset(names)
 
 

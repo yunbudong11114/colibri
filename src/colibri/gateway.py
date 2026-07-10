@@ -11,8 +11,10 @@ from colibri.channels.base import Channel, ChannelContext, InboundMessage
 from colibri.channels.weixin import WeixinChannel, WeixinPermissionPrompter
 from colibri.config import AgentConfig, ConfigError
 from colibri.media import MediaPart
+from colibri.messages import Message
 from colibri.model.base import ModelClient
 from colibri.session import AgentSession
+from colibri.session_history import TranscriptHistoryLoader
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
 from colibri.transcript import ScopedTranscriptWriter, TranscriptSink, TranscriptWriter
@@ -33,6 +35,7 @@ class GatewaySessionCache:
         max_sessions: int,
         idle_seconds: int,
         transcript: TranscriptSink | None = None,
+        history_loader: Callable[[], list[Message]] | None = None,
         monotonic_func: Callable[[], float] = monotonic,
     ):
         self.config = config
@@ -41,6 +44,7 @@ class GatewaySessionCache:
         self.max_sessions = max(1, max_sessions)
         self.idle_seconds = idle_seconds
         self.transcript = transcript
+        self.history_loader = history_loader
         self.monotonic = monotonic_func
         self._entries: dict[str, GatewaySessionEntry] = {}
         self._lock = threading.Lock()
@@ -72,6 +76,7 @@ class GatewaySessionCache:
                 if self.transcript is not None
                 else None,
                 media_sender=media_sender,
+                history_loader=self.history_loader,
             )
             self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
             return session
@@ -120,7 +125,19 @@ class GatewayRunner:
         self.config = config
         self.model = model
         self.registry = registry or ToolRegistry.from_config(config, cwd=cwd)
-        transcript = TranscriptWriter.default() if config.session.transcript else None
+        transcript = (
+            TranscriptWriter.default(
+                retention_days=config.session.transcript_retention_days,
+                max_total_bytes=config.session.transcript_max_total_bytes,
+            )
+            if config.session.transcript
+            else None
+        )
+        history_loader = (
+            TranscriptHistoryLoader.default(config.session)
+            if config.session.restore_transcript
+            else None
+        )
         self.sessions = GatewaySessionCache(
             config=config,
             model=model,
@@ -128,6 +145,7 @@ class GatewayRunner:
             max_sessions=config.gateway.max_sessions,
             idle_seconds=config.gateway.session_idle_seconds,
             transcript=transcript,
+            history_loader=history_loader,
         )
 
     def run(self, stop_requested: Callable[[], bool] = lambda: False) -> None:
@@ -190,7 +208,7 @@ class GatewayRunner:
             },
             media_sender=lambda media, ch=channel, recipient=message.sender_id: ch.send_media(recipient, media),
         )
-        response = session.submit(message.text)
+        response = session.submit(message.text, media=message.media)
         self.sessions.touch(key)
         return response.text
 

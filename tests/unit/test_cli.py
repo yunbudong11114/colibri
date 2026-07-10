@@ -51,12 +51,17 @@ def test_ask_can_disable_status(monkeypatch, capsys):
 
 def test_ask_closes_session_transcript(monkeypatch, capsys):
     transcript = FakeTranscript()
-    monkeypatch.setattr("colibri.cli.TranscriptWriter.default", lambda: transcript)
+    calls = []
+    monkeypatch.setattr(
+        "colibri.cli.TranscriptWriter.default",
+        lambda **kwargs: calls.append(kwargs) or transcript,
+    )
 
     exit_code = main(["ask", "status"])
 
     assert exit_code == 0
     assert transcript.closed
+    assert calls == [{"retention_days": 30, "max_total_bytes": 134217728}]
 
 
 def test_repl_exits_on_quit(capsys):

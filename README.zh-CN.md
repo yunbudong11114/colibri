@@ -78,7 +78,7 @@ cargo build --release --manifest-path colibri-rust/Cargo.toml
 ./colibri-rust/target/release/colibri-rust diagnostics
 ```
 
-Rust 版支持本地 CLI、fake model、OpenAI-compatible tool-calling payload、Markdown 记忆、transcript、文件/Shell/记忆/技能/Baidu 网页搜索工具、微信 QR auth/API 和 gateway 进程管理。配置解析使用和 Python `tomllib` 一致的 TOML 语义，包括 `[mcp]` 和嵌套 `[channels.weixin]`。`shell.run` 和 Python 一样会把 shell 风格引号解析成 argv 后直接执行程序，不通过 `sh -c`。微信 auth 会为支持的 payload 渲染同样的终端块状 QR。Gateway 前台处理会按 sender 维护独立 session，并在超过 `gateway.max_sessions` 时淘汰最旧 session。
+Rust 版支持本地 CLI、fake model、OpenAI-compatible tool-calling payload、Markdown 记忆、transcript、文件/Shell/记忆/技能/Baidu 网页搜索工具、微信 QR auth/API 和 gateway 进程管理。配置解析使用和 Python `tomllib` 一致的 TOML 语义，包括嵌套 `[channels.weixin]`。`shell.run` 和 Python 一样会把 shell 风格引号解析成 argv 后直接执行程序，不通过 `sh -c`。微信 auth 会为支持的 payload 渲染同样的终端块状 QR。Gateway 前台处理会按 sender 维护独立 session，并在超过 `gateway.max_sessions` 时淘汰最旧 session。MCP 仍是延期里程碑，当前 Python 运行时不暴露 MCP 配置或工具。
 
 Rust 测试集基于 Python 全量 unit 测试集建立覆盖映射。`colibri-rust/tests/parity.rs` 会列出每个 Python `tests/unit/test_*.py` 文件对应的 Rust 覆盖，并直接对比 Python/Rust CLI 在 `ask`、`diagnostics`、`gateway` usage 等确定性命令上的退出码、stdout、stderr。Rust runtime 测试覆盖配置、工具、权限、记忆、transcript、模型、gateway、网页搜索、技能和微信 auth 的等价行为。
 

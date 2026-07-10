@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from colibri.media import MediaPart
@@ -12,6 +12,7 @@ class InboundMessage:
     sender_id: str
     text: str
     message_id: str = ""
+    media: list[MediaPart] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

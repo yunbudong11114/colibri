@@ -42,6 +42,28 @@ class OpenAICompatibleModelClient:
         data = self._request_json(self._chat_completions_url(), payload, limits.timeout_seconds)
         return self._parse_response(data)
 
+    def complete_image(
+        self,
+        prompt: str,
+        image_data_url: str,
+        limits: ModelLimits,
+    ) -> ModelResponse:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                }
+            ],
+            "max_completion_tokens": limits.max_output_tokens,
+        }
+        data = self._request_json(self._chat_completions_url(), payload, limits.timeout_seconds)
+        return self._parse_response(data)
+
     def _chat_completions_url(self) -> str:
         return f"{self.base_url}/chat/completions"
 
