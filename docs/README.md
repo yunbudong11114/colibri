@@ -20,7 +20,7 @@ The active implementation specs are in `docs/superpowers/specs/`:
 - `2026-07-08-colibri-dynamic-permissions-design.md`: dynamic permissions and project grants.
 - `2026-07-08-colibri-web-search-design.md`: web search tool.
 - `2026-07-08-colibri-weixin-gateway-design.md`: gateway and Weixin channel.
-- `2026-07-09-colibri-weixin-media-design.md`: future Weixin file/image send and receive design.
+- `2026-07-09-colibri-weixin-media-design.md`: Weixin file/image send and receive behavior, including Rust parity requirements.
 - `2026-07-09-colibri-channel-followups.md`: selected channel follow-up issue.
 
 ## Plans

@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Protocol, TextIO
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def beijing_now() -> datetime:
+    return datetime.now(BEIJING_TZ)
+
+
+def format_beijing_timestamp(moment: datetime | None = None) -> str:
+    return (moment or beijing_now()).isoformat(timespec="seconds")
+
+
+def beijing_date(moment: datetime | None = None) -> str:
+    return (moment or beijing_now()).strftime("%Y-%m-%d")
 
 
 class TranscriptSink(Protocol):
@@ -41,7 +55,7 @@ class TranscriptWriter:
     @classmethod
     def default(cls, *, retention_days: int = 0, max_total_bytes: int = 0) -> "TranscriptWriter":
         home = Path(os.environ.get("COLIBRI_HOME", "~/.colibri")).expanduser()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = beijing_date()
         return cls(
             home / "transcripts" / f"{today}.jsonl",
             retention_days=retention_days,
@@ -57,7 +71,7 @@ class TranscriptWriter:
                 self._last_cleanup_at = now
                 self._cleanup(now)
             event = {
-                "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "ts": format_beijing_timestamp(),
                 "type": event_type,
                 "payload": payload,
             }

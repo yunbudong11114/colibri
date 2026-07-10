@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -9,6 +9,12 @@ import signal
 import subprocess
 import sys
 import time
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _beijing_timestamp() -> str:
+    return datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -55,7 +61,7 @@ class GatewayProcessManager:
             "config": str(config_path.expanduser()) if config_path is not None else "default",
             "cwd": str(self.cwd),
             "log": str(self.log_path),
-            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "started_at": _beijing_timestamp(),
             "command": command,
         }
         self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

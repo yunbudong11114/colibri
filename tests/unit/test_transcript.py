@@ -18,7 +18,7 @@ def test_transcript_writer_writes_jsonl_event(tmp_path):
     event = json.loads(lines[0])
     assert event["type"] == "user_message"
     assert event["payload"] == {"text": "hello"}
-    assert event["ts"].endswith("Z")
+    assert event["ts"].endswith("+08:00")
 
 
 def test_default_transcript_path_uses_colibri_home(monkeypatch, tmp_path):

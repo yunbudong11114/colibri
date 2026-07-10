@@ -8,7 +8,7 @@ from colibri.session_history import TranscriptHistoryLoader
 def _event(event_type: str, text: str = "", **payload: object) -> str:
     return json.dumps(
         {
-            "ts": payload.pop("ts", "2026-07-10T00:00:00Z"),
+            "ts": payload.pop("ts", "2026-07-10T08:00:00+08:00"),
             "type": event_type,
             "payload": {"text": text, **payload},
         },

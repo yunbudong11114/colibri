@@ -146,7 +146,7 @@ def test_gateway_start_uses_process_manager(monkeypatch, capsys, tmp_path):
         cwd = str(tmp_path)
         log_path = tmp_path / "gateway.log"
         state_path = tmp_path / "gateway.json"
-        started_at = "2026-07-09T00:00:00Z"
+        started_at = "2026-07-09T08:00:00+08:00"
         reason = ""
 
     class FakeManager:
