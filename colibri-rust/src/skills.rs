@@ -90,9 +90,12 @@ impl SkillIndex {
                 let Ok(first_text) = fs::read_to_string(&skill_file) else {
                     continue;
                 };
-                let metadata = fs::read_to_string(path.join("skill.toml")).unwrap_or_default();
-                let description = parse_top_level_string(&metadata, "description")
+                let metadata = read_skill_toml(&path);
+                let description = metadata
+                    .get("description")
+                    .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty())
+                    .map(str::to_string)
                     .unwrap_or_else(|| {
                         derive_description(&first_text).unwrap_or_else(|| name.clone())
                     });
@@ -239,81 +242,55 @@ fn builtin_skills() -> Vec<SkillMetadata> {
     }]
 }
 
-fn parse_commands(text: &str) -> Vec<SkillCommand> {
-    let mut commands = Vec::new();
-    let mut current = BTreeMap::new();
-    let mut in_command = false;
-    for raw in text.lines().chain(std::iter::once("[[commands]]")) {
-        let line = raw.trim();
-        if line == "[[commands]]" {
-            if in_command {
-                if let (Some(name), Some(command)) = (
-                    current.get("name").cloned(),
-                    current.get("command").cloned(),
-                ) {
-                    commands.push(SkillCommand {
-                        name,
-                        description: current.get("description").cloned().unwrap_or_default(),
-                        command,
-                        args: parse_inline_list(
-                            current.get("args").map(String::as_str).unwrap_or("[]"),
-                        ),
-                        read_only: current
-                            .get("read_only")
-                            .is_some_and(|value| value == "true"),
-                    });
-                }
-            }
-            current.clear();
-            in_command = true;
-            continue;
-        }
-        if !in_command {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-            let parsed = if key == "args" {
-                value.to_string()
-            } else {
-                parse_string(value)
-            };
-            current.insert(key.to_string(), parsed);
-        }
-    }
-    commands
+fn read_skill_toml(root: &std::path::Path) -> toml::Table {
+    let path = root.join("skill.toml");
+    let Ok(text) = fs::read_to_string(path) else {
+        return toml::Table::new();
+    };
+    text.parse::<toml::Table>().unwrap_or_default()
 }
 
-fn parse_top_level_string(text: &str, target: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        if line == "[[commands]]" {
-            return None;
-        }
-        let Some((key, value)) = line.split_once('=') else {
+fn parse_commands(metadata: &toml::Table) -> Vec<SkillCommand> {
+    let Some(commands) = metadata.get("commands").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let mut parsed = Vec::new();
+    for item in commands {
+        let Some(table) = item.as_table() else {
             continue;
         };
-        if key.trim() == target {
-            return Some(parse_string(value.trim()));
-        }
+        let Some(name) = table.get("name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(command) = table.get("command").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let args = match table.get("args") {
+            None => Vec::new(),
+            Some(value) => match value.as_array() {
+                Some(items) if items.iter().all(|item| item.as_str().is_some()) => items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            },
+        };
+        parsed.push(SkillCommand {
+            name: name.to_string(),
+            description: table
+                .get("description")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            command: command.to_string(),
+            args,
+            read_only: table
+                .get("read_only")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        });
     }
-    None
-}
-
-fn parse_string(value: &str) -> String {
-    value.trim().trim_matches('"').to_string()
-}
-
-fn parse_inline_list(value: &str) -> Vec<String> {
-    value
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .map(|item| parse_string(item.trim()))
-        .filter(|item| !item.is_empty())
-        .collect()
+    parsed
 }
 
 fn derive_description(content: &str) -> Option<String> {

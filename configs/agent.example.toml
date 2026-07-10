@@ -85,6 +85,9 @@ max_instruction_chars = 8000
 [console]
 # 是否在 stderr 输出 [colibri] 状态行。
 status = true
+# 是否对本地 ask/repl 最终回答做小屏友好去噪（去粗体/代码标记、表格改成普通行）。
+# 不影响会话历史、transcript 和微信 gateway 发出的消息。
+plain_answer = true
 
 [memory]
 # 是否启用长期记忆。

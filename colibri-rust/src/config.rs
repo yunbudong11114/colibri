@@ -68,6 +68,7 @@ pub struct SkillsConfig {
 #[derive(Clone, Debug)]
 pub struct ConsoleConfig {
     pub status: bool,
+    pub plain_answer: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +190,10 @@ impl Default for AgentConfig {
                 max_loaded: 3,
                 max_instruction_chars: 8000,
             },
-            console: ConsoleConfig { status: true },
+            console: ConsoleConfig {
+                status: true,
+                plain_answer: true,
+            },
             memory: MemoryConfig {
                 root: expand_user_path("~/.colibri/memory"),
                 max_search_results: 5,
@@ -384,6 +388,9 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         if let Some(value) = get_bool(table, "status") {
             config.console.status = value;
         }
+        if let Some(value) = get_bool(table, "plain_answer") {
+            config.console.plain_answer = value;
+        }
     }
     if let Some(table) = value.get("memory") {
         if let Some(value) = get_string(table, "root") {
@@ -517,7 +524,7 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
         &["dirs", "max_loaded", "max_instruction_chars"],
         &[],
     )?;
-    validate_table(value, "console", &["status"], &[])?;
+    validate_table(value, "console", &["status", "plain_answer"], &[])?;
     validate_table(
         value,
         "memory",

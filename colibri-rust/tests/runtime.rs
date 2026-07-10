@@ -31,9 +31,21 @@ use colibri_rust::weixin::{
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn run_cli(args: &[&str]) -> (i32, String, String) {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
     let config_dir = temp_dir("cli-config");
     let config_path = config_dir.join("config.toml");
     fs::write(
@@ -43,23 +55,29 @@ fn run_cli(args: &[&str]) -> (i32, String, String) {
     .unwrap();
     let mut full_args = vec!["--config".to_string(), config_path.display().to_string()];
     full_args.extend(args.iter().map(|value| value.to_string()));
-    let code = run_with_io(full_args, "".as_bytes(), &mut stdout, &mut stderr);
-    (
-        code,
-        String::from_utf8(stdout).unwrap(),
-        String::from_utf8(stderr).unwrap(),
-    )
+    let code = run_with_io(
+        full_args,
+        "".as_bytes(),
+        SharedBuf(Arc::clone(&stdout)),
+        SharedBuf(Arc::clone(&stderr)),
+    );
+    let stdout_text = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
+    let stderr_text = String::from_utf8(stderr.lock().unwrap().clone()).unwrap();
+    (code, stdout_text, stderr_text)
 }
 
 fn run_cli_raw(args: &[String], stdin: &str) -> (i32, String, String) {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let code = run_with_io(args.to_vec(), stdin.as_bytes(), &mut stdout, &mut stderr);
-    (
-        code,
-        String::from_utf8(stdout).unwrap(),
-        String::from_utf8(stderr).unwrap(),
-    )
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let code = run_with_io(
+        args.to_vec(),
+        stdin.as_bytes(),
+        SharedBuf(Arc::clone(&stdout)),
+        SharedBuf(Arc::clone(&stderr)),
+    );
+    let stdout_text = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
+    let stderr_text = String::from_utf8(stderr.lock().unwrap().clone()).unwrap();
+    (code, stdout_text, stderr_text)
 }
 
 #[test]
@@ -92,6 +110,8 @@ fn default_config_matches_python_runtime_defaults() {
     assert!(!config.channels_weixin.enabled);
     assert_eq!(config.shell.deny[0], "rm");
     assert_eq!(config.files.roots[1], Path::new("/tmp/colibri"));
+    assert!(config.console.status);
+    assert!(config.console.plain_answer);
     assert!(expand_user_path("~/.colibri").is_absolute());
 }
 
@@ -168,6 +188,7 @@ max_active_servers = 3
     assert_eq!(config.files.roots[0].file_name().unwrap(), "notes");
     assert_eq!(config.files.roots[1], Path::new("/tmp"));
     assert!(!config.console.status);
+    assert!(config.console.plain_answer);
     assert!(config.channels_weixin.enabled);
     assert_eq!(config.channels_weixin.token, "wx-token");
     assert_eq!(
@@ -239,6 +260,20 @@ fn ask_prints_fake_response_and_status() {
     assert_eq!(stdout.trim(), "fake: status");
     assert!(stderr.contains("[colibri] ready model=fake-colibri-model"));
     assert!(stderr.contains("[colibri] thinking"));
+}
+
+#[test]
+fn console_plain_answer_and_status_events_match_python() {
+    let plain = colibri_rust::console::format_plain_answer(
+        "## Title\nHello **world** and `code`\n| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+    );
+    assert_eq!(plain, "Title\nHello world and code\nA / B\n1 / 2");
+
+    let line = colibri_rust::console::status_line_for_event(
+        "tool_result",
+        &serde_json::json!({"name":"files.read","ok":true,"text":"abcd"}),
+    );
+    assert_eq!(line.as_deref(), Some("[colibri] tool files.read ok chars=4"));
 }
 
 #[test]
@@ -549,6 +584,206 @@ fn session_budgets_model_input_and_keeps_latest_user_like_python() {
         .unwrap();
 
     assert_eq!(response.text, "budget ok");
+}
+
+#[test]
+fn budget_model_messages_drops_complete_tool_call_group_like_python() {
+    let call = ToolCall {
+        id: "call_1".to_string(),
+        name: "files.read".to_string(),
+        arguments: serde_json::Map::new(),
+    };
+    let mut assistant = Message::new("assistant", "");
+    assistant.tool_calls = vec![call];
+    let messages = vec![
+        Message::new("user", "u"),
+        assistant,
+        Message::tool("result", "call_1"),
+        Message::new("assistant", "done"),
+    ];
+
+    let (budgeted, dropped) = colibri_rust::context::budget_model_messages(messages, 30);
+
+    assert_eq!(dropped, 2);
+    assert_eq!(
+        budgeted
+            .iter()
+            .map(|message| (message.role.as_str(), message.tool_call_id.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("user", None), ("assistant", None)]
+    );
+}
+
+#[test]
+fn retain_recent_message_groups_keeps_tool_pairs_intact_like_python() {
+    let call = ToolCall {
+        id: "call_1".to_string(),
+        name: "files.read".to_string(),
+        arguments: serde_json::Map::new(),
+    };
+    let mut assistant = Message::new("assistant", "");
+    assistant.tool_calls = vec![call];
+    let messages = vec![
+        Message::new("user", "active request"),
+        assistant.clone(),
+        Message::tool("result", "call_1"),
+        Message::new("assistant", "done"),
+    ];
+
+    let kept = colibri_rust::context::retain_recent_message_groups(messages, 1);
+    assert_eq!(
+        kept.iter()
+            .map(|message| (message.role.as_str(), message.tool_call_id.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("user", None), ("assistant", None)]
+    );
+
+    let oversized = vec![
+        Message::new("user", "active request"),
+        assistant,
+        Message::tool("result", "call_1"),
+    ];
+    let kept_whole = colibri_rust::context::retain_recent_message_groups(oversized, 1);
+    assert_eq!(
+        kept_whole
+            .iter()
+            .map(|message| (message.role.as_str(), message.tool_call_id.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("user", None), ("assistant", None), ("tool", Some("call_1"))]
+    );
+}
+
+#[test]
+fn session_logs_context_budget_and_compact_mode_like_python() {
+    let temp = temp_dir("session-context-events");
+    let transcript_path = temp.join("transcripts/events.jsonl");
+    let mut config = AgentConfig::default();
+    config.session.model_input_char_limit = 80;
+    config.session.trigger_message_limit = 4;
+    config.session.recent_message_limit = 2;
+    config.session.model_compact = false;
+    config.session.transcript = true;
+    config.memory.enabled = false;
+    let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
+    let mut session = AgentSession::from_shared(
+        Arc::new(config),
+        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Some(Arc::new(Mutex::new(writer))),
+        BTreeMap::new(),
+    );
+
+    session.submit("first xxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
+    session.submit("second yyyyyyyyyyyyyyyyyyyyyyyy").unwrap();
+
+    let text = fs::read_to_string(transcript_path).unwrap();
+    assert!(text.contains("\"type\":\"context_budget\""));
+    assert!(text.contains("\"dropped_model_messages\""));
+    assert!(text.contains("\"type\":\"context_compact\""));
+    assert!(text.contains("\"mode\":\"fallback\""));
+}
+
+#[test]
+fn session_falls_back_and_logs_compact_error_like_python() {
+    let temp = temp_dir("session-compact-error");
+    let transcript_path = temp.join("transcripts/events.jsonl");
+    let mut config = AgentConfig::default();
+    config.model.provider = "openai_compatible".to_string();
+    config.session.trigger_message_limit = 3;
+    config.session.recent_message_limit = 2;
+    config.session.model_compact = true;
+    config.session.transcript = true;
+    config.memory.enabled = false;
+    let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
+    let mut session = AgentSession::from_shared(
+        Arc::new(config),
+        Arc::new(Mutex::new(
+            Box::new(FailingCompactModel::new()) as Box<dyn ModelClient>
+        )),
+        Some(Arc::new(Mutex::new(writer))),
+        BTreeMap::new(),
+    );
+
+    session.submit("one").unwrap();
+    session.submit("two").unwrap();
+
+    let text = fs::read_to_string(transcript_path).unwrap();
+    assert!(text.contains("\"type\":\"context_compact_error\""));
+    assert!(text.contains("\"fallback\":true"));
+    assert!(text.contains("\"mode\":\"fallback\""));
+    assert!(session.summary.contains("user: one") || session.summary.contains("user: two"));
+}
+
+#[test]
+fn session_round_limit_text_matches_python() {
+    let mut config = AgentConfig::default();
+    config.session.max_tool_rounds = 1;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    config.tools.default_permission = "allow".to_string();
+    let mut session = AgentSession::new(config, Box::new(AlwaysToolModel::new()));
+
+    let response = session.submit("loop").unwrap();
+
+    assert!(response
+        .text
+        .contains("Tool round limit reached after 1 round."));
+    assert!(response.text.contains("The task may still be incomplete."));
+    assert!(response.text.contains("Recent tool results:"));
+    assert!(response.text.contains("You can continue the task"));
+}
+
+#[test]
+fn memory_context_replaces_invalid_utf8_like_python() {
+    let temp = temp_dir("memory-lossy-utf8");
+    let root = temp.join("memory");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("MEMORY.md"), b"hello \xff world").unwrap();
+    fs::write(root.join("USER.md"), "user prefs").unwrap();
+    let mut config = AgentConfig::default();
+    config.memory.root = root;
+
+    let result = MemoryContext::new(config).load().unwrap();
+
+    assert!(result.text.contains("[MEMORY.md]"));
+    assert!(result.text.contains("hello"));
+    assert!(result.text.contains("world"));
+    assert!(result.text.contains("[USER.md]"));
+}
+
+#[test]
+fn skill_toml_parses_multiline_description_like_python() {
+    let temp = temp_dir("skill-toml-multiline");
+    let skill_dir = temp.join("skills/release");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("SKILL.md"), "# Release\n").unwrap();
+    fs::write(
+        skill_dir.join("skill.toml"),
+        r#"
+description = """
+Release helper
+with details
+"""
+
+[[commands]]
+name = "render"
+description = "Render notes"
+command = "python"
+args = ["scripts/render.py", "--verbose"]
+read_only = true
+"#,
+    )
+    .unwrap();
+    let index = SkillIndex::scan(&[temp.join("skills")]);
+    let release = index.get("release").unwrap();
+
+    assert!(release.description.contains("Release helper"));
+    assert!(release.description.contains("with details"));
+    assert_eq!(release.commands[0].name, "render");
+    assert_eq!(
+        release.commands[0].args,
+        vec!["scripts/render.py".to_string(), "--verbose".to_string()]
+    );
+    assert!(release.commands[0].read_only);
 }
 
 #[test]
@@ -2153,6 +2388,66 @@ impl ModelClient for CompactScriptModel {
         Ok(colibri_rust::messages::ModelResponse {
             text: "done".to_string(),
             tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct FailingCompactModel {
+    calls: usize,
+}
+
+impl FailingCompactModel {
+    fn new() -> Self {
+        Self { calls: 0 }
+    }
+}
+
+impl ModelClient for FailingCompactModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if system.contains("summarizing conversations") {
+            return Err("compact boom".to_string());
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: format!("ok-{}", self.calls),
+            tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct AlwaysToolModel;
+
+impl AlwaysToolModel {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl ModelClient for AlwaysToolModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        Ok(colibri_rust::messages::ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_loop".to_string(),
+                name: "files.list".to_string(),
+                arguments: {
+                    let mut map = serde_json::Map::new();
+                    map.insert("path".to_string(), serde_json::Value::String(".".to_string()));
+                    map
+                },
+            }],
         })
     }
 }

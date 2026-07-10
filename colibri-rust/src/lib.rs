@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod config;
+pub mod console;
+pub mod context;
 pub mod gateway;
 pub mod http;
 pub mod memory;

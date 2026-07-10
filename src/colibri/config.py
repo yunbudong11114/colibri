@@ -120,6 +120,8 @@ class SkillsConfig:
 class ConsoleConfig:
     # 是否在 stderr 输出 [colibri] 状态行。
     status: bool = True
+    # 是否对本地 ask/repl 的最终回答做小屏友好去噪（不改会话/transcript/gateway）。
+    plain_answer: bool = True
 
 
 @dataclass(frozen=True)

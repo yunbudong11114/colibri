@@ -1,4 +1,9 @@
 use crate::config::AgentConfig;
+use crate::context::{
+    append_summary, budget_model_messages, compact_prompt_message, format_model_summary,
+    model_input_chars, retain_recent_message_groups, round_limit_text, summarize_messages,
+    summary_context, COMPACT_SYSTEM_PROMPT,
+};
 use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
 use crate::model::ModelClient;
@@ -7,13 +12,11 @@ use crate::skills::relevant_skill_context;
 use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
 use crate::transcript::TranscriptWriter;
 use crate::vision::analyze_image;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
-const SUMMARY_HEADER: &str = "Compacted conversation summary:";
-const COMPACT_SYSTEM_PROMPT: &str =
-    "You are a helpful AI assistant tasked with summarizing conversations.";
 
 pub struct AgentSession {
     pub config: Arc<AgentConfig>,
@@ -22,6 +25,8 @@ pub struct AgentSession {
     pub summary: String,
     transcript: Option<Arc<Mutex<TranscriptWriter>>>,
     transcript_metadata: BTreeMap<String, String>,
+    status_enabled: bool,
+    status_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     history_loader: Option<Box<dyn Fn() -> Vec<Message> + Send>>,
     history_loaded: bool,
@@ -60,6 +65,8 @@ impl AgentSession {
             summary: String::new(),
             transcript,
             transcript_metadata,
+            status_enabled: false,
+            status_callback: None,
             media_sender: None,
             history_loader: None,
             history_loaded: false,
@@ -68,6 +75,16 @@ impl AgentSession {
 
     pub fn with_history_loader(mut self, loader: Box<dyn Fn() -> Vec<Message> + Send>) -> Self {
         self.history_loader = Some(loader);
+        self
+    }
+
+    pub fn with_status_callback(
+        mut self,
+        enabled: bool,
+        callback: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Self {
+        self.status_enabled = enabled;
+        self.status_callback = Some(callback);
         self
     }
 
@@ -155,7 +172,7 @@ impl AgentSession {
         let tools = tool_specs_for_config(&self.config);
 
         for _ in 0..self.config.session.max_tool_rounds {
-            let model_messages = self.model_messages(&memory.text, &skill_text);
+            let model_messages = self.budgeted_model_messages(&memory.text, &skill_text);
             let response = {
                 let mut model = self
                     .model
@@ -248,23 +265,17 @@ impl AgentSession {
             }
         }
 
-        let text = format!(
-            "Tool round limit reached after {} rounds. Recent tool results:\n{}",
+        let text = round_limit_text(
+            &self.messages,
             self.config.session.max_tool_rounds,
-            self.messages
-                .iter()
-                .rev()
-                .filter(|message| message.role == "tool")
-                .take(3)
-                .map(|message| message.content.clone())
-                .collect::<Vec<_>>()
-                .join("\n")
+            self.config.tools.max_result_chars,
         );
         self.messages.push(Message::new("assistant", &text));
         self.write_transcript(
             "round_limit",
             serde_json::json!({"max_tool_rounds":self.config.session.max_tool_rounds,"text":text}),
         );
+        self.compact_if_needed();
         Ok(AgentResponse { text })
     }
 
@@ -298,88 +309,126 @@ impl AgentSession {
         self.messages.extend(loader());
     }
 
-    fn model_messages(&self, memory_text: &str, skill_text: &str) -> Vec<Message> {
-        let mut prefix = Vec::new();
-        if !self.summary.is_empty() {
-            prefix.push(Message::new(
-                "system",
-                format!("{}\n\n{}", SUMMARY_HEADER, self.summary),
-            ));
+    fn budgeted_model_messages(&mut self, memory_text: &str, skill_text: &str) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let summary_text = summary_context(&self.summary);
+        if !summary_text.is_empty() {
+            messages.push(Message::new("system", summary_text));
         }
         if !memory_text.is_empty() {
-            prefix.push(Message::new("system", memory_text));
+            messages.push(Message::new("system", memory_text));
         }
         if !skill_text.is_empty() {
-            prefix.push(Message::new("system", skill_text));
+            messages.push(Message::new("system", skill_text));
         }
-        budget_model_messages_parts(
-            prefix,
-            &self.messages,
-            self.config.session.model_input_char_limit,
-        )
-        .0
+        messages.extend(self.messages.iter().cloned());
+        let (budgeted, dropped) =
+            budget_model_messages(messages, self.config.session.model_input_char_limit);
+        if dropped > 0 {
+            self.write_transcript(
+                "context_budget",
+                serde_json::json!({
+                    "dropped_model_messages": dropped,
+                    "input_chars": model_input_chars(&budgeted),
+                }),
+            );
+        }
+        budgeted
     }
 
     fn compact_if_needed(&mut self) {
-        if self.messages.len() < self.config.session.trigger_message_limit {
-            return;
-        }
-        let removed_count = self
-            .messages
-            .len()
-            .saturating_sub(self.config.session.recent_message_limit);
-        if removed_count == 0 {
+        let trigger_limit = self.config.session.trigger_message_limit.max(1);
+        if self.messages.len() < trigger_limit {
             return;
         }
         let messages_to_compact = std::mem::take(&mut self.messages);
         let compacted_len = messages_to_compact.len();
-        let addition = self.compact_messages(&messages_to_compact);
+        let (addition, mode) = self.compact_messages(&messages_to_compact);
         self.summary = append_summary(
             &self.summary,
             &addition,
             self.config.session.summary_max_chars,
         );
-        self.messages = retained_messages_after_compact(
+        self.messages = retain_recent_message_groups(
             messages_to_compact,
             self.config.session.recent_message_limit,
         );
         self.write_transcript(
             "context_compact",
             serde_json::json!({
-                "removed_messages":removed_count,
-                "compacted_messages":compacted_len,
-                "kept_messages":self.messages.len(),
-                "summary_chars":self.summary.chars().count()
+                "removed_messages": compacted_len.saturating_sub(self.messages.len()),
+                "compacted_messages": compacted_len,
+                "kept_messages": self.messages.len(),
+                "mode": mode,
+                "summary_chars": self.summary.chars().count()
             }),
         );
     }
 
-    fn compact_messages(&mut self, messages: &[Message]) -> String {
-        if self.config.session.model_compact && self.config.model.provider != "fake" {
-            let prompt = compact_prompt_message(&self.summary, messages);
-            if let Ok(mut model) = self.model.lock() {
-                if let Ok(response) = model.complete(
-                    &[prompt],
-                    &[],
-                    COMPACT_SYSTEM_PROMPT,
-                    &ModelLimits {
-                        timeout_seconds: self.config.model.timeout_seconds,
-                        max_output_tokens: self.config.model.max_output_tokens,
-                    },
-                ) {
-                    if response.tool_calls.is_empty() {
-                        let formatted = format_model_summary(&response.text);
-                        if !formatted.is_empty() {
-                            return formatted;
-                        }
-                    }
+    fn compact_messages(&mut self, messages: &[Message]) -> (String, String) {
+        if self.should_model_compact() {
+            match self.try_model_compact(messages) {
+                Ok(addition) => return (addition, "model".to_string()),
+                Err(error) => {
+                    self.write_transcript(
+                        "context_compact_error",
+                        serde_json::json!({
+                            "error_type": error.error_type,
+                            "message": error.message,
+                            "fallback": true,
+                        }),
+                    );
                 }
             }
         }
-        summarize_messages(messages, 160)
+        (summarize_messages(messages, 160), "fallback".to_string())
+    }
+
+    fn should_model_compact(&self) -> bool {
+        self.config.session.model_compact && self.config.model.provider != "fake"
+    }
+
+    fn try_model_compact(&mut self, messages: &[Message]) -> Result<String, CompactError> {
+        let prompt = compact_prompt_message(&self.summary, messages);
+        let mut model = self
+            .model
+            .lock()
+            .map_err(|_| CompactError::new("PoisonError", "model lock poisoned"))?;
+        let response = model
+            .complete(
+                &[prompt],
+                &[],
+                COMPACT_SYSTEM_PROMPT,
+                &ModelLimits {
+                    timeout_seconds: self.config.model.timeout_seconds,
+                    max_output_tokens: self.config.model.max_output_tokens,
+                },
+            )
+            .map_err(|error| CompactError::new("RuntimeError", error))?;
+        if !response.tool_calls.is_empty() {
+            return Err(CompactError::new(
+                "RuntimeError",
+                "compact response included tool calls",
+            ));
+        }
+        let addition = format_model_summary(&response.text);
+        if addition.is_empty() {
+            return Err(CompactError::new(
+                "RuntimeError",
+                "compact response was empty",
+            ));
+        }
+        Ok(addition)
     }
 
     fn write_transcript(&mut self, event_type: &str, mut payload: serde_json::Value) {
+        if self.status_enabled {
+            if let Some(line) = crate::console::status_line_for_event(event_type, &payload) {
+                if let Some(callback) = &self.status_callback {
+                    callback(&line);
+                }
+            }
+        }
         let Some(transcript) = &self.transcript else {
             return;
         };
@@ -484,238 +533,16 @@ pub fn bound_text(text: &str, max_chars: usize) -> String {
     text.chars().take(keep).collect::<String>() + suffix
 }
 
-fn summarize_messages(messages: &[Message], max_line_chars: usize) -> String {
-    let mut lines = Vec::new();
-    for message in messages {
-        if message.role == "user" || message.role == "assistant" {
-            if !message.tool_calls.is_empty() {
-                let names = message
-                    .tool_calls
-                    .iter()
-                    .map(|call| call.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(bound_line(
-                    &format!("{} tool_calls: {}", message.role, names),
-                    max_line_chars,
-                ));
-            }
-            if !message.content.is_empty() {
-                lines.push(bound_line(
-                    &format!("{}: {}", message.role, message.content),
-                    max_line_chars,
-                ));
-            }
-        } else if message.role == "tool" {
-            let status = if message.content.starts_with("permission_denied:")
-                || message.content.starts_with("unknown_tool:")
-                || message.content.starts_with("tool_error:")
-            {
-                message
-                    .content
-                    .split_once(':')
-                    .map(|(left, _)| left)
-                    .unwrap_or("ok")
-            } else {
-                "ok"
-            };
-            lines.push(format!(
-                "tool unknown {}: {} chars",
-                status,
-                message.content.chars().count()
-            ));
+struct CompactError {
+    error_type: String,
+    message: String,
+}
+
+impl CompactError {
+    fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error_type: error_type.into(),
+            message: message.into(),
         }
     }
-    lines.join("\n")
 }
-
-fn compact_prompt_message(existing_summary: &str, messages: &[Message]) -> Message {
-    let conversation = summarize_messages(messages, 500);
-    Message::new(
-        "user",
-        format!(
-            "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n- Do NOT use shell, file, memory, network, or any other tool.\n- You already have all the context you need below.\n- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\nYour task is to create a detailed summary of the conversation portion below for continuing an agent session on a small Linux device.\n\nBefore providing your final summary, wrap your analysis in <analysis> tags. Then provide a <summary> block with these sections:\n\n1. Primary Request and Intent\n2. Key Technical Concepts\n3. Files and Code Sections\n4. Errors and fixes\n5. Problem Solving\n6. All user messages\n7. Pending Tasks\n8. Current Work\n9. Optional Next Step\n\nPreserve user goals, decisions, file paths, commands, tool names, memory changes, device constraints, unresolved errors, and the latest concrete next step. Keep tool outputs concise and summarize metadata rather than copying large outputs.\n\nPrevious compacted summary:\n{}\n\nConversation portion to compact:\n{}\n\nREMINDER: Do NOT call any tools. Respond with plain text only: an <analysis> block followed by a <summary> block.",
-            if existing_summary.trim().is_empty() {
-                "(none)"
-            } else {
-                existing_summary.trim()
-            },
-            if conversation.is_empty() {
-                "(no messages)"
-            } else {
-                &conversation
-            }
-        ),
-    )
-}
-
-fn format_model_summary(summary: &str) -> String {
-    let without_analysis = strip_tag_block(summary, "analysis");
-    if let Some(content) = extract_tag_block(&without_analysis, "summary") {
-        return format!("Summary:\n{}", content.trim());
-    }
-    without_analysis.trim().to_string()
-}
-
-fn append_summary(existing: &str, addition: &str, max_chars: usize) -> String {
-    let combined = [existing.trim(), addition.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if combined.chars().count() <= max_chars {
-        return combined;
-    }
-    let lines = combined.lines().collect::<Vec<_>>();
-    let mut kept = Vec::new();
-    let mut total = 0usize;
-    for line in lines.iter().rev() {
-        let line_len = line.chars().count() + usize::from(!kept.is_empty());
-        if !kept.is_empty() && total + line_len > max_chars {
-            break;
-        }
-        if kept.is_empty() && line.chars().count() > max_chars {
-            return line
-                .chars()
-                .rev()
-                .take(max_chars)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-        }
-        kept.push(*line);
-        total += line_len;
-    }
-    kept.into_iter().rev().collect::<Vec<_>>().join("\n")
-}
-
-fn retained_messages_after_compact(mut messages: Vec<Message>, recent_limit: usize) -> Vec<Message> {
-    let kept_start = messages.len().saturating_sub(recent_limit);
-    let latest_user = latest_user_index(&messages)
-        .filter(|&index| index < kept_start)
-        .map(|index| messages[index].clone());
-    let mut kept = if recent_limit > 0 {
-        messages.split_off(kept_start)
-    } else {
-        Vec::new()
-    };
-    if let Some(message) = latest_user {
-        let mut next = vec![message];
-        next.append(&mut kept);
-        kept = next;
-    }
-    kept
-}
-
-fn budget_model_messages_parts(
-    mut prefix: Vec<Message>,
-    history: &[Message],
-    max_chars: usize,
-) -> (Vec<Message>, usize) {
-    let prefix_chars = message_chars(&prefix);
-    let history_chars = message_chars(history);
-    if prefix_chars + history_chars <= max_chars {
-        prefix.reserve(history.len());
-        prefix.extend(history.iter().cloned());
-        return (prefix, 0);
-    }
-    enum Slot {
-        Prefix(usize),
-        History(usize),
-    }
-    let mut slots = (0..prefix.len())
-        .map(Slot::Prefix)
-        .chain((0..history.len()).map(Slot::History))
-        .collect::<Vec<_>>();
-    let slot_chars = |slot: &Slot| -> usize {
-        match slot {
-            Slot::Prefix(index) => {
-                prefix[*index].role.chars().count() + prefix[*index].content.chars().count()
-            }
-            Slot::History(index) => {
-                history[*index].role.chars().count() + history[*index].content.chars().count()
-            }
-        }
-    };
-    let slot_role = |slot: &Slot| -> &str {
-        match slot {
-            Slot::Prefix(index) => prefix[*index].role.as_str(),
-            Slot::History(index) => history[*index].role.as_str(),
-        }
-    };
-    let mut dropped = 0usize;
-    while slots.len() > 1 {
-        let total: usize = slots.iter().map(slot_chars).sum();
-        if total <= max_chars {
-            break;
-        }
-        let latest_user = slots.iter().rposition(|slot| slot_role(slot) == "user");
-        let Some(index) = slots.iter().enumerate().find_map(|(index, slot)| {
-            if slot_role(slot) != "system" && Some(index) != latest_user {
-                Some(index)
-            } else {
-                None
-            }
-        }) else {
-            break;
-        };
-        slots.remove(index);
-        dropped += 1;
-    }
-    let mut out = Vec::with_capacity(slots.len());
-    for slot in slots {
-        match slot {
-            Slot::Prefix(index) => out.push(prefix[index].clone()),
-            Slot::History(index) => out.push(history[index].clone()),
-        }
-    }
-    (out, dropped)
-}
-
-fn latest_user_index(messages: &[Message]) -> Option<usize> {
-    messages.iter().rposition(|message| message.role == "user")
-}
-
-fn message_chars(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|message| message.role.chars().count() + message.content.chars().count())
-        .sum()
-}
-
-fn bound_line(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= max_chars {
-        return normalized;
-    }
-    let keep = max_chars.saturating_sub(" ...".chars().count());
-    normalized.chars().take(keep).collect::<String>() + " ..."
-}
-
-fn strip_tag_block(text: &str, tag: &str) -> String {
-    let start_marker = format!("<{}>", tag);
-    let end_marker = format!("</{}>", tag);
-    let Some(start) = text.find(&start_marker) else {
-        return text.to_string();
-    };
-    let Some(end) = text.find(&end_marker) else {
-        return text.to_string();
-    };
-    if end < start {
-        return text.to_string();
-    }
-    format!("{}{}", &text[..start], &text[end + end_marker.len()..])
-}
-
-fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
-    let start_marker = format!("<{}>", tag);
-    let end_marker = format!("</{}>", tag);
-    let start = text.find(&start_marker)?;
-    let end = text.find(&end_marker)?;
-    if end < start {
-        return None;
-    }
-    Some(text[start + start_marker.len()..end].to_string())
-}
-use std::collections::BTreeMap;

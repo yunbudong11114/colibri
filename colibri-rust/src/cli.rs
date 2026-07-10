@@ -6,11 +6,11 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
 use crate::config::{expand_user_path, AgentConfig, DEFAULT_USER_CONFIG};
+use crate::console::format_answer_for_console;
 use crate::gateway::{
     format_gateway_status, restart_gateway, start_gateway, stop_gateway, GatewaySessionCache,
     GatewayStatus,
 };
-use crate::memory::MemoryContext;
 use crate::model::build_model;
 use crate::permissions::{PermissionPrompter, PermissionRequest};
 use crate::repl_input::{read_repl_line_auto, ReplReadError};
@@ -23,13 +23,13 @@ use crate::weixin::{
 
 use std::io::IsTerminal;
 
-pub fn run_with_io<R: Read, W: Write, E: Write>(
+pub fn run_with_io<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     args: Vec<String>,
     stdin: R,
-    mut stdout: W,
-    mut stderr: E,
+    stdout: W,
+    stderr: E,
 ) -> i32 {
-    run_with_io_mode(args, stdin, &mut stdout, &mut stderr, false)
+    run_with_io_mode(args, stdin, stdout, stderr, false)
 }
 
 /// Binary entry: enable TTY raw REPL when process stdin is a terminal.
@@ -38,33 +38,43 @@ pub fn run(args: Vec<String>) -> i32 {
     run_with_io_mode(
         args,
         std::io::stdin(),
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
+        std::io::stdout(),
+        std::io::stderr(),
         prefer_tty,
     )
 }
 
-fn run_with_io_mode<R: Read, W: Write, E: Write>(
+fn run_with_io_mode<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     args: Vec<String>,
     stdin: R,
-    stdout: &mut W,
-    stderr: &mut E,
+    stdout: W,
+    stderr: E,
     prefer_process_tty: bool,
 ) -> i32 {
-    match run_inner(args, stdin, stdout, stderr, prefer_process_tty) {
+    let stdout = Arc::new(Mutex::new(stdout));
+    let stderr = Arc::new(Mutex::new(stderr));
+    match run_inner(
+        args,
+        stdin,
+        Arc::clone(&stdout),
+        Arc::clone(&stderr),
+        prefer_process_tty,
+    ) {
         Ok(code) => code,
         Err(error) => {
-            let _ = writeln!(stderr, "{}", error);
+            if let Ok(mut stderr) = stderr.lock() {
+                let _ = writeln!(stderr, "{}", error);
+            }
             1
         }
     }
 }
 
-fn run_inner<R: Read, W: Write, E: Write>(
+fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     args: Vec<String>,
     stdin: R,
-    stdout: &mut W,
-    stderr: &mut E,
+    stdout: Arc<Mutex<W>>,
+    stderr: Arc<Mutex<E>>,
     prefer_process_tty: bool,
 ) -> Result<i32, String> {
     let mut stdin = std::io::BufReader::new(stdin);
@@ -72,66 +82,98 @@ fn run_inner<R: Read, W: Write, E: Write>(
     let mut config_path = None;
     if args.get(index).map(String::as_str) == Some("--config") {
         let Some(path) = args.get(index + 1) else {
-            let _ = writeln!(stderr, "Usage: colibri [--config path] <command>");
+            let _ = writeln!(
+                stderr.lock().map_err(|_| "stderr lock poisoned")?,
+                "Usage: colibri [--config path] <command>"
+            );
             return Ok(2);
         };
         config_path = Some(PathBuf::from(path));
         index += 2;
     }
     let Some(command) = args.get(index).map(String::as_str) else {
-        let _ = writeln!(stderr, "Usage: colibri [--config path] <command>");
+        let _ = writeln!(
+            stderr.lock().map_err(|_| "stderr lock poisoned")?,
+            "Usage: colibri [--config path] <command>"
+        );
         return Ok(2);
     };
     let rest = &args[index + 1..];
 
     if command == "gateway" {
-        return gateway_command(rest, config_path, stdout, stderr);
+        return gateway_command(rest, config_path, &stdout, &stderr);
     }
 
     let config = AgentConfig::load(config_path.as_deref())?;
     let mut status = StatusWriter {
         enabled: config.console.status,
-        stderr,
+        stderr: Arc::clone(&stderr),
     };
 
     match command {
         "diagnostics" => {
             for line in diagnostics(&config, config_path.as_ref()) {
-                writeln!(stdout, "{}", line).map_err(|error| error.to_string())?;
+                writeln!(
+                    stdout.lock().map_err(|_| "stdout lock poisoned")?,
+                    "{}",
+                    line
+                )
+                .map_err(|error| error.to_string())?;
             }
             Ok(0)
         }
         "ask" => {
             let Some(text) = rest.first() else {
-                let _ = writeln!(status.stderr, "Usage: colibri ask <text>");
+                let _ = writeln!(
+                    stderr.lock().map_err(|_| "stderr lock poisoned")?,
+                    "Usage: colibri ask <text>"
+                );
                 return Ok(2);
             };
+            let plain_answer = config.console.plain_answer;
+            let status_enabled = config.console.status;
             status.write("ready", &[("model", config.model.model.as_str())]);
             status.write("thinking", &[]);
-            write_memory_status(&config, &mut status);
             let model = build_model(&config.model)?;
             let restore = config.session.restore_transcript;
             let session_config = config.session.clone();
-            let mut session = AgentSession::new(config, model);
+            let status_stderr = Arc::clone(&stderr);
+            let mut session = AgentSession::new(config, model).with_status_callback(
+                status_enabled,
+                Arc::new(move |line: &str| {
+                    if let Ok(mut stderr) = status_stderr.lock() {
+                        let _ = writeln!(stderr, "{line}");
+                    }
+                }),
+            );
             if restore {
                 session = session.with_history_loader(Box::new(move || {
                     TranscriptHistoryLoader::default(&session_config).load()
                 }));
             }
-            let mut prompter = ConsolePermissionPrompter {
-                stdin: &mut stdin,
-                stdout,
+            let response = {
+                let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+                let mut prompter = ConsolePermissionPrompter {
+                    stdin: &mut stdin,
+                    stdout: &mut *stdout_guard,
+                };
+                session.submit_with_permission_prompter(text, Some(&mut prompter))?
             };
-            let response = session.submit_with_permission_prompter(text, Some(&mut prompter))?;
-            writeln!(stdout, "{}", response.text).map_err(|error| error.to_string())?;
+            writeln!(
+                stdout.lock().map_err(|_| "stdout lock poisoned")?,
+                "{}",
+                format_answer_for_console(&response.text, plain_answer)
+            )
+            .map_err(|error| error.to_string())?;
             Ok(0)
         }
         "repl" => {
             status.write("ready", &[("model", config.model.model.as_str())]);
-            repl(config, stdin, stdout, status, prefer_process_tty)
+            repl(config, stdin, stdout, stderr, status, prefer_process_tty)
         }
         "auth" if rest.first().map(String::as_str) == Some("weixin") => {
             let (result, lines) = perform_weixin_auth(&config)?;
+            let mut stdout = stdout.lock().map_err(|_| "stdout lock poisoned")?;
             for line in lines {
                 writeln!(stdout, "{}", line).map_err(|error| error.to_string())?;
             }
@@ -147,27 +189,32 @@ fn run_inner<R: Read, W: Write, E: Write>(
             Ok(0)
         }
         _ => {
-            let _ = writeln!(status.stderr, "Unknown command: {}", command);
+            let _ = writeln!(
+                stderr.lock().map_err(|_| "stderr lock poisoned")?,
+                "Unknown command: {}",
+                command
+            );
             Ok(2)
         }
     }
 }
 
-fn gateway_command<W: Write, E: Write>(
+fn gateway_command<W: Write + Send + 'static, E: Write + Send + 'static>(
     rest: &[String],
     config_path: Option<PathBuf>,
-    stdout: &mut W,
-    stderr: &mut E,
+    stdout: &Arc<Mutex<W>>,
+    stderr: &Arc<Mutex<E>>,
 ) -> Result<i32, String> {
     let Some(action) = rest.first().map(String::as_str) else {
         let _ = writeln!(
-            stderr,
+            stderr.lock().map_err(|_| "stderr lock poisoned")?,
             "Usage: colibri gateway {{run,start,stop,restart,status}}"
         );
         return Ok(2);
     };
     match action {
         "status" => {
+            let mut stdout = stdout.lock().map_err(|_| "stdout lock poisoned")?;
             for line in format_gateway_status(&GatewayStatus::current()) {
                 writeln!(stdout, "{}", line).map_err(|error| error.to_string())?;
             }
@@ -175,7 +222,7 @@ fn gateway_command<W: Write, E: Write>(
         }
         "run" => {
             let config = AgentConfig::load(config_path.as_deref())?;
-            run_gateway_foreground(config, stdout)
+            run_gateway_foreground(config)
         }
         "start" | "stop" | "restart" => {
             let status = match action {
@@ -184,6 +231,7 @@ fn gateway_command<W: Write, E: Write>(
                 "restart" => restart_gateway(config_path)?,
                 _ => unreachable!(),
             };
+            let mut stdout = stdout.lock().map_err(|_| "stdout lock poisoned")?;
             for line in format_gateway_status(&status) {
                 writeln!(stdout, "{}", line).map_err(|error| error.to_string())?;
             }
@@ -191,7 +239,7 @@ fn gateway_command<W: Write, E: Write>(
         }
         _ => {
             let _ = writeln!(
-                stderr,
+                stderr.lock().map_err(|_| "stderr lock poisoned")?,
                 "Usage: colibri gateway {{run,start,stop,restart,status}}"
             );
             Ok(2)
@@ -199,7 +247,7 @@ fn gateway_command<W: Write, E: Write>(
     }
 }
 
-fn run_gateway_foreground<W: Write>(config: AgentConfig, _stdout: &mut W) -> Result<i32, String> {
+fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
     if !config
         .gateway
         .enabled_channels
@@ -345,15 +393,26 @@ impl PermissionPrompter for WeixinPermissionPrompter {
     }
 }
 
-fn repl<R: Read, W: Write, E: Write>(
+fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     config: AgentConfig,
     stdin: std::io::BufReader<R>,
-    stdout: &mut W,
-    mut status: StatusWriter<'_, E>,
+    stdout: Arc<Mutex<W>>,
+    stderr: Arc<Mutex<E>>,
+    mut status: StatusWriter<E>,
     prefer_process_tty: bool,
 ) -> Result<i32, String> {
+    let plain_answer = config.console.plain_answer;
+    let status_enabled = config.console.status;
     let model = build_model(&config.model)?;
-    let mut session = AgentSession::new(config.clone(), model);
+    let status_stderr = Arc::clone(&stderr);
+    let mut session = AgentSession::new(config.clone(), model).with_status_callback(
+        status_enabled,
+        Arc::new(move |line: &str| {
+            if let Ok(mut stderr) = status_stderr.lock() {
+                let _ = writeln!(stderr, "{line}");
+            }
+        }),
+    );
     if config.session.restore_transcript {
         let session_config = config.session.clone();
         session = session.with_history_loader(Box::new(move || {
@@ -379,25 +438,29 @@ fn repl<R: Read, W: Write, E: Write>(
             0.0
         };
         let timeout_remaining = timeout_remaining.max(0.0);
-        let user_text = match read_repl_line_auto(
-            "colibri> ",
-            timeout_remaining,
-            &history,
-            &mut reader,
-            stdout,
-            prefer_process_tty,
-        ) {
-            Ok(Some(text)) => text,
-            Ok(None) => {
-                status.write("idle_exit", &[("seconds", &idle_seconds.to_string())]);
-                return Ok(0);
+        let user_text = {
+            let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+            match read_repl_line_auto(
+                "colibri> ",
+                timeout_remaining,
+                &history,
+                &mut reader,
+                &mut *stdout_guard,
+                prefer_process_tty,
+            ) {
+                Ok(Some(text)) => text,
+                Ok(None) => {
+                    drop(stdout_guard);
+                    status.write("idle_exit", &[("seconds", &idle_seconds.to_string())]);
+                    return Ok(0);
+                }
+                Err(ReplReadError::Eof) => {
+                    writeln!(stdout_guard).map_err(|error| error.to_string())?;
+                    return Ok(0);
+                }
+                Err(ReplReadError::Interrupted) => return Err("interrupted".to_string()),
+                Err(ReplReadError::Io(message)) => return Err(message),
             }
-            Err(ReplReadError::Eof) => {
-                writeln!(stdout).map_err(|error| error.to_string())?;
-                return Ok(0);
-            }
-            Err(ReplReadError::Interrupted) => return Err("interrupted".to_string()),
-            Err(ReplReadError::Io(message)) => return Err(message),
         };
         if user_text.trim() == "/quit" || user_text.trim() == "/exit" {
             return Ok(0);
@@ -407,14 +470,20 @@ fn repl<R: Read, W: Write, E: Write>(
         }
         history.push(user_text.clone());
         status.write("thinking", &[]);
-        write_memory_status(&config, &mut status);
-        let mut prompter = ConsolePermissionPrompter {
-            stdin: &mut reader,
-            stdout,
+        let response = {
+            let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+            let mut prompter = ConsolePermissionPrompter {
+                stdin: &mut reader,
+                stdout: &mut *stdout_guard,
+            };
+            session.submit_with_permission_prompter(&user_text, Some(&mut prompter))?
         };
-        let response =
-            session.submit_with_permission_prompter(&user_text, Some(&mut prompter))?;
-        writeln!(stdout, "{}", response.text).map_err(|error| error.to_string())?;
+        writeln!(
+            stdout.lock().map_err(|_| "stdout lock poisoned")?,
+            "{}",
+            format_answer_for_console(&response.text, plain_answer)
+        )
+        .map_err(|error| error.to_string())?;
         last_activity = Instant::now();
     }
 }
@@ -510,15 +579,6 @@ fn summarized_arguments(arguments: &std::collections::BTreeMap<String, String>) 
     format!("{{{}}}", pairs)
 }
 
-fn write_memory_status<E: Write>(config: &AgentConfig, status: &mut StatusWriter<'_, E>) {
-    let Ok(memory) = MemoryContext::new(config.clone()).load() else {
-        return;
-    };
-    if !memory.files.is_empty() {
-        status.write("memory", &[("files", &memory.files.join(","))]);
-    }
-}
-
 fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_permissions = if cwd.join(".colibri/permissions.toml").exists() {
@@ -600,12 +660,12 @@ fn rss_kb() -> Option<u64> {
     None
 }
 
-struct StatusWriter<'a, E: Write> {
+struct StatusWriter<E: Write + Send + 'static> {
     enabled: bool,
-    stderr: &'a mut E,
+    stderr: Arc<Mutex<E>>,
 }
 
-impl<E: Write> StatusWriter<'_, E> {
+impl<E: Write + Send + 'static> StatusWriter<E> {
     fn write(&mut self, name: &str, fields: &[(&str, &str)]) {
         if !self.enabled {
             return;
@@ -617,6 +677,8 @@ impl<E: Write> StatusWriter<'_, E> {
             line.push('=');
             line.push_str(value);
         }
-        let _ = writeln!(self.stderr, "{}", line);
+        if let Ok(mut stderr) = self.stderr.lock() {
+            let _ = writeln!(stderr, "{}", line);
+        }
     }
 }

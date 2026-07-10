@@ -38,6 +38,7 @@ def test_default_config_uses_small_device_limits():
     assert config.memory.max_recall_chars == 6000
     assert not hasattr(config.memory, "max_recall_topics")
     assert config.console.status
+    assert config.console.plain_answer
     assert config.web_search.engine == "baidu"
     assert config.web_search.api_key == ""
     assert config.web_search.endpoint == "https://qianfan.baidubce.com/v2/ai_search/web_search"

@@ -84,7 +84,7 @@ impl MemoryContext {
         let mut any_file_truncated = false;
         for (name, limit) in [("MEMORY.md", MEMORY_LIMIT), ("USER.md", USER_LIMIT)] {
             let path = self.config.memory.root.join(name);
-            let Ok(text) = fs::read_to_string(path) else {
+            let Some(text) = read_text_lossy(&path) else {
                 continue;
             };
             let text = text.trim();
@@ -150,6 +150,11 @@ fn contains_file(root: &Path) -> bool {
         }
     }
     false
+}
+
+fn read_text_lossy(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn truncate(mut text: String, max_chars: usize) -> (String, bool) {

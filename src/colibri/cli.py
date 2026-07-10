@@ -7,7 +7,7 @@ from time import monotonic
 import sys
 from typing import Callable, Sequence
 
-from colibri.console import ConsoleStatusWriter, StatusTranscript
+from colibri.console import ConsoleStatusWriter, StatusTranscript, format_answer_for_console
 from colibri.config import DEFAULT_USER_CONFIG, AgentConfig, ConfigError, expand_user_path
 from colibri.channels.weixin import WeixinChannelError, perform_weixin_auth
 from colibri.diagnostics import build_diagnostics
@@ -119,7 +119,7 @@ def main(
         try:
             if args.command == "ask":
                 status.write("thinking")
-                print(session.submit(args.text).text)
+                print(format_answer_for_console(session.submit(args.text).text, config.console.plain_answer))
                 return 0
 
             if args.command == "repl":
@@ -176,7 +176,12 @@ def _run_repl(
 
         try:
             status.write("thinking")
-            print(session.submit(user_text).text)
+            print(
+                format_answer_for_console(
+                    session.submit(user_text).text,
+                    session.config.console.plain_answer,
+                )
+            )
             last_activity = monotonic_func()
         except ModelError as error:
             print(f"Model error: {error}", file=sys.stderr)

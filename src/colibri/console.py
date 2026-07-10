@@ -57,7 +57,59 @@ class StatusTranscript:
             self.status.write("model_error", type=payload.get("error_type"))
 
 
+def format_answer_for_console(text: str, plain_answer: bool) -> str:
+    if plain_answer:
+        return f"\n{format_plain_answer(text)}\n"
+    return text
+
+
+def format_plain_answer(text: str) -> str:
+    out_lines: list[str] = []
+    table_rows: list[list[str]] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if _is_table_separator(line):
+            continue
+        if _is_table_row(line):
+            table_rows.append(_split_table_row(line))
+            continue
+        _flush_table_rows(out_lines, table_rows)
+        out_lines.append(_strip_inline_markdown(line))
+    _flush_table_rows(out_lines, table_rows)
+    return "\n".join(out_lines).rstrip("\n")
+
+
 def _status_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value).replace("\n", " ")
+
+
+def _is_table_row(line: str) -> bool:
+    trimmed = line.strip()
+    return trimmed.startswith("|") and trimmed.count("|") >= 2
+
+
+def _is_table_separator(line: str) -> bool:
+    trimmed = line.strip()
+    if not trimmed.startswith("|"):
+        return False
+    return all(ch in "|-: \t" for ch in trimmed) and "-" in trimmed
+
+
+def _split_table_row(line: str) -> list[str]:
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return [_strip_inline_markdown(cell) for cell in cells]
+
+
+def _flush_table_rows(out_lines: list[str], rows: list[list[str]]) -> None:
+    if not rows:
+        return
+    for row in rows:
+        out_lines.append(" / ".join(row))
+    rows.clear()
+
+
+def _strip_inline_markdown(line: str) -> str:
+    text = line.lstrip("#").lstrip()
+    return text.replace("**", "").replace("__", "").replace("`", "")

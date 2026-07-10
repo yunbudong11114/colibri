@@ -1,4 +1,4 @@
-from colibri.console import ConsoleStatusWriter, StatusTranscript
+from colibri.console import ConsoleStatusWriter, StatusTranscript, format_plain_answer
 
 
 def test_status_writer_prints_plain_prefixed_lines(capsys):
@@ -38,6 +38,18 @@ def test_status_transcript_maps_selected_events(capsys):
         "tool_result",
         "context_compact",
     ]
+
+
+def test_format_plain_answer_strips_markdown_and_flattens_tables():
+    text = format_plain_answer(
+        "## Title\n"
+        "Hello **world** and `code`\n"
+        "| A | B |\n"
+        "| --- | --- |\n"
+        "| 1 | 2 |\n"
+    )
+
+    assert text == "Title\nHello world and code\nA / B\n1 / 2"
 
 
 class MemoryTranscript:

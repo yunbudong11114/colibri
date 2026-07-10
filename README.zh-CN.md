@@ -305,7 +305,7 @@ CLI 和 gateway session 都会写 transcript。Gateway 事件会额外包含 `ch
 [colibri] tool files.read ok chars=1284
 ```
 
-模型回答保留在 `stdout`。
+模型回答保留在 `stdout`。默认 `console.plain_answer = true`，会对本地 `ask`/`repl` 的最终回答做小屏友好去噪（去掉粗体/代码标记、表格改成普通行）；设为 `false` 可恢复原始 markdown。微信 gateway 发出的消息不受影响。
 
 诊断命令：
 
