@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
+import time
 from pathlib import Path
 from time import monotonic
 import sys
@@ -15,7 +17,7 @@ from colibri.gateway import GatewayRunner
 from colibri.gateway_process import GatewayProcessManager, format_gateway_status
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
-from colibri.repl_input import read_repl_line
+from colibri.repl_input import _is_selectable, read_repl_line, try_read_line
 from colibri.session import AgentSession
 from colibri.session_history import TranscriptHistoryLoader
 from colibri.transcript import TranscriptWriter
@@ -139,6 +141,37 @@ def main(
         return 1
 
 
+def run_steering_pump(
+    session,
+    *,
+    stop: threading.Event,
+    read_line: Callable[[float], str | None],
+    status: ConsoleStatusWriter,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Background loop: forward stdin lines to session.steer while a turn runs.
+
+    Approach C: do not read stdin while a permission prompt may be pending, so
+    permission input() is not stolen. No extra prompt is printed.
+    """
+    notified_pending = False
+    while not stop.is_set():
+        if session.is_permission_pending():
+            sleep(0.05)
+            continue
+        notified_pending = False
+        line = read_line(0.2)
+        if line is None:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not session.steer(stripped):
+            if session.is_permission_pending() and not notified_pending:
+                status.write("permission_pending")
+                notified_pending = True
+
+
 def _run_repl(
     session: AgentSession,
     *,
@@ -174,6 +207,22 @@ def _run_repl(
             continue
         history.append(user_text)
 
+        stop = threading.Event()
+        pump_thread: threading.Thread | None = None
+        if input_func is None and _is_selectable(sys.stdin):
+            pump_thread = threading.Thread(
+                target=run_steering_pump,
+                kwargs={
+                    "session": session,
+                    "stop": stop,
+                    "read_line": lambda t: try_read_line(
+                        t, abort=session.is_permission_pending
+                    ),
+                    "status": status,
+                },
+                daemon=True,
+            )
+            pump_thread.start()
         try:
             status.write("thinking")
             print(
@@ -186,6 +235,10 @@ def _run_repl(
         except ModelError as error:
             print(f"Model error: {error}", file=sys.stderr)
             return 1
+        finally:
+            stop.set()
+            if pump_thread is not None:
+                pump_thread.join(timeout=1)
 
 
 def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> None:

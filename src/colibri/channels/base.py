@@ -18,6 +18,7 @@ class InboundMessage:
 @dataclass(frozen=True)
 class ChannelContext:
     stop_requested: Callable[[], bool] = lambda: False
+    try_steer: Callable[[str, str], bool] | None = None  # (sender_id, text) -> bool
 
 
 class Channel(Protocol):

@@ -338,6 +338,13 @@ class WeixinChannel:
                 for message in self.poll_messages():
                     if self._deliver_text_waiter(message):
                         continue
+                    if (
+                        context.try_steer is not None
+                        and message.text.strip()
+                        and not message.media
+                        and context.try_steer(message.sender_id, message.text)
+                    ):
+                        continue
                     if not _publish_work(work, message, stop_event):
                         break
             if not errors.empty():

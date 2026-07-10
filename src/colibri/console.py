@@ -55,6 +55,8 @@ class StatusTranscript:
             )
         elif event_type == "model_error":
             self.status.write("model_error", type=payload.get("error_type"))
+        elif event_type == "steered":
+            self.status.write("steered", skipped=payload.get("skipped"), chars=payload.get("chars"))
 
 
 def format_answer_for_console(text: str, plain_answer: bool) -> str:

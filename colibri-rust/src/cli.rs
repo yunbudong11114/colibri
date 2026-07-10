@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::{expand_user_path, AgentConfig, DEFAULT_USER_CONFIG};
 use crate::console::format_answer_for_console;
@@ -13,9 +15,12 @@ use crate::gateway::{
 };
 use crate::model::build_model;
 use crate::permissions::{PermissionPrompter, PermissionRequest};
-use crate::repl_input::{read_repl_line_auto, ReplReadError};
+use crate::repl_input::{
+    read_repl_line_auto, stdin_supports_steering_pump, try_read_line, ReplReadError,
+};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
+use crate::steering::SteerHandle;
 use crate::weixin::{
     perform_weixin_auth, permission_choice, poll_weixin_once, save_weixin_auth_config,
     send_weixin_media, send_weixin_text, InboundWeixinMessage,
@@ -261,11 +266,14 @@ fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
     let (error_tx, error_rx) = mpsc::channel::<String>();
     let waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config.clone())?));
     let worker_config = config.clone();
     let worker_waiters = Arc::clone(&waiters);
+    let worker_sessions = Arc::clone(&sessions);
     let worker_error_tx = error_tx.clone();
     let worker = std::thread::spawn(move || {
-        if let Err(error) = run_weixin_worker(worker_config, work_rx, worker_waiters) {
+        if let Err(error) = run_weixin_worker(worker_config, work_rx, worker_waiters, worker_sessions)
+        {
             let _ = worker_error_tx.send(error);
         }
     });
@@ -281,6 +289,16 @@ fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
             if deliver_weixin_waiter(&waiters, &message) {
                 continue;
             }
+            if message.media.is_empty() && !message.text.trim().is_empty() {
+                let key = format!("weixin:{}", message.sender_id);
+                let steered = sessions
+                    .lock()
+                    .map_err(|_| "gateway session cache lock poisoned".to_string())?
+                    .try_steer(&key, &message.text);
+                if steered {
+                    continue;
+                }
+            }
             work_tx
                 .send(message)
                 .map_err(|error| format!("Weixin worker stopped: {}", error))?;
@@ -292,8 +310,8 @@ fn run_weixin_worker(
     config: AgentConfig,
     work_rx: mpsc::Receiver<InboundWeixinMessage>,
     waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    sessions: Arc<Mutex<GatewaySessionCache>>,
 ) -> Result<(), String> {
-    let mut sessions = GatewaySessionCache::new(config.clone())?;
     let config = Arc::new(config);
     while let Ok(message) = work_rx.recv() {
         let key = format!("weixin:{}", message.sender_id);
@@ -310,15 +328,26 @@ fn run_weixin_worker(
                 &media,
             )
         });
-        let session = sessions.get_or_create_with_metadata_and_media_sender(
-            &key,
-            std::collections::BTreeMap::from([
-                ("channel".to_string(), "weixin".to_string()),
-                ("sender_id".to_string(), sender_id.clone()),
-                ("session_key".to_string(), key.clone()),
-            ]),
-            Some(media_sender),
-        )?;
+        let mut session = {
+            let mut guard = sessions
+                .lock()
+                .map_err(|_| "gateway session cache lock poisoned".to_string())?;
+            guard.take_or_create_with_metadata_and_media_sender(
+                &key,
+                std::collections::BTreeMap::from([
+                    ("channel".to_string(), "weixin".to_string()),
+                    ("sender_id".to_string(), sender_id.clone()),
+                    ("session_key".to_string(), key.clone()),
+                ]),
+                Some(media_sender),
+            )?
+        };
+        let notifier_config = Arc::clone(&config);
+        let notifier_sender = sender_id.clone();
+        let notifier_token = context_token.clone();
+        session.set_steer_notifier(Some(Arc::new(move |ack| {
+            let _ = send_weixin_text(&notifier_config, &notifier_sender, &notifier_token, &ack);
+        })));
         let mut prompter = WeixinPermissionPrompter {
             config: Arc::clone(&config),
             sender_id: sender_id.clone(),
@@ -331,7 +360,13 @@ fn run_weixin_worker(
             message.media,
             Some(&mut prompter),
         )?;
-        sessions.touch(&key);
+        {
+            let mut guard = sessions
+                .lock()
+                .map_err(|_| "gateway session cache lock poisoned".to_string())?;
+            guard.put_back(&key, session);
+            guard.touch(&key);
+        }
         if !response.text.trim().is_empty() {
             send_weixin_text(&config, &sender_id, &context_token, &response.text)?;
         }
@@ -391,6 +426,73 @@ impl PermissionPrompter for WeixinPermissionPrompter {
             .map(permission_choice)
             .unwrap_or_else(|| "n".to_string())
     }
+}
+
+/// Background loop: forward stdin lines to `session.steer` while a turn runs.
+///
+/// Approach C: do not read stdin while a permission prompt may be pending, so
+/// permission input is not stolen. No extra prompt is printed.
+#[allow(unused_assignments)] // notified_pending mirrors Python debounce; top-level pending continue is the main gate
+pub fn run_steering_pump<R, N, S>(
+    handle: &SteerHandle,
+    stop: &AtomicBool,
+    mut read_line: R,
+    mut notify_permission_pending: N,
+    mut sleep_fn: S,
+) where
+    R: FnMut(f64) -> Option<String>,
+    N: FnMut(),
+    S: FnMut(Duration),
+{
+    let mut notified_pending = false;
+    while !stop.load(Ordering::SeqCst) {
+        if handle.is_permission_pending() {
+            sleep_fn(Duration::from_millis(50));
+            continue;
+        }
+        notified_pending = false;
+        let line = read_line(0.2);
+        let Some(line) = line else {
+            continue;
+        };
+        let stripped = line.trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        if !handle.steer(stripped) {
+            if handle.is_permission_pending() && !notified_pending {
+                notify_permission_pending();
+                notified_pending = true;
+            }
+        }
+    }
+}
+
+fn spawn_repl_steering_pump<E: Write + Send + 'static>(
+    handle: SteerHandle,
+    stop: Arc<AtomicBool>,
+    status_enabled: bool,
+    stderr: Arc<Mutex<E>>,
+) -> Option<thread::JoinHandle<()>> {
+    if !stdin_supports_steering_pump() {
+        return None;
+    }
+    Some(thread::spawn(move || {
+        run_steering_pump(
+            &handle,
+            stop.as_ref(),
+            |timeout| try_read_line(timeout, Some(&|| handle.is_permission_pending())),
+            || {
+                if !status_enabled {
+                    return;
+                }
+                if let Ok(mut stderr) = stderr.lock() {
+                    let _ = writeln!(stderr, "[colibri] permission_pending");
+                }
+            },
+            thread::sleep,
+        );
+    }))
 }
 
 fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
@@ -470,14 +572,30 @@ fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
         }
         history.push(user_text.clone());
         status.write("thinking", &[]);
-        let response = {
+        let stop = Arc::new(AtomicBool::new(false));
+        let pump = if prefer_process_tty {
+            spawn_repl_steering_pump(
+                session.steer_handle(),
+                Arc::clone(&stop),
+                status_enabled,
+                Arc::clone(&stderr),
+            )
+        } else {
+            None
+        };
+        let submit_result = {
             let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
             let mut prompter = ConsolePermissionPrompter {
                 stdin: &mut reader,
                 stdout: &mut *stdout_guard,
             };
-            session.submit_with_permission_prompter(&user_text, Some(&mut prompter))?
+            session.submit_with_permission_prompter(&user_text, Some(&mut prompter))
         };
+        stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = pump {
+            let _ = handle.join();
+        }
+        let response = submit_result?;
         writeln!(
             stdout.lock().map_err(|_| "stdout lock poisoned")?,
             "{}",

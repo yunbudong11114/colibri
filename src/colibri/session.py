@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Callable
@@ -21,6 +22,11 @@ from colibri.messages import AgentResponse, Message, ModelLimits, ModelResponse,
 from colibri.media import MediaPart
 from colibri.model.base import ModelClient
 from colibri.skills import SkillIndex
+from colibri.steering import (
+    SKIPPED_TOOL_RESULT,
+    STEERING_QUEUE_MAX,
+    format_steering_ack,
+)
 from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
@@ -43,12 +49,36 @@ class AgentSession:
     transcript: TranscriptSink | None = None
     media_sender: Callable[[MediaPart], None] | None = None
     history_loader: Callable[[], list[Message]] | None = None
+    steer_notifier: Callable[[str], None] | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)
     last_activity_at: float = field(default_factory=monotonic)
     _history_loaded: bool = field(default=False, init=False, repr=False)
     _image_analyzer: ImageAnalyzer | None = field(default=None, init=False, repr=False)
+    _steering: queue.Queue[str] = field(
+        default_factory=lambda: queue.Queue(maxsize=STEERING_QUEUE_MAX),
+        init=False,
+        repr=False,
+    )
+    _turn_active: bool = field(default=False, init=False, repr=False)
+    _permission_pending: bool = field(default=False, init=False, repr=False)
+
+    def steer(self, text: str) -> bool:
+        cleaned = text.strip()
+        if not cleaned or not self._turn_active or self._permission_pending:
+            return False
+        try:
+            self._steering.put_nowait(cleaned)
+            return True
+        except queue.Full:
+            return False
+
+    def is_turn_active(self) -> bool:
+        return self._turn_active
+
+    def is_permission_pending(self) -> bool:
+        return self._permission_pending
 
     def submit(self, user_text: str, media: list[MediaPart] | None = None) -> AgentResponse:
         self._restore_history_once()
@@ -58,18 +88,36 @@ class AgentSession:
         memory_text, skill_text = self._load_dynamic_context(bounded_text)
         model_messages = self._budgeted_model_messages(memory_text, skill_text)
 
-        for _round_index in range(self.config.session.max_tool_rounds):
-            model_response = self._complete_model(model_messages, registry)
-            assistant_text = self._record_assistant_message(model_response)
+        self._turn_active = True
+        try:
+            for _round_index in range(self.config.session.max_tool_rounds):
+                model_response = self._complete_model(model_messages, registry)
+                assistant_text = self._record_assistant_message(model_response)
 
-            if not model_response.tool_calls:
-                return self._finish_response(assistant_text)
+                if not model_response.tool_calls:
+                    steered = self._drain_one_steering()
+                    if steered is not None:
+                        self._apply_steering(steered, skipped=0)
+                        model_messages = self._budgeted_model_messages(memory_text, skill_text)
+                        continue
+                    return self._finish_response(assistant_text)
 
-            for call in model_response.tool_calls:
-                self._execute_tool_call(call, registry, policy, context)
+                calls = list(model_response.tool_calls)
+                for index, call in enumerate(calls):
+                    self._execute_tool_call(call, registry, policy, context)
+                    steered = self._drain_one_steering()
+                    if steered is not None:
+                        skipped = len(calls) - index - 1
+                        for skipped_call in calls[index + 1 :]:
+                            self._record_skipped_tool(skipped_call)
+                        self._apply_steering(steered, skipped=skipped)
+                        break
                 model_messages = self._budgeted_model_messages(memory_text, skill_text)
 
-        return self._round_limit_response()
+            return self._round_limit_response()
+        finally:
+            self._turn_active = False
+            self._clear_steering_queue()
 
     def reset(self) -> None:
         self.messages.clear()
@@ -159,7 +207,11 @@ class AgentSession:
         if tool is None:
             result = registry.run(call, context)
         else:
-            decision = policy.decide(tool, call.arguments, context)
+            self._permission_pending = True
+            try:
+                decision = policy.decide(tool, call.arguments, context)
+            finally:
+                self._permission_pending = False
             self._write_transcript(
                 "permission_decision",
                 {
@@ -328,6 +380,58 @@ class AgentSession:
     def _write_transcript(self, event_type: str, payload: dict) -> None:
         if self.transcript is not None:
             self.transcript.write(event_type, payload)
+
+    def _drain_one_steering(self) -> str | None:
+        try:
+            return self._steering.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _clear_steering_queue(self) -> None:
+        while True:
+            try:
+                self._steering.get_nowait()
+            except queue.Empty:
+                return
+
+    def _record_skipped_tool(self, call: ToolCall) -> None:
+        self._write_transcript(
+            "tool_result",
+            {
+                "id": call.id,
+                "name": call.name,
+                "ok": False,
+                "error_type": "steered_skip",
+                "text": SKIPPED_TOOL_RESULT,
+                "truncated": False,
+                "media": None,
+            },
+        )
+        self.messages.append(
+            Message(
+                role="tool",
+                content=self._tool_result_text(
+                    ToolResult(ok=False, text=SKIPPED_TOOL_RESULT, error_type="steered_skip")
+                ),
+                tool_call_id=call.id,
+            )
+        )
+        self._compact_messages_if_needed()
+
+    def _apply_steering(self, text: str, *, skipped: int) -> None:
+        self._write_transcript(
+            "steered",
+            {"skipped": skipped, "chars": len(text), "text": text[:200]},
+        )
+        if self.steer_notifier is not None:
+            self.steer_notifier(format_steering_ack(skipped, text))
+        bounded = self._bound_text(text, self.config.session.model_input_char_limit)
+        self.messages.append(Message(role="user", content=bounded))
+        self._write_transcript(
+            "user_message",
+            {"text": bounded, "media": [], "steering": True},
+        )
+        self._compact_messages_if_needed()
 
     def _model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
         messages = list(self.messages)

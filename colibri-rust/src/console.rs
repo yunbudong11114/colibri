@@ -96,6 +96,17 @@ pub fn status_line_for_event(event_type: &str, payload: &Value) -> Option<String
                 .unwrap_or("error");
             Some(format!("[colibri] model_error type={error_type}"))
         }
+        "steered" => {
+            let skipped = payload
+                .get("skipped")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let chars = payload
+                .get("chars")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            Some(format!("[colibri] steered skipped={skipped} chars={chars}"))
+        }
         _ => None,
     }
 }

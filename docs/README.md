@@ -22,11 +22,16 @@ The active implementation specs are in `docs/superpowers/specs/`:
 - `2026-07-08-colibri-weixin-gateway-design.md`: gateway and Weixin channel.
 - `2026-07-09-colibri-weixin-media-design.md`: Weixin file/image send and receive behavior, including Rust parity requirements.
 - `2026-07-09-colibri-channel-followups.md`: selected channel follow-up issue.
+- `2026-07-10-colibri-steering-display-design.md`: steering UX on Weixin + lightweight concurrent REPL (Approach 2).
 
 ## Plans
 
 Implementation plans are kept in `docs/superpowers/plans/`. They are historical execution aids; prefer the current specs and root README files for the latest behavior.
 
+Recent plan (implemented):
+
+- `2026-07-10-colibri-steering.md`: mid-turn steering + Weixin ack + concurrent REPL (Python/Rust). Spec: `2026-07-10-colibri-steering-display-design.md`.
+
 ## Private Reference Notes
 
-Local research notes for Claude Code, PicoClaw, and ZeroClaw are intentionally ignored by git and should not be uploaded.
+Local research notes for Claude Code, PicoClaw, and ZeroClaw are intentionally ignored by git and should not be uploaded. See `.gitignore` entries under `docs/reference/` (including `2026-07-10-picoclaw-zeroclaw-lessons-for-colibri.md`).

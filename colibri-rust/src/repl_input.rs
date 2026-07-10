@@ -198,6 +198,62 @@ fn read_repl_line_plain<R: Read, W: Write>(
     Ok(Some(line))
 }
 
+/// Read one line without prompting or entering raw/tty mode.
+///
+/// Returns `None` on timeout, EOF, or when stdin is not selectable (so callers
+/// can disable the concurrent steering pump). If `abort` returns true after
+/// select indicates readiness, returns `None` without reading.
+pub fn try_read_line(
+    timeout_seconds: f64,
+    abort: Option<&dyn Fn() -> bool>,
+) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        use std::os::fd::AsRawFd;
+        let stdin = io::stdin();
+        if !stdin.is_terminal() {
+            return None;
+        }
+        let fd = stdin.as_raw_fd();
+        if !wait_fd_readable(fd, timeout_seconds) {
+            return None;
+        }
+        if abort.is_some_and(|f| f()) {
+            return None;
+        }
+        let mut line = String::new();
+        match io::BufReader::new(stdin.lock()).read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                Some(line)
+            }
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (timeout_seconds, abort);
+        None
+    }
+}
+
+/// True when process stdin looks usable for a concurrent steering pump (TTY).
+pub fn stdin_supports_steering_pump() -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        io::stdin().is_terminal()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// Interactive TTY REPL entry used when stdin is a terminal.
 #[cfg(unix)]
 pub fn read_repl_line_tty<W: Write>(

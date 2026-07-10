@@ -6,6 +6,7 @@ import select
 import sys
 import termios
 import tty
+from collections.abc import Callable
 from typing import TextIO
 
 
@@ -27,6 +28,33 @@ def read_repl_line(
     line = stdin.readline()
     if line == "":
         raise EOFError
+    return line.rstrip("\n")
+
+
+def try_read_line(
+    timeout_seconds: float,
+    stdin: TextIO = sys.stdin,
+    abort: Callable[[], bool] | None = None,
+) -> str | None:
+    """Read one line without prompting or entering raw/tty mode.
+
+    Returns None on timeout, EOF, or when stdin is not selectable (so callers
+    can disable the concurrent steering pump). Safe to use while submit may
+    call input() for permissions.
+
+    If ``abort`` is provided, it is checked after select indicates readiness
+    and before readline; when it returns True, returns None without reading.
+    """
+    if not _is_selectable(stdin):
+        return None
+    ready, _write_ready, _error_ready = select.select([stdin], [], [], timeout_seconds)
+    if not ready:
+        return None
+    if abort is not None and abort():
+        return None
+    line = stdin.readline()
+    if line == "":
+        return None
     return line.rstrip("\n")
 
 

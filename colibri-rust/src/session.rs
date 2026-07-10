@@ -9,6 +9,9 @@ use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, 
 use crate::model::ModelClient;
 use crate::permissions::{PermissionPolicy, PermissionPrompter};
 use crate::skills::relevant_skill_context;
+use crate::steering::{
+    format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
+};
 use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
 use crate::transcript::TranscriptWriter;
 use crate::vision::analyze_image;
@@ -30,6 +33,8 @@ pub struct AgentSession {
     media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     history_loader: Option<Box<dyn Fn() -> Vec<Message> + Send>>,
     history_loaded: bool,
+    steering: Arc<SteeringState>,
+    steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl AgentSession {
@@ -70,6 +75,8 @@ impl AgentSession {
             media_sender: None,
             history_loader: None,
             history_loaded: false,
+            steering: Arc::new(SteeringState::new()),
+            steer_notifier: None,
         }
     }
 
@@ -86,6 +93,37 @@ impl AgentSession {
         self.status_enabled = enabled;
         self.status_callback = Some(callback);
         self
+    }
+
+    pub fn set_steer_notifier(
+        &mut self,
+        notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) {
+        self.steer_notifier = notifier;
+    }
+
+    pub fn with_steer_notifier(
+        mut self,
+        notifier: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Self {
+        self.steer_notifier = Some(notifier);
+        self
+    }
+
+    pub fn steer_handle(&self) -> SteerHandle {
+        SteerHandle::new(Arc::clone(&self.steering))
+    }
+
+    pub fn steer(&self, text: &str) -> bool {
+        self.steering.steer(text)
+    }
+
+    pub fn is_turn_active(&self) -> bool {
+        self.steering.is_turn_active()
+    }
+
+    pub fn is_permission_pending(&self) -> bool {
+        self.steering.is_permission_pending()
     }
 
     pub fn submit(&mut self, text: &str) -> Result<AgentResponse, String> {
@@ -171,8 +209,22 @@ impl AgentSession {
         }
         let tools = tool_specs_for_config(&self.config);
 
+        let steering = Arc::clone(&self.steering);
+        steering.set_turn_active(true);
+        let _turn_guard = TurnGuard { steering };
+        self.run_tool_rounds(&memory.text, &skill_text, &tools, &mut policy, &context)
+    }
+
+    fn run_tool_rounds(
+        &mut self,
+        memory_text: &str,
+        skill_text: &str,
+        tools: &[serde_json::Value],
+        policy: &mut PermissionPolicy<'_>,
+        context: &ToolContext,
+    ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
-            let model_messages = self.budgeted_model_messages(&memory.text, &skill_text);
+            let model_messages = self.budgeted_model_messages(memory_text, skill_text);
             let response = {
                 let mut model = self
                     .model
@@ -180,7 +232,7 @@ impl AgentSession {
                     .map_err(|_| "model lock poisoned".to_string())?;
                 model.complete(
                     &model_messages,
-                    &tools,
+                    tools,
                     SYSTEM_PROMPT,
                     &ModelLimits {
                         timeout_seconds: self.config.model.timeout_seconds,
@@ -199,69 +251,26 @@ impl AgentSession {
             self.compact_if_needed();
 
             if response.tool_calls.is_empty() {
+                if let Some(steered) = self.steering.drain_one() {
+                    self.apply_steering(&steered, 0);
+                    continue;
+                }
                 return Ok(AgentResponse {
                     text: assistant_text,
                 });
             }
 
-            for call in response.tool_calls {
-                let execution_arguments = string_arguments(&call.arguments);
-                self.write_transcript(
-                    "tool_call",
-                    serde_json::json!({"id":call.id,"name":call.name,"arguments":call.arguments}),
-                );
-                let decision =
-                    policy.decide(&tool_info(&call.name), &execution_arguments, &context);
-                self.write_transcript(
-                    "permission_decision",
-                    serde_json::json!({
-                        "tool_name":call.name,
-                        "subject_kind":decision.subject_kind,
-                        "decision":decision.decision,
-                        "scope":decision.scope,
-                        "allowed":decision.allowed,
-                        "reason":decision.reason,
-                        "shell_command":execution_arguments.get("command"),
-                        "file_path":decision.file_path,
-                        "file_root":decision.file_root
-                    }),
-                );
-                let result = if decision.allowed {
-                    let run_context = decision
-                        .file_root
-                        .as_ref()
-                        .map(|root| context.with_allowed_file_root(std::path::PathBuf::from(root)))
-                        .unwrap_or_else(|| context.clone());
-                    run_tool_map(&call.name, &execution_arguments, &run_context)?
-                } else {
-                    crate::messages::ToolResult::error("permission_denied", denied_tool_text(&call))
-                };
-                let result = self.send_media_result_if_needed(result);
-                self.write_transcript(
-                    "tool_result",
-                    serde_json::json!({
-                        "id":call.id,
-                        "name":call.name,
-                        "ok":result.ok,
-                        "error_type":result.error_type,
-                        "text":bound_text(&result.text, self.config.tools.max_result_chars),
-                        "truncated":result.truncated,
-                        "media":result.media.as_ref().map(media_payload)
-                    }),
-                );
-                let content = if result.ok {
-                    result.text
-                } else {
-                    format!(
-                        "{}: {}",
-                        result
-                            .error_type
-                            .unwrap_or_else(|| "tool_error".to_string()),
-                        result.text
-                    )
-                };
-                self.messages.push(Message::tool(content, call.id));
-                self.compact_if_needed();
+            let calls = response.tool_calls;
+            for index in 0..calls.len() {
+                self.execute_tool_call(&calls[index], policy, context)?;
+                if let Some(steered) = self.steering.drain_one() {
+                    let skipped = calls.len() - index - 1;
+                    for skipped_call in &calls[index + 1..] {
+                        self.record_skipped_tool(skipped_call);
+                    }
+                    self.apply_steering(&steered, skipped);
+                    break;
+                }
             }
         }
 
@@ -277,6 +286,122 @@ impl AgentSession {
         );
         self.compact_if_needed();
         Ok(AgentResponse { text })
+    }
+
+    fn execute_tool_call(
+        &mut self,
+        call: &ToolCall,
+        policy: &mut PermissionPolicy<'_>,
+        context: &ToolContext,
+    ) -> Result<(), String> {
+        let execution_arguments = string_arguments(&call.arguments);
+        self.write_transcript(
+            "tool_call",
+            serde_json::json!({"id":call.id,"name":call.name,"arguments":call.arguments}),
+        );
+        self.steering.set_permission_pending(true);
+        let _permission_guard = PermissionPendingGuard {
+            steering: Arc::clone(&self.steering),
+        };
+        let decision = policy.decide(&tool_info(&call.name), &execution_arguments, context);
+        drop(_permission_guard);
+        self.write_transcript(
+            "permission_decision",
+            serde_json::json!({
+                "tool_name":call.name,
+                "subject_kind":decision.subject_kind,
+                "decision":decision.decision,
+                "scope":decision.scope,
+                "allowed":decision.allowed,
+                "reason":decision.reason,
+                "shell_command":execution_arguments.get("command"),
+                "file_path":decision.file_path,
+                "file_root":decision.file_root
+            }),
+        );
+        let result = if decision.allowed {
+            let run_context = decision
+                .file_root
+                .as_ref()
+                .map(|root| context.with_allowed_file_root(std::path::PathBuf::from(root)))
+                .unwrap_or_else(|| context.clone());
+            run_tool_map(&call.name, &execution_arguments, &run_context)?
+        } else {
+            crate::messages::ToolResult::error("permission_denied", denied_tool_text(call))
+        };
+        let result = self.send_media_result_if_needed(result);
+        self.write_transcript(
+            "tool_result",
+            serde_json::json!({
+                "id":call.id,
+                "name":call.name,
+                "ok":result.ok,
+                "error_type":result.error_type,
+                "text":bound_text(&result.text, self.config.tools.max_result_chars),
+                "truncated":result.truncated,
+                "media":result.media.as_ref().map(media_payload)
+            }),
+        );
+        let content = if result.ok {
+            result.text
+        } else {
+            format!(
+                "{}: {}",
+                result
+                    .error_type
+                    .unwrap_or_else(|| "tool_error".to_string()),
+                result.text
+            )
+        };
+        self.messages.push(Message::tool(content, call.id.clone()));
+        self.compact_if_needed();
+        Ok(())
+    }
+
+    fn record_skipped_tool(&mut self, call: &ToolCall) {
+        self.write_transcript(
+            "tool_result",
+            serde_json::json!({
+                "id": call.id,
+                "name": call.name,
+                "ok": false,
+                "error_type": "steered_skip",
+                "text": SKIPPED_TOOL_RESULT,
+                "truncated": false,
+                "media": serde_json::Value::Null
+            }),
+        );
+        let content = format!("steered_skip: {SKIPPED_TOOL_RESULT}");
+        self.messages
+            .push(Message::tool(content, call.id.clone()));
+        self.compact_if_needed();
+    }
+
+    fn apply_steering(&mut self, text: &str, skipped: usize) {
+        let chars = text.chars().count();
+        let transcript_text: String = text.chars().take(200).collect();
+        self.write_transcript(
+            "steered",
+            serde_json::json!({
+                "skipped": skipped,
+                "chars": chars,
+                "text": transcript_text
+            }),
+        );
+        if let Some(notifier) = &self.steer_notifier {
+            notifier(format_steering_ack(skipped, text));
+        }
+        let bounded = bound_text(text, self.config.session.model_input_char_limit);
+        self.messages.push(Message::new("user", &bounded));
+        self.write_transcript(
+            "user_message",
+            serde_json::json!({
+                "text": bounded,
+                "media": [],
+                "steering": true
+            }),
+        );
+        self.compact_if_needed();
     }
 
     fn send_media_result_if_needed(&self, result: ToolResult) -> ToolResult {
@@ -531,6 +656,27 @@ pub fn bound_text(text: &str, max_chars: usize) -> String {
     let suffix = "\n...[truncated]";
     let keep = max_chars.saturating_sub(suffix.chars().count());
     text.chars().take(keep).collect::<String>() + suffix
+}
+
+struct TurnGuard {
+    steering: Arc<SteeringState>,
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        self.steering.set_turn_active(false);
+        self.steering.clear();
+    }
+}
+
+struct PermissionPendingGuard {
+    steering: Arc<SteeringState>,
+}
+
+impl Drop for PermissionPendingGuard {
+    fn drop(&mut self) {
+        self.steering.set_permission_pending(false);
+    }
 }
 
 struct CompactError {

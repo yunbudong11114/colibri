@@ -1,3 +1,5 @@
+import io
+
 from colibri.console import ConsoleStatusWriter, StatusTranscript, format_plain_answer
 
 
@@ -38,6 +40,13 @@ def test_status_transcript_maps_selected_events(capsys):
         "tool_result",
         "context_compact",
     ]
+
+
+def test_status_transcript_emits_steered_line():
+    status = ConsoleStatusWriter(enabled=True, stream=io.StringIO())
+    sink = StatusTranscript(transcript=None, status=status)
+    sink.write("steered", {"skipped": 2, "chars": 18})
+    assert "[colibri] steered skipped=2 chars=18" in status.stream.getvalue()
 
 
 def test_format_plain_answer_strips_markdown_and_flattens_tables():

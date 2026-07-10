@@ -1,11 +1,21 @@
+import threading
 from io import StringIO
+from unittest.mock import MagicMock
 
 import pytest
 
-from colibri.cli import main
+from colibri.cli import main, run_steering_pump
 from colibri.config import AgentConfig
+from colibri.console import ConsoleStatusWriter
 from colibri.model.errors import ModelError
-from colibri.repl_input import ReplLineEditor, read_escape_sequence, read_repl_line, read_tty_byte, write_raw_tty_newline
+from colibri.repl_input import (
+    ReplLineEditor,
+    read_escape_sequence,
+    read_repl_line,
+    read_tty_byte,
+    try_read_line,
+    write_raw_tty_newline,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -401,3 +411,120 @@ class FakeTranscript:
 
     def close(self):
         self.closed = True
+
+
+class FakeSteeringSession:
+    def __init__(self, *, turn_active: bool = True, permission_pending: bool = False):
+        self._turn_active = turn_active
+        self._permission_pending = permission_pending
+        self.steered: list[str] = []
+
+    def is_turn_active(self) -> bool:
+        return self._turn_active
+
+    def is_permission_pending(self) -> bool:
+        return self._permission_pending
+
+    def steer(self, text: str) -> bool:
+        if not self._turn_active or self._permission_pending:
+            return False
+        cleaned = text.strip()
+        if not cleaned:
+            return False
+        self.steered.append(cleaned)
+        return True
+
+
+def test_steering_pump_forwards_line_to_steer():
+    session = FakeSteeringSession()
+    stop = threading.Event()
+    lines = iter(["change plan", None])
+
+    def read_line(timeout):
+        try:
+            return next(lines)
+        except StopIteration:
+            stop.set()
+            return None
+
+    run_steering_pump(
+        session,
+        stop=stop,
+        read_line=read_line,
+        status=ConsoleStatusWriter(enabled=False),
+    )
+
+    assert session.steered == ["change plan"]
+
+
+def test_steering_pump_skips_read_while_permission_pending():
+    session = FakeSteeringSession(permission_pending=True)
+    stop = threading.Event()
+    read_calls: list[float] = []
+    sleeps: list[float] = []
+
+    def read_line(timeout):
+        read_calls.append(timeout)
+        stop.set()
+        return "should-not-reach"
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            session._permission_pending = False
+
+    run_steering_pump(
+        session,
+        stop=stop,
+        read_line=read_line,
+        status=ConsoleStatusWriter(enabled=False),
+        sleep=sleep,
+    )
+
+    assert sleeps == [0.05, 0.05]
+    assert read_calls == [0.2]
+    assert session.steered == ["should-not-reach"]
+
+
+def test_steering_pump_notifies_permission_pending_once():
+    session = FakeSteeringSession()
+    stop = threading.Event()
+    stream = StringIO()
+    status = ConsoleStatusWriter(enabled=True, stream=stream)
+    sleep_count = 0
+
+    def read_line(timeout):
+        session._permission_pending = True
+        return "steer-me"
+
+    def sleep(seconds):
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 3:
+            stop.set()
+
+    run_steering_pump(session, stop=stop, read_line=read_line, status=status, sleep=sleep)
+
+    assert stream.getvalue().count("[colibri] permission_pending") == 1
+    assert sleep_count >= 3
+    assert session.steered == []
+
+
+def test_try_read_line_returns_none_when_stdin_not_selectable():
+    assert try_read_line(0.2, stdin=StringIO("hello\n")) is None
+
+
+def test_try_read_line_abort_after_select_prevents_readline(monkeypatch):
+    stdin = MagicMock()
+    stdin.fileno.return_value = 0
+    stdin.readline = MagicMock(return_value="stolen\n")
+
+    monkeypatch.setattr(
+        "colibri.repl_input.select.select",
+        lambda *_args, **_kwargs: ([stdin], [], []),
+    )
+
+    result = try_read_line(0.2, stdin=stdin, abort=lambda: True)
+
+    assert result is None
+    stdin.readline.assert_not_called()

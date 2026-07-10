@@ -135,6 +135,8 @@ uv run python -m colibri.cli auth weixin
 
 `ask` runs one request and exits. `repl` keeps a multi-turn local session. `diagnostics` prints environment, paths, RSS, and context limits. `auth weixin` starts iLink QR login and writes the Weixin token to the active config file.
 
+During a long `repl` turn on a TTY, you can type a new line while tools are still running to **steer** the session (skip remaining tools and inject your text). No full-screen TUI — just type and press Enter. Steering is disabled while a permission prompt is active.
+
 ## Gateway
 
 Gateway is the process entry for external chat channels.
@@ -186,6 +188,8 @@ uv run python -m colibri.cli auth weixin
 ```
 
 Gateway keeps one bounded `AgentSession` per channel user, keyed like `weixin:<sender_id>`. Permission prompts are sent back through Weixin text and accept `y`, `s`, `e`, `p`, or `n`.
+
+While a turn is running tools, a new Weixin message from the same user **steers** the session: remaining tools are skipped and your text is injected. Colibri sends a short Chinese ack immediately (e.g. `已改方向，跳过剩余 N 个工具`). Steering is disabled during permission prompts.
 
 ## Built-In Tools
 

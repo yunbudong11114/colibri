@@ -2,10 +2,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
-use colibri_rust::cli::run_with_io;
+use colibri_rust::cli::{run_steering_pump, run_with_io};
 use colibri_rust::config::{expand_user_path, AgentConfig};
 use colibri_rust::gateway::{format_gateway_status, GatewaySessionCache, GatewayStatus};
 use colibri_rust::memory::MemoryContext;
@@ -15,12 +16,13 @@ use colibri_rust::permissions::{
     PermissionPolicy, PermissionPrompter, PermissionRequest, ProjectGrants, ProjectPermissionStore,
 };
 use colibri_rust::repl_input::{
-    handle_escape_sequence, read_escape_sequence_with, read_repl_line, write_raw_tty_newline,
-    ReplLineEditor,
+    handle_escape_sequence, read_escape_sequence_with, read_repl_line, try_read_line,
+    write_raw_tty_newline, ReplLineEditor,
 };
 use colibri_rust::session::AgentSession;
 use colibri_rust::session_history::TranscriptHistoryLoader;
 use colibri_rust::skills::{relevant_skill_context, SkillIndex};
+use colibri_rust::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
 use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
@@ -274,6 +276,327 @@ fn console_plain_answer_and_status_events_match_python() {
         &serde_json::json!({"name":"files.read","ok":true,"text":"abcd"}),
     );
     assert_eq!(line.as_deref(), Some("[colibri] tool files.read ok chars=4"));
+
+    let steered = colibri_rust::console::status_line_for_event(
+        "steered",
+        &serde_json::json!({"skipped": 2, "chars": 11}),
+    );
+    assert_eq!(
+        steered.as_deref(),
+        Some("[colibri] steered skipped=2 chars=11")
+    );
+}
+
+#[test]
+fn steering_skip_result_constant_matches_python() {
+    assert_eq!(
+        SKIPPED_TOOL_RESULT,
+        "Skipped due to queued user message."
+    );
+}
+
+#[test]
+fn format_steering_ack_matches_python() {
+    assert_eq!(
+        format_steering_ack(2, "别用 rm"),
+        "已改方向，跳过剩余 2 个工具\n改：别用 rm"
+    );
+    assert_eq!(
+        format_steering_ack(0, "  "),
+        "已改方向，跳过剩余 0 个工具"
+    );
+
+    let text = "一二三四五六七八九十一二三四五六七八九十多余";
+    let ack = format_steering_ack(1, text);
+    assert!(ack.starts_with("已改方向，跳过剩余 1 个工具\n改："));
+    let preview = ack.split_once('\n').unwrap().1.strip_prefix("改：").unwrap();
+    assert!(preview.ends_with('…'));
+    assert_eq!(preview.trim_end_matches('…').chars().count(), 20);
+}
+
+#[test]
+fn steer_rejected_when_turn_inactive() {
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let session = AgentSession::new(config, Box::new(FakeModel::new()));
+
+    assert!(!session.steer("change plan"));
+    assert!(!session.is_turn_active());
+}
+
+#[test]
+fn steer_rejected_while_permission_pending() {
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let session = AgentSession::new(config, Box::new(FakeModel::new()));
+    let handle = session.steer_handle();
+    handle.set_turn_active_for_test(true);
+    handle.set_permission_pending_for_test(true);
+
+    assert!(!session.steer("change plan"));
+    assert!(session.is_permission_pending());
+}
+
+#[test]
+fn steer_skips_remaining_tools_and_injects_user_message() {
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    config.tools.default_permission = "allow".to_string();
+
+    let acks = Arc::new(Mutex::new(Vec::new()));
+    let acks_for_notifier = Arc::clone(&acks);
+    let mut session = AgentSession::new(config, Box::new(TwoToolsThenTextModel::new()))
+        .with_steer_notifier(Arc::new(move |text| {
+            acks_for_notifier.lock().unwrap().push(text);
+        }));
+
+    let handle = session.steer_handle();
+    let steered_once = Arc::new(AtomicBool::new(false));
+    let steered_flag = Arc::clone(&steered_once);
+    session = session.with_status_callback(
+        true,
+        Arc::new(move |line| {
+            if line.contains("tool files.list") && line.contains(" ok ") && !steered_flag.swap(true, Ordering::SeqCst)
+            {
+                assert!(handle.steer("change plan"));
+            }
+        }),
+    );
+
+    let response = session.submit("do work").unwrap();
+
+    assert_eq!(response.text, "steered-ok");
+    assert!(session.messages.iter().any(|message| {
+        message.role == "tool"
+            && message.tool_call_id.as_deref() == Some("call_b")
+            && message.content.contains(SKIPPED_TOOL_RESULT)
+    }));
+    assert!(session
+        .messages
+        .iter()
+        .any(|message| message.role == "user" && message.content == "change plan"));
+    assert_eq!(
+        *acks.lock().unwrap(),
+        vec![format_steering_ack(1, "change plan")]
+    );
+    assert!(!session.is_turn_active());
+}
+
+#[test]
+fn steer_during_text_only_complete_is_applied() {
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    config.tools.default_permission = "allow".to_string();
+
+    let acks = Arc::new(Mutex::new(Vec::new()));
+    let acks_for_notifier = Arc::clone(&acks);
+    let handle_slot: Arc<Mutex<Option<SteerHandle>>> = Arc::new(Mutex::new(None));
+    let model = SteerDuringTextOnlyModel {
+        handle_slot: Arc::clone(&handle_slot),
+        calls: 0,
+    };
+    let mut session = AgentSession::new(config, Box::new(model)).with_steer_notifier(Arc::new(
+        move |text| {
+            acks_for_notifier.lock().unwrap().push(text);
+        },
+    ));
+    *handle_slot.lock().unwrap() = Some(session.steer_handle());
+
+    let response = session.submit("do work").unwrap();
+
+    assert_eq!(response.text, "steered-ok");
+    assert!(session
+        .messages
+        .iter()
+        .any(|message| message.role == "user" && message.content == "change plan"));
+    assert_eq!(
+        *acks.lock().unwrap(),
+        vec![format_steering_ack(0, "change plan")]
+    );
+    assert!(!session.is_turn_active());
+}
+
+#[test]
+fn steering_queue_empty_after_normal_submit() {
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(config, Box::new(PlainTextModel));
+
+    let response = session.submit("hello").unwrap();
+
+    assert_eq!(response.text, "done");
+    assert!(!session.is_turn_active());
+    assert!(session.steer_handle().drain_one_for_test().is_none());
+}
+
+#[test]
+fn gateway_get_existing_does_not_create_session() {
+    let mut config = AgentConfig::default();
+    config.gateway.max_sessions = 2;
+    config.gateway.session_idle_seconds = 0;
+    let mut cache = GatewaySessionCache::new(config).unwrap();
+
+    assert!(cache.get_existing("weixin:user-1").is_none());
+    assert!(cache.steer_handle_for("weixin:user-1").is_none());
+    assert!(!cache.try_steer("weixin:user-1", "change plan"));
+
+    cache.get_or_create("weixin:user-1").unwrap();
+    assert!(cache.get_existing("weixin:user-1").is_some());
+    assert!(cache.steer_handle_for("weixin:user-1").is_some());
+}
+
+#[test]
+fn gateway_try_steer_enqueues_when_turn_active() {
+    let mut config = AgentConfig::default();
+    config.gateway.max_sessions = 2;
+    config.gateway.session_idle_seconds = 0;
+    let mut cache = GatewaySessionCache::new(config).unwrap();
+    cache.get_or_create("weixin:user-1").unwrap();
+    let handle = cache.steer_handle_for("weixin:user-1").unwrap();
+    handle.set_turn_active_for_test(true);
+
+    assert!(cache.try_steer("weixin:user-1", "change plan"));
+    assert_eq!(
+        handle.drain_one_for_test().as_deref(),
+        Some("change plan")
+    );
+}
+
+#[test]
+fn gateway_try_steer_works_while_session_taken_for_submit() {
+    let mut config = AgentConfig::default();
+    config.gateway.max_sessions = 2;
+    config.gateway.session_idle_seconds = 0;
+    let mut cache = GatewaySessionCache::new(config).unwrap();
+    let session = cache
+        .take_or_create_with_metadata_and_media_sender(
+            "weixin:user-1",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    let handle = cache.steer_handle_for("weixin:user-1").unwrap();
+    handle.set_turn_active_for_test(true);
+
+    // Receive can steer without holding the session or blocking on submit.
+    assert!(cache.try_steer("weixin:user-1", "change plan"));
+    assert!(!cache.contains_key("weixin:user-1"));
+    assert_eq!(
+        handle.drain_one_for_test().as_deref(),
+        Some("change plan")
+    );
+
+    cache.put_back("weixin:user-1", session);
+    assert!(cache.contains_key("weixin:user-1"));
+}
+
+#[test]
+fn steering_pump_forwards_line_to_steer() {
+    let handle = SteerHandle::new(Arc::new(SteeringState::new()));
+    handle.set_turn_active_for_test(true);
+    let stop = AtomicBool::new(false);
+    let lines = Mutex::new(vec![Some("change plan".to_string()), None]);
+
+    run_steering_pump(
+        &handle,
+        &stop,
+        |_| {
+            let mut lines = lines.lock().unwrap();
+            if lines.is_empty() {
+                stop.store(true, Ordering::SeqCst);
+                return None;
+            }
+            let next = lines.remove(0);
+            if next.is_none() {
+                stop.store(true, Ordering::SeqCst);
+            }
+            next
+        },
+        || {},
+        |_| {},
+    );
+
+    assert_eq!(
+        handle.drain_one_for_test().as_deref(),
+        Some("change plan")
+    );
+}
+
+#[test]
+fn steering_pump_skips_read_while_permission_pending() {
+    let handle = SteerHandle::new(Arc::new(SteeringState::new()));
+    handle.set_turn_active_for_test(true);
+    handle.set_permission_pending_for_test(true);
+    let stop = AtomicBool::new(false);
+    let read_calls = Mutex::new(Vec::new());
+    let sleeps = Mutex::new(Vec::new());
+
+    run_steering_pump(
+        &handle,
+        &stop,
+        |timeout| {
+            read_calls.lock().unwrap().push(timeout);
+            stop.store(true, Ordering::SeqCst);
+            Some("should-not-reach".to_string())
+        },
+        || {},
+        |duration| {
+            sleeps.lock().unwrap().push(duration);
+            if sleeps.lock().unwrap().len() >= 2 {
+                handle.set_permission_pending_for_test(false);
+            }
+        },
+    );
+
+    assert_eq!(sleeps.lock().unwrap().len(), 2);
+    assert_eq!(*read_calls.lock().unwrap(), vec![0.2]);
+    assert_eq!(
+        handle.drain_one_for_test().as_deref(),
+        Some("should-not-reach")
+    );
+}
+
+#[test]
+fn steering_pump_notifies_permission_pending_once() {
+    let handle = SteerHandle::new(Arc::new(SteeringState::new()));
+    handle.set_turn_active_for_test(true);
+    let stop = AtomicBool::new(false);
+    let notifies = Mutex::new(0usize);
+    let sleep_count = Mutex::new(0usize);
+
+    run_steering_pump(
+        &handle,
+        &stop,
+        |_| {
+            handle.set_permission_pending_for_test(true);
+            Some("steer-me".to_string())
+        },
+        || {
+            *notifies.lock().unwrap() += 1;
+        },
+        |_| {
+            let mut count = sleep_count.lock().unwrap();
+            *count += 1;
+            if *count >= 3 {
+                stop.store(true, Ordering::SeqCst);
+            }
+        },
+    );
+
+    assert_eq!(*notifies.lock().unwrap(), 1);
+    assert!(*sleep_count.lock().unwrap() >= 3);
+    assert!(handle.drain_one_for_test().is_none());
+}
+
+#[test]
+fn try_read_line_returns_none_when_stdin_not_tty() {
+    // In cargo test, process stdin is typically not a TTY.
+    assert!(try_read_line(0.05, None).is_none());
 }
 
 #[test]
@@ -2448,6 +2771,102 @@ impl ModelClient for AlwaysToolModel {
                     map
                 },
             }],
+        })
+    }
+}
+
+struct PlainTextModel;
+
+impl ModelClient for PlainTextModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "done".to_string(),
+            tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct TwoToolsThenTextModel {
+    calls: usize,
+}
+
+impl TwoToolsThenTextModel {
+    fn new() -> Self {
+        Self { calls: 0 }
+    }
+}
+
+impl ModelClient for TwoToolsThenTextModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            let mut args = serde_json::Map::new();
+            args.insert("path".to_string(), serde_json::Value::String(".".to_string()));
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_a".to_string(),
+                        name: "files.list".to_string(),
+                        arguments: args.clone(),
+                    },
+                    ToolCall {
+                        id: "call_b".to_string(),
+                        name: "files.list".to_string(),
+                        arguments: args,
+                    },
+                ],
+            });
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "steered-ok".to_string(),
+            tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct SteerDuringTextOnlyModel {
+    handle_slot: Arc<Mutex<Option<SteerHandle>>>,
+    calls: usize,
+}
+
+impl ModelClient for SteerDuringTextOnlyModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            let handle = self
+                .handle_slot
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("steer handle");
+            assert!(handle.steer("change plan"));
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "almost done".to_string(),
+                tool_calls: Vec::new(),
+            });
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "steered-ok".to_string(),
+            tool_calls: Vec::new(),
         })
     }
 }

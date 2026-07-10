@@ -12,6 +12,7 @@ pub mod repl_input;
 pub mod session;
 pub mod session_history;
 pub mod skills;
+pub mod steering;
 pub mod terminal_qr;
 pub mod tools;
 pub mod transcript;

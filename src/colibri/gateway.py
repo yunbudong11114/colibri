@@ -81,6 +81,13 @@ class GatewaySessionCache:
             self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
             return session
 
+    def get_existing(self, key: str) -> AgentSession | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            return entry.session
+
     def touch(self, key: str) -> None:
         with self._lock:
             entry = self._entries.get(key)
@@ -148,6 +155,13 @@ class GatewayRunner:
             history_loader=history_loader,
         )
 
+    def try_steer(self, channel_name: str, sender_id: str, text: str) -> bool:
+        key = f"{channel_name}:{sender_id}"
+        session = self.sessions.get_existing(key)
+        if session is None:
+            return False
+        return session.steer(text)
+
     def run(self, stop_requested: Callable[[], bool] = lambda: False) -> None:
         channels = self._build_channels()
         if not channels:
@@ -184,8 +198,12 @@ class GatewayRunner:
         context: ChannelContext,
         errors: queue.Queue[BaseException],
     ) -> None:
+        channel_context = ChannelContext(
+            stop_requested=context.stop_requested,
+            try_steer=lambda sender_id, text, name=channel.name: self.try_steer(name, sender_id, text),
+        )
         try:
-            channel.run(lambda message, ch=channel: self.handle_message(ch, message), context)
+            channel.run(lambda message, ch=channel: self.handle_message(ch, message), channel_context)
         except BaseException as error:
             errors.put(error)
 
@@ -208,6 +226,12 @@ class GatewayRunner:
             },
             media_sender=lambda media, ch=channel, recipient=message.sender_id: ch.send_media(recipient, media),
         )
+        session.steer_notifier = (
+            lambda ack, ch=channel, recipient=message.sender_id: ch.send_text(recipient, ack)
+        )
+        if session.is_turn_active():
+            if session.steer(message.text):
+                return ""
         response = session.submit(message.text, media=message.media)
         self.sessions.touch(key)
         return response.text

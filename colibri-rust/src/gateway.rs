@@ -10,6 +10,7 @@ use crate::messages::MediaPart;
 use crate::model::{build_model, ModelClient};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
+use crate::steering::SteerHandle;
 use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
 
 #[derive(Clone, Debug)]
@@ -33,6 +34,9 @@ pub struct GatewaySessionCache {
     max_sessions: usize,
     idle_seconds: u64,
     entries: BTreeMap<String, GatewaySessionEntry>,
+    /// Cloned independently of session ownership so receive can steer while
+    /// the worker holds the session outside this cache mutex during submit.
+    steer_handles: BTreeMap<String, SteerHandle>,
 }
 
 struct GatewaySessionEntry {
@@ -72,6 +76,7 @@ impl GatewaySessionCache {
             transcript,
             history_loader,
             entries: BTreeMap::new(),
+            steer_handles: BTreeMap::new(),
         })
     }
 
@@ -95,10 +100,14 @@ impl GatewaySessionCache {
     ) -> Result<&mut AgentSession, String> {
         self.evict_idle();
         if self.entries.contains_key(key) {
-            let entry = self.entries.get_mut(key).unwrap();
-            entry.last_activity_at = Instant::now();
-            entry.session.set_media_sender(media_sender);
-            return Ok(&mut entry.session);
+            let handle = {
+                let entry = self.entries.get_mut(key).unwrap();
+                entry.last_activity_at = Instant::now();
+                entry.session.set_media_sender(media_sender);
+                entry.session.steer_handle()
+            };
+            self.steer_handles.insert(key.to_string(), handle);
+            return Ok(&mut self.entries.get_mut(key).unwrap().session);
         }
         while self.entries.len() >= self.max_sessions {
             self.evict_oldest();
@@ -113,6 +122,8 @@ impl GatewaySessionCache {
             let loader = Arc::clone(loader);
             session = session.with_history_loader(Box::new(move || loader()));
         }
+        self.steer_handles
+            .insert(key.to_string(), session.steer_handle());
         self.entries.insert(
             key.to_string(),
             GatewaySessionEntry {
@@ -123,6 +134,72 @@ impl GatewaySessionCache {
         let session = &mut self.entries.get_mut(key).unwrap().session;
         session.set_media_sender(media_sender);
         Ok(session)
+    }
+
+    /// Look up an existing session without creating one (Python `get_existing`).
+    pub fn get_existing(&mut self, key: &str) -> Option<&mut AgentSession> {
+        self.entries.get_mut(key).map(|entry| &mut entry.session)
+    }
+
+    /// Clone the steer handle for a session key, if one has been registered.
+    /// Safe to call while the worker owns the session outside this cache.
+    pub fn steer_handle_for(&self, key: &str) -> Option<SteerHandle> {
+        self.steer_handles.get(key).cloned()
+    }
+
+    /// Route text to an active turn without creating a session.
+    pub fn try_steer(&self, key: &str, text: &str) -> bool {
+        self.steer_handle_for(key)
+            .map(|handle| handle.steer(text))
+            .unwrap_or(false)
+    }
+
+    /// Take ownership of a session for submit so the cache mutex is not held
+    /// during the turn. Steer handles remain registered for receive-loop try_steer.
+    pub fn take_or_create_with_metadata_and_media_sender(
+        &mut self,
+        key: &str,
+        metadata: BTreeMap<String, String>,
+        media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
+    ) -> Result<AgentSession, String> {
+        self.evict_idle();
+        if let Some(mut entry) = self.entries.remove(key) {
+            entry.last_activity_at = Instant::now();
+            entry.session.set_media_sender(media_sender);
+            self.steer_handles
+                .insert(key.to_string(), entry.session.steer_handle());
+            return Ok(entry.session);
+        }
+        while self.entries.len() >= self.max_sessions {
+            self.evict_oldest();
+        }
+        let mut session = AgentSession::from_shared(
+            Arc::clone(&self.config),
+            Arc::clone(&self.model),
+            self.transcript.as_ref().map(Arc::clone),
+            metadata,
+        );
+        if let Some(loader) = &self.history_loader {
+            let loader = Arc::clone(loader);
+            session = session.with_history_loader(Box::new(move || loader()));
+        }
+        session.set_media_sender(media_sender);
+        self.steer_handles
+            .insert(key.to_string(), session.steer_handle());
+        Ok(session)
+    }
+
+    /// Return a session taken via `take_or_create_*` to the cache.
+    pub fn put_back(&mut self, key: &str, session: AgentSession) {
+        self.steer_handles
+            .insert(key.to_string(), session.steer_handle());
+        self.entries.insert(
+            key.to_string(),
+            GatewaySessionEntry {
+                session,
+                last_activity_at: Instant::now(),
+            },
+        );
     }
 
     pub fn touch(&mut self, key: &str) {
@@ -148,8 +225,16 @@ impl GatewaySessionCache {
             return;
         }
         let idle_seconds = self.idle_seconds;
-        self.entries
-            .retain(|_, entry| entry.last_activity_at.elapsed().as_secs() < idle_seconds);
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.last_activity_at.elapsed().as_secs() >= idle_seconds)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.entries.remove(&key);
+            self.steer_handles.remove(&key);
+        }
     }
 
     fn evict_oldest(&mut self) {
@@ -162,6 +247,7 @@ impl GatewaySessionCache {
             return;
         };
         self.entries.remove(&key);
+        self.steer_handles.remove(&key);
     }
 }
 
