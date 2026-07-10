@@ -1,4 +1,5 @@
 from colibri.config import AgentConfig
+from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
 from colibri.session import SYSTEM_PROMPT, AgentSession
@@ -218,6 +219,64 @@ def test_reset_clears_messages_and_summary():
 
     assert session.messages == []
     assert session.summary == ""
+
+
+def test_session_sends_media_result_through_media_sender(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello", encoding="utf-8")
+    sent: list[MediaPart] = []
+    config = AgentConfig.default().with_overrides(
+        {
+            "files": {"roots": [str(tmp_path)]},
+            "tools": {"default_permission": "allow", "max_result_chars": 1000},
+            "session": {"max_tool_rounds": 3},
+        }
+    )
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("files.send", {"path": "report.txt", "caption": "请看"}),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        media_sender=sent.append,
+    )
+
+    response = session.submit("send report")
+
+    assert response.text == "final: Sent file to channel: report.txt"
+    assert sent == [
+        MediaPart(
+            type="file",
+            path=path.resolve(),
+            filename="report.txt",
+            content_type="text/plain",
+            caption="请看",
+        )
+    ]
+
+
+def test_session_turns_media_sender_failure_into_tool_error(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello", encoding="utf-8")
+    config = AgentConfig.default().with_overrides(
+        {
+            "files": {"roots": [str(tmp_path)]},
+            "tools": {"default_permission": "allow", "max_result_chars": 1000},
+            "session": {"max_tool_rounds": 3},
+        }
+    )
+
+    def fail_send(part: MediaPart) -> None:
+        raise RuntimeError("send failed")
+
+    session = AgentSession(
+        config=config,
+        model=ScriptedToolThenFinalModel("files.send", {"path": "report.txt"}),
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        media_sender=fail_send,
+    )
+
+    response = session.submit("send report")
+
+    assert response.text == "final: media_send_error: send failed"
 
 
 def test_submit_executes_tool_call_and_returns_final_text(tmp_path):

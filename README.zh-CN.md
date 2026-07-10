@@ -66,6 +66,24 @@ uv run python -m colibri.cli diagnostics
 
 如果这个文件不存在，就使用内置默认配置。显式传入的 `--config` 优先级最高。
 
+## Rust 复刻版
+
+Cargo 版本位于 `colibri-rust/`，目标是和 Python 运行时保持配置项、配置方式和可观察行为一致，同时保持低内存依赖。Rust 版使用 `toml`、`serde_json`、`shell-words` 这类聚焦的小型 crate；HTTP 相关能力继续调用系统 `curl`，避免引入大型异步网络栈。
+
+```bash
+/opt/homebrew/bin/uv run python -m pytest
+cargo test --manifest-path colibri-rust/Cargo.toml
+cargo build --release --manifest-path colibri-rust/Cargo.toml
+./colibri-rust/target/release/colibri-rust ask "hello"
+./colibri-rust/target/release/colibri-rust diagnostics
+```
+
+Rust 版支持本地 CLI、fake model、OpenAI-compatible tool-calling payload、Markdown 记忆、transcript、文件/Shell/记忆/技能/Baidu 网页搜索工具、微信 QR auth/API 和 gateway 进程管理。配置解析使用和 Python `tomllib` 一致的 TOML 语义，包括 `[mcp]` 和嵌套 `[channels.weixin]`。`shell.run` 和 Python 一样会把 shell 风格引号解析成 argv 后直接执行程序，不通过 `sh -c`。微信 auth 会为支持的 payload 渲染同样的终端块状 QR。Gateway 前台处理会按 sender 维护独立 session，并在超过 `gateway.max_sessions` 时淘汰最旧 session。
+
+Rust 测试集基于 Python 全量 unit 测试集建立覆盖映射。`colibri-rust/tests/parity.rs` 会列出每个 Python `tests/unit/test_*.py` 文件对应的 Rust 覆盖，并直接对比 Python/Rust CLI 在 `ask`、`diagnostics`、`gateway` usage 等确定性命令上的退出码、stdout、stderr。Rust runtime 测试覆盖配置、工具、权限、记忆、transcript、模型、gateway、网页搜索、技能和微信 auth 的等价行为。
+
+Rust 权限边界和 Python 保持一致：只读工具默认允许，`tools.default_permission = "deny"` 拒绝工具调用，`tools.default_permission = "allow"` 允许工具调用，并读取 `.colibri/permissions.toml` 中的项目授权。文件权限支持 `~` 展开、工作区外文件主体，以及对简单 `shell.run` 重定向或 `tee` 写入目标的识别。CLI `ask` 和 `repl` 使用与 Python 兼容的交互式权限提示，支持单次、session、可执行文件 session、项目级和拒绝选择。
+
 示例配置在：
 
 ```text

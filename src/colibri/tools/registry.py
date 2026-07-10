@@ -8,6 +8,7 @@ from colibri.tools.base import Tool, ToolContext, ToolResult
 from colibri.tools.builtin import (
     FilesListTool,
     FilesReadTool,
+    FilesSendTool,
     FilesWriteTool,
     MemoryListTool,
     MemoryReadTool,
@@ -29,7 +30,7 @@ class ToolRegistry:
         tools: list[Tool] = []
         enabled = set(config.tools.enabled)
         if "files" in enabled:
-            tools.extend([FilesListTool(), FilesReadTool(), FilesWriteTool()])
+            tools.extend([FilesListTool(), FilesReadTool(), FilesWriteTool(), FilesSendTool()])
         if "memory" in enabled:
             tools.extend([MemoryListTool(), MemoryReadTool(), MemorySearchTool(), MemoryWriteTool()])
         if "shell" in enabled:

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from colibri.config import AgentConfig
 from colibri.messages import ToolCall
+from colibri.media import MediaPart
 from colibri.tools.base import ToolContext
 from colibri.tools.builtin import ShellRunTool
 from colibri.tools.registry import ToolRegistry
@@ -29,6 +30,7 @@ def test_registry_exposes_enabled_builtin_tool_specs(tmp_path):
         "files.list",
         "files.read",
         "files.write",
+        "files.send",
         "shell.run",
         "memory.list",
         "memory.read",
@@ -131,6 +133,53 @@ def test_files_write_rejects_disallowed_file(tmp_path):
     assert not result.ok
     assert result.error_type == "permission_denied"
     assert not (outside / "note.txt").exists()
+
+
+def test_files_send_returns_media_result_for_allowed_file(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello", encoding="utf-8")
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path, media_sender=lambda part: None)
+
+    result = registry.run(
+        ToolCall(id="1", name="files.send", arguments={"path": "report.txt", "caption": "给你文件"}),
+        context,
+    )
+
+    assert result.ok
+    assert result.media == MediaPart(
+        type="file",
+        path=path.resolve(),
+        filename="report.txt",
+        content_type="text/plain",
+        caption="给你文件",
+    )
+    assert result.text == "Sent file to channel: report.txt"
+
+
+def test_files_send_requires_channel_media_sender(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello", encoding="utf-8")
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(ToolCall(id="1", name="files.send", arguments={"path": "report.txt"}), context)
+
+    assert not result.ok
+    assert result.error_type == "media_unavailable"
+
+
+def test_files_send_rejects_directory(tmp_path):
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path, media_sender=lambda part: None)
+
+    result = registry.run(ToolCall(id="1", name="files.send", arguments={"path": "."}), context)
+
+    assert not result.ok
+    assert result.error_type == "not_file"
 
 
 def test_shell_run_executes_command_after_permission_phase(tmp_path):

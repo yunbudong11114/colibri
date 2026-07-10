@@ -151,7 +151,10 @@ The underlying writer is shared and thread-safe so multiple channel workers do n
 5. Session returns assistant text.
 6. Channel sends text through `ilink/bot/sendmessage`.
 
-The first version ignores image, voice, file, video, and group media payloads. It may surface a short unsupported-media message later.
+The current gateway text milestone ignores image, voice, file, video, and group
+media payloads. The follow-up design for sending local files to Weixin and
+receiving Weixin files/images is recorded in
+`2026-07-09-colibri-weixin-media-design.md`.
 
 ## Weixin Permission Confirmation
 

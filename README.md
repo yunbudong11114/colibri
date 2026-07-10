@@ -59,6 +59,31 @@ uv run python -m colibri.cli diagnostics
 
 The runtime itself is standard-library only. `pytest` is used for development tests.
 
+## Rust Port
+
+A Cargo-based Rust port lives in `colibri-rust/`. Its target is configuration and behavior parity with the Python runtime while keeping memory use low. It uses focused parsing crates such as `toml` and `serde_json` instead of a large async/network stack; HTTP-backed features use the system `curl` executable.
+
+```bash
+/opt/homebrew/bin/uv run python -m pytest
+cargo test --manifest-path colibri-rust/Cargo.toml
+cargo build --release --manifest-path colibri-rust/Cargo.toml
+./colibri-rust/target/release/colibri-rust ask "hello"
+./colibri-rust/target/release/colibri-rust diagnostics
+./colibri-rust/target/release/colibri-rust gateway status
+```
+
+If `--config` is omitted, the Rust binary follows the Python runtime and reads `~/.colibri/config.toml` when it exists; otherwise it uses the built-in fake model defaults. For an isolated local smoke test:
+
+```bash
+env HOME=/tmp/colibri-rust-smoke ./colibri-rust/target/release/colibri-rust ask "hello"
+```
+
+Rust v1 supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through the system `curl` executable, markdown memory, transcripts, built-in local tools for files, shell, memory, skills, and Baidu web search, plus Weixin QR auth/API plumbing and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[mcp]` and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by parsing shell-like quoting into argv and running the executable directly instead of through `sh -c`. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling keeps sender-scoped sessions and evicts the oldest session at `gateway.max_sessions`. MCP server startup remains in the Python runtime for now.
+
+The Rust test suite is derived from the Python unit suite. `colibri-rust/tests/parity.rs` maps every Python `tests/unit/test_*.py` file to Rust coverage and directly compares Python/Rust CLI output for deterministic commands such as `ask`, `diagnostics`, and `gateway` usage. Runtime tests cover the matching Rust library behavior for config, tools, permissions, memory, transcript, models, gateway, web search, skills, and Weixin auth.
+
+The Rust session applies the same default safety boundary: read-only tools run automatically, `tools.default_permission = "deny"` rejects tool calls, `tools.default_permission = "allow"` allows them, and project grants in `.colibri/permissions.toml` are honored. File permissions support `~` expansion, out-of-root file subjects, and simple `shell.run` write-target detection for redirection or `tee` commands. CLI `ask` and `repl` use Python-compatible interactive permission prompts for once, session, executable-session, project, and deny choices.
+
 ## Configuration
 
 If `--config` is omitted, Colibri loads:

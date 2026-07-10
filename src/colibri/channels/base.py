@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+from colibri.media import MediaPart
+
 
 @dataclass(frozen=True)
 class InboundMessage:
@@ -24,4 +26,7 @@ class Channel(Protocol):
         ...
 
     def send_text(self, recipient_id: str, text: str) -> None:
+        ...
+
+    def send_media(self, recipient_id: str, media: MediaPart) -> None:
         ...

@@ -10,6 +10,7 @@ from typing import Callable
 from colibri.channels.base import Channel, ChannelContext, InboundMessage
 from colibri.channels.weixin import WeixinChannel, WeixinPermissionPrompter
 from colibri.config import AgentConfig, ConfigError
+from colibri.media import MediaPart
 from colibri.model.base import ModelClient
 from colibri.session import AgentSession
 from colibri.tools.permissions import PermissionPolicy
@@ -49,6 +50,7 @@ class GatewaySessionCache:
         key: str,
         policy: PermissionPolicy,
         transcript_metadata: dict[str, str] | None = None,
+        media_sender: Callable[[MediaPart], None] | None = None,
     ) -> AgentSession:
         with self._lock:
             self._evict_idle_locked()
@@ -56,6 +58,7 @@ class GatewaySessionCache:
             entry = self._entries.get(key)
             if entry is not None:
                 entry.last_activity_at = now
+                entry.session.media_sender = media_sender
                 return entry.session
 
             while len(self._entries) >= self.max_sessions:
@@ -68,6 +71,7 @@ class GatewaySessionCache:
                 transcript=ScopedTranscriptWriter(self.transcript, transcript_metadata or {"session_key": key})
                 if self.transcript is not None
                 else None,
+                media_sender=media_sender,
             )
             self._entries[key] = GatewaySessionEntry(session=session, last_activity_at=now)
             return session
@@ -184,6 +188,7 @@ class GatewayRunner:
                 "sender_id": message.sender_id,
                 "session_key": key,
             },
+            media_sender=lambda media, ch=channel, recipient=message.sender_id: ch.send_media(recipient, media),
         )
         response = session.submit(message.text)
         self.sessions.touch(key)

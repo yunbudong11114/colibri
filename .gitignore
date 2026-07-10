@@ -5,6 +5,7 @@ __pycache__/
 .superpowers/
 *.egg-info/
 .colibri/
+colibri-rust/target/
 docs/reference/claude-code-agent-core-analysis.md
 docs/reference/picoclaw-project-research.md
 docs/reference/zeroclaw-project-research.md

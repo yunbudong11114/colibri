@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from time import monotonic
+from typing import Callable
 
 from colibri.config import AgentConfig
 from colibri.context import (
@@ -16,6 +17,7 @@ from colibri.context import (
 )
 from colibri.memory import MemoryContext
 from colibri.messages import AgentResponse, Message, ModelLimits, ToolCall
+from colibri.media import MediaPart
 from colibri.model.base import ModelClient
 from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext, ToolResult
@@ -37,6 +39,7 @@ class AgentSession:
     tools: ToolRegistry | None = None
     permission_policy: PermissionPolicy | None = None
     transcript: TranscriptSink | None = None
+    media_sender: Callable[[MediaPart], None] | None = None
     messages: list[Message] = field(default_factory=list)
     summary: str = ""
     started_at: float = field(default_factory=monotonic)
@@ -52,7 +55,7 @@ class AgentSession:
         if self.permission_policy is None:
             self.permission_policy = PermissionPolicy.from_config(self.config, cwd=registry.cwd)
         policy = self.permission_policy
-        context = ToolContext(config=self.config, cwd=registry.cwd)
+        context = ToolContext(config=self.config, cwd=registry.cwd, media_sender=self.media_sender)
         memory_result = MemoryContext(self.config).load()
         if memory_result.text:
             self._write_transcript(
@@ -136,6 +139,7 @@ class AgentSession:
                             text=_denied_tool_text(call),
                             error_type="permission_denied",
                         )
+                result = self._send_media_result_if_needed(result)
                 self._write_transcript(
                     "tool_result",
                     {
@@ -145,6 +149,7 @@ class AgentSession:
                         "error_type": result.error_type,
                         "text": self._bound_text(result.text, self.config.tools.max_result_chars),
                         "truncated": result.truncated,
+                        "media": _media_payload(result.media),
                     },
                 )
                 self.messages.append(
@@ -238,6 +243,21 @@ class AgentSession:
             return result.text
         return f"{result.error_type or 'tool_error'}: {result.text}"
 
+    def _send_media_result_if_needed(self, result: ToolResult) -> ToolResult:
+        if not result.ok or result.media is None:
+            return result
+        if self.media_sender is None:
+            return ToolResult(
+                ok=False,
+                text="No active channel can send files in this session",
+                error_type="media_unavailable",
+            )
+        try:
+            self.media_sender(result.media)
+        except Exception as error:
+            return ToolResult(ok=False, text=str(error), error_type="media_send_error")
+        return result
+
     def _write_transcript(self, event_type: str, payload: dict) -> None:
         if self.transcript is not None:
             self.transcript.write(event_type, payload)
@@ -273,6 +293,18 @@ def _denied_tool_text(call: ToolCall) -> str:
         if isinstance(command, str) and command.strip():
             return f"User denied shell.run: {command.strip()}"
     return f"User denied {call.name}"
+
+
+def _media_payload(media: MediaPart | None) -> dict | None:
+    if media is None:
+        return None
+    return {
+        "type": media.type,
+        "path": str(media.path),
+        "filename": media.filename,
+        "content_type": media.content_type,
+        "caption": media.caption,
+    }
 
 
 def _retained_messages_after_compact(messages: list[Message], recent_limit: int) -> list[Message]:

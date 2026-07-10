@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from colibri.config import AgentConfig
+from colibri.media import MediaPart
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class ToolResult:
     text: str
     error_type: str | None = None
     truncated: bool = False
+    media: MediaPart | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class ToolContext:
     config: AgentConfig
     cwd: Path
     allowed_file_roots: frozenset[str] = frozenset()
+    media_sender: Callable[[MediaPart], None] | None = None
 
 
 class Tool(Protocol):

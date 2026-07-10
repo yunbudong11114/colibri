@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Lightweight Python agent runtime for CardputerZero"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pycryptodome>=3.20",
+]
 
 [dependency-groups]
 dev = [

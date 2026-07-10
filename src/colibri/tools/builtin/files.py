@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import mimetypes
 from typing import Any
 
+from colibri.media import MediaPart
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_text
 
 
@@ -143,3 +145,61 @@ class FilesWriteTool:
         except OSError as error:
             return ToolResult(ok=False, text=str(error), error_type="execution_error")
         return ToolResult(ok=True, text=f"Wrote {len(content.encode('utf-8'))} bytes to {path}")
+
+
+class FilesSendTool:
+    spec = ToolSpec(
+        name="files.send",
+        description=(
+            "Send a local file to the current chat channel. This can expose host files outside Colibri, "
+            "so use it only when the user asked to send a file."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "caption": {"type": "string"},
+            },
+            "required": ["path"],
+        },
+        read_only=False,
+    )
+
+    def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        if context.media_sender is None:
+            return ToolResult(
+                ok=False,
+                text="No active channel can send files in this session",
+                error_type="media_unavailable",
+            )
+        raw_path = _path_argument(arguments)
+        if raw_path is None:
+            return ToolResult(ok=False, text="Missing path", error_type="invalid_arguments")
+        path = _resolve_allowed_path(raw_path, context)
+        if path is None:
+            return ToolResult(ok=False, text="Path is outside allowed roots", error_type="permission_denied")
+        if not path.exists():
+            return ToolResult(ok=False, text="Path does not exist", error_type="not_found")
+        if not path.is_file():
+            return ToolResult(ok=False, text="Path is not a file", error_type="not_file")
+
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        caption = arguments.get("caption")
+        media = MediaPart(
+            type=_media_type_for_content(content_type),
+            path=path,
+            filename=path.name,
+            content_type=content_type,
+            caption=caption if isinstance(caption, str) else "",
+        )
+        return ToolResult(ok=True, text=f"Sent file to channel: {path.name}", media=media)
+
+
+def _media_type_for_content(content_type: str) -> str:
+    if content_type.startswith("image/"):
+        return "image"
+    if content_type.startswith("video/"):
+        return "video"
+    if content_type.startswith("audio/"):
+        return "audio"
+    return "file"
