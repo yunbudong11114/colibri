@@ -1,0 +1,39 @@
+[Unit]
+Description=Colibri Weixin gateway
+Documentation=https://github.com/yunbudong11114/colibri
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Prefer a normal login user on CM0 / Pi OS (not root).
+User=pi
+Group=pi
+
+# Data home: transcripts, run/gateway.json, logs/gateway.log
+Environment=COLIBRI_HOME=/home/pi/.colibri
+# Optional secrets / overrides (API keys, etc.)
+EnvironmentFile=-/etc/colibri/colibri.env
+
+# Process cwd for shell/files relative paths and ./.colibri/permissions.toml
+WorkingDirectory=/home/pi
+
+# Foreground runner — required for systemd. Do NOT use `gateway start` here.
+# Rust binary example (adjust path after install/cross-compile):
+ExecStart=/home/pi/bin/colibri --config /home/pi/.colibri/config.toml gateway run
+# Python alternative:
+# ExecStart=/usr/bin/python -m colibri.cli --config /home/pi/.colibri/config.toml gateway run
+
+Restart=on-failure
+RestartSec=5
+
+# Weixin long-poll needs outbound HTTPS; no inbound listen port is required.
+# Ensure config has:
+#   [gateway]
+#   enabled_channels = ["weixin"]
+#   [channels.weixin]
+#   enabled = true
+#   token = "..."   # from `colibri auth weixin`
+
+[Install]
+WantedBy=multi-user.target

@@ -321,10 +321,12 @@ uv run python -m colibri.cli diagnostics
 
 ## Systemd
 
-An example service file is available:
+Example service files:
 
 ```text
 deploy/systemd/colibri-repl.service
+deploy/systemd/colibri-gateway.service
 ```
 
-For gateway deployments, use `gateway run` as the foreground command under a service manager.
+For gateway boot autostart, use `colibri-gateway.service` with foreground `gateway run` (not `gateway start`).  
+The Weixin channel does not listen on a local port; outbound HTTPS plus a configured `channels.weixin.token` is enough under systemd.

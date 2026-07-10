@@ -319,6 +319,8 @@ uv run python -m colibri.cli diagnostics
 
 ```text
 deploy/systemd/colibri-repl.service
+deploy/systemd/colibri-gateway.service
 ```
 
-Gateway 服务化部署时，建议让服务管理器执行前台命令 `gateway run`。
+Gateway 开机自启用 `colibri-gateway.service`：前台执行 `gateway run`（不要用 `gateway start`）。  
+微信 channel 不监听本地端口，只要设备能出网访问微信 API，且 `channels.weixin` 已配置 token，即可在 systemd 下正常收发。
