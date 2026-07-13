@@ -1,9 +1,11 @@
 # Colibri Local Skills Design
 
 Date: 2026-07-07
-Status: Implemented
+Status: Superseded for prompt injection by `2026-07-13-colibri-skills-catalog-design.md`
 Milestone: 7
 Scope: Local filesystem skills with progressive disclosure plus minimal built-in guidance skills
+
+> **Note (2026-07-13):** Keyword selection + full `SKILL.md` injection was replaced by catalog-only injection and `skill.read`. Path layout (`~/.colibri/skills/<name>/`) and `skill.run` remain.
 
 ## 1. Goal
 

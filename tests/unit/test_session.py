@@ -720,6 +720,7 @@ def test_session_writes_transcript_events(tmp_path):
     event_types = [event_type for event_type, _payload in transcript.events]
     assert event_types == [
         "user_message",
+        "skill_catalog",
         "assistant_message",
         "tool_call",
         "permission_decision",
@@ -807,22 +808,24 @@ def test_memory_write_uses_permission_confirmation(tmp_path):
 
 
 def test_skill_run_uses_permission_confirmation(tmp_path):
+    import sys
+
     skill_dir = tmp_path / "skills" / "release"
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Release Notes\n", encoding="utf-8")
     (scripts_dir / "render.py").write_text("print('rendered')\n", encoding="utf-8")
     (skill_dir / "skill.toml").write_text(
-        """
+        f"""
 [[commands]]
 name = "render"
-command = "python"
+command = "{sys.executable}"
 args = ["scripts/render.py"]
 read_only = false
 """.strip(),
         encoding="utf-8",
     )
-    config = AgentConfig.default().with_overrides({"skills": {"dirs": [str(tmp_path / "skills")]}})
+    config = AgentConfig.default().with_overrides({"skills": {"dir": str(tmp_path / "skills")}})
     prompter = FakePrompter(reply="yes")
     policy = PermissionPolicy.from_config(config, prompter=prompter)
     session = AgentSession(
@@ -880,11 +883,11 @@ def test_session_logs_memory_context_event(tmp_path):
     assert transcript.events[1] == ("memory_context", {"files": ["MEMORY.md", "USER.md"], "truncated": False})
 
 
-def test_session_injects_relevant_skill_without_persisting_it(tmp_path):
+def test_session_injects_skill_catalog_without_persisting_it(tmp_path):
     skill_dir = tmp_path / "skills" / "release"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Release Notes\n\nUse this when writing release notes.\n", encoding="utf-8")
-    config = AgentConfig.default().with_overrides({"skills": {"dirs": [str(tmp_path / "skills")]}})
+    config = AgentConfig.default().with_overrides({"skills": {"dir": str(tmp_path / "skills")}})
     transcript = MemoryTranscript()
     model = SkillAwareModel()
     session = AgentSession(config=config, model=model, transcript=transcript)
@@ -892,9 +895,14 @@ def test_session_injects_relevant_skill_without_persisting_it(tmp_path):
     response = session.submit("please write release notes")
 
     assert response.text == "skill used"
-    assert any(message.role == "system" and "Relevant skills:" in message.content for message in model.first_messages)
-    assert all("Relevant skills:" not in message.content for message in session.messages)
-    assert ("skill_recall", {"skills": ["release"], "truncated": False}) in transcript.events
+    assert any(message.role == "system" and "Available skills" in message.content for message in model.first_messages)
+    assert any(message.role == "system" and "release:" in message.content for message in model.first_messages)
+    assert all("Use this when writing release notes" not in message.content for message in model.first_messages)
+    assert all("Available skills" not in message.content for message in session.messages)
+    assert (
+        "skill_catalog",
+        {"skills": ["create-colibri-skill", "release"], "truncated": False},
+    ) in transcript.events
 
 
 class ScriptedToolModel:
@@ -1048,7 +1056,8 @@ class SkillAwareModel:
 
     def complete(self, messages, tools, system, limits):
         self.first_messages = list(messages)
-        assert any(message.role == "system" and "[release]" in message.content for message in messages)
+        assert any(message.role == "system" and "Available skills" in message.content for message in messages)
+        assert any(message.role == "system" and "release:" in message.content for message in messages)
         return ModelResponse(text="skill used")
 
 

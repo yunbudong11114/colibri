@@ -17,7 +17,7 @@ def build_diagnostics(
     cwd: Path | None = None,
 ) -> list[str]:
     memory_exists = config.memory.root.exists()
-    skills_found = len(SkillIndex.scan(config.skills.dirs).skills)
+    skills_found = len(SkillIndex.scan(config.skills.dir).skills)
     project_store = ProjectPermissionStore.for_cwd(cwd or Path.cwd())
     project_permissions = "present" if project_store.path.exists() else "missing"
     rss = rss_kb()
@@ -28,7 +28,7 @@ def build_diagnostics(
         f"config={config_path if config_path is not None else 'default'}",
         f"tools={','.join(config.tools.enabled)}",
         f"memory_root={config.memory.root} exists={str(memory_exists).lower()}",
-        f"skills_dirs={len(config.skills.dirs)} skills_found={skills_found}",
+        f"skills_dir={config.skills.dir} skills_found={skills_found}",
         f"project_permissions={project_permissions}",
         f"transcript={str(config.session.transcript).lower()} rss_kb={rss if rss is not None else 'unknown'}",
         (

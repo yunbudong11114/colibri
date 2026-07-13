@@ -34,8 +34,10 @@ def test_default_config_uses_small_device_limits():
     assert config.tools.max_result_chars == 32000
     assert "web" in config.tools.enabled
     assert "mcp" not in config.tools.enabled
-    assert config.skills.max_loaded == 3
+    assert config.skills.max_catalog == 32
+    assert config.skills.max_catalog_chars == 4000
     assert config.skills.max_instruction_chars == 8000
+    assert config.skills.dir.name == "skills"
     assert config.memory.max_search_results == 5
     assert config.memory.max_recall_chars == 6000
     assert not hasattr(config.memory, "max_recall_topics")
@@ -95,8 +97,9 @@ transcript_max_total_bytes = 7654321
 roots = ["~/notes", "/tmp"]
 
 [skills]
-dirs = ["~/skills"]
-max_loaded = 2
+dir = "~/skills"
+max_catalog = 2
+max_catalog_chars = 1500
 max_instruction_chars = 1234
 
 [console]
@@ -148,8 +151,9 @@ auth_timeout_seconds = 22
     assert config.session.transcript_max_total_bytes == 7654321
     assert config.files.roots[0].name == "notes"
     assert config.files.roots[1] == Path("/tmp")
-    assert config.skills.dirs[0].name == "skills"
-    assert config.skills.max_loaded == 2
+    assert config.skills.dir.name == "skills"
+    assert config.skills.max_catalog == 2
+    assert config.skills.max_catalog_chars == 1500
     assert config.skills.max_instruction_chars == 1234
     assert not config.console.status
     assert config.web_search.api_key == "search-key"

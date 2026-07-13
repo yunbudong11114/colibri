@@ -75,11 +75,13 @@ deny = ["rm", "shutdown", "reboot", "mkfs", "dd", "sudo"]
 roots = ["~/.colibri/workspace", "/tmp/colibri"]
 
 [skills]
-# 本地 skill 搜索目录。
-dirs = ["~/.colibri/skills"]
-# 每轮最多加载的相关 skill 数量。
-max_loaded = 3
-# 单个 skill 指令注入上下文前的最大字符数。
+# 本地 skill 目录（仅支持单一目录）。
+dir = "~/.colibri/skills"
+# 注入 prompt 的 skill catalog 最多条目数（含 builtin）。
+max_catalog = 32
+# skill catalog 系统消息最大字符数。
+max_catalog_chars = 4000
+# skill.read 返回的单个 skill 正文最大字符数。
 max_instruction_chars = 8000
 
 [console]

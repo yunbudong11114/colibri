@@ -39,8 +39,9 @@ class StatusTranscript:
     def _write_status(self, event_type: str, payload: dict) -> None:
         if event_type == "memory_context":
             self.status.write("memory", files=",".join(payload.get("files", [])))
-        elif event_type == "skill_recall":
-            self.status.write("skill", skills=",".join(payload.get("skills", [])))
+        elif event_type == "skill_catalog":
+            skills = payload.get("skills", [])
+            self.status.write("skills", f"catalog={len(skills)}")
         elif event_type == "tool_call":
             self.status.write("tool", payload.get("name"), "wait_permission")
         elif event_type == "tool_result":

@@ -202,8 +202,9 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         ParityEntry {
             python_file: "test_skills.py",
             rust_tests: &[
-                "skill_index_includes_and_selects_builtin_create_colibri_skill_like_python",
-                "skill_index_parses_metadata_and_loads_bounded_context_like_python",
+                "skill_catalog_includes_builtin_and_local_like_python",
+                "skill_index_parses_metadata_and_builds_catalog_like_python",
+                "skill_read_returns_bounded_body_like_python",
                 "skill_run_executes_configured_command",
                 "skill_toml_parses_multiline_description_like_python",
             ],
@@ -469,7 +470,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_skill_run_uses_permission_confirmation",
             "test_session_injects_always_on_memory_without_persisting_it",
             "test_session_logs_memory_context_event",
-            "test_session_injects_relevant_skill_without_persisting_it",
+            "test_session_injects_skill_catalog_without_persisting_it",
         ],
         "test_steering.py" => &[
             "test_skip_result_constant",
@@ -485,12 +486,15 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
         "test_skills.py" => &[
             "test_skill_index_scans_local_skills_without_storing_bodies",
             "test_skill_index_includes_builtin_create_colibri_skill_without_user_dir",
-            "test_builtin_create_colibri_skill_is_selected_for_skill_creation",
-            "test_builtin_create_colibri_skill_is_not_selected_for_unrelated_turn",
+            "test_skill_catalog_includes_builtin_and_local_without_bodies",
+            "test_skill_catalog_is_bounded",
+            "test_skill_read_returns_bounded_body",
+            "test_skill_read_rejects_unknown_name",
             "test_skill_index_parses_command_metadata",
-            "test_skill_index_selects_and_loads_bounded_skill_context",
             "test_skill_run_executes_declared_local_command",
             "test_skill_run_rejects_missing_command",
+            "test_skills_dirs_config_is_rejected",
+            "test_skills_max_loaded_config_is_rejected",
         ],
         "test_terminal_qr.py" => &[
             "test_render_terminal_qr_outputs_block_qr_for_weixin_payload",
@@ -524,6 +528,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_memory_write_description_contains_format_routing_and_limit_guidance",
             "test_memory_write_warns_when_short_memory_file_exceeds_limit",
             "test_memory_write_is_not_read_only",
+            "test_skill_read_is_read_only",
             "test_skill_run_is_not_read_only",
         ],
         "test_transcript.py" => &[

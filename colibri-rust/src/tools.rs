@@ -48,6 +48,7 @@ pub fn tool_info(name: &str) -> ToolInfo {
                 | "memory.list"
                 | "memory.read"
                 | "memory.search"
+                | "skill.read"
                 | "image.understand"
         ),
     )
@@ -158,9 +159,14 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     }
     if has("skills") {
         specs.push(openai_tool(
+            "skill.read",
+            "Read the full SKILL.md instructions for a skill listed in the catalog. Prefer this over guessing skill contents.",
+            serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"Exact skill name from the catalog."}},"required":["name"]}),
+        ));
+        specs.push(openai_tool(
             "skill.run",
             "Run a configured local skill command.",
-            serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"command":{"type":"string"}},"required":["skill","command"]}),
+            serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["skill","command"]}),
         ));
     }
     specs
@@ -248,6 +254,7 @@ pub fn run_tool_map(
         "memory.read" => memory_read(args, context),
         "memory.search" => memory_search(args, context),
         "memory.write" => memory_write(args, context),
+        "skill.read" => crate::skills::read_skill(args, context),
         "skill.run" => run_skill_command(args, context),
         "web.search" => web_search(args, context),
         "image.understand" => image_understand(args, context),

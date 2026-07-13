@@ -60,8 +60,9 @@ pub struct FilesConfig {
 
 #[derive(Clone, Debug)]
 pub struct SkillsConfig {
-    pub dirs: Vec<PathBuf>,
-    pub max_loaded: usize,
+    pub dir: PathBuf,
+    pub max_catalog: usize,
+    pub max_catalog_chars: usize,
     pub max_instruction_chars: usize,
 }
 
@@ -186,8 +187,9 @@ impl Default for AgentConfig {
                 ],
             },
             skills: SkillsConfig {
-                dirs: vec![expand_user_path("~/.colibri/skills")],
-                max_loaded: 3,
+                dir: expand_user_path("~/.colibri/skills"),
+                max_catalog: 32,
+                max_catalog_chars: 4000,
                 max_instruction_chars: 8000,
             },
             console: ConsoleConfig {
@@ -407,11 +409,14 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         }
     }
     if let Some(table) = value.get("skills") {
-        if let Some(value) = get_path_list(table, "dirs") {
-            config.skills.dirs = value;
+        if let Some(value) = get_string(table, "dir") {
+            config.skills.dir = expand_user_path(&value);
         }
-        if let Some(value) = get_usize(table, "max_loaded") {
-            config.skills.max_loaded = value;
+        if let Some(value) = get_usize(table, "max_catalog") {
+            config.skills.max_catalog = value;
+        }
+        if let Some(value) = get_usize(table, "max_catalog_chars") {
+            config.skills.max_catalog_chars = value;
         }
         if let Some(value) = get_usize(table, "max_instruction_chars") {
             config.skills.max_instruction_chars = value;
@@ -491,6 +496,14 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
 }
 
 fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
+    if let Some(table) = value.get("skills").and_then(toml::Value::as_table) {
+        if table.contains_key("dirs") {
+            return Err("unknown config field: skills.dirs (use skills.dir)".to_string());
+        }
+        if table.contains_key("max_loaded") {
+            return Err("unknown config field: skills.max_loaded (use skills.max_catalog)".to_string());
+        }
+    }
     validate_table(
         value,
         "model",
@@ -554,7 +567,12 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
     validate_table(
         value,
         "skills",
-        &["dirs", "max_loaded", "max_instruction_chars"],
+        &[
+            "dir",
+            "max_catalog",
+            "max_catalog_chars",
+            "max_instruction_chars",
+        ],
         &[],
     )?;
     validate_table(value, "console", &["status", "plain_answer"], &[])?;

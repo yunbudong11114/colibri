@@ -21,7 +21,7 @@ use colibri_rust::repl_input::{
 };
 use colibri_rust::session::AgentSession;
 use colibri_rust::session_history::TranscriptHistoryLoader;
-use colibri_rust::skills::{relevant_skill_context, SkillIndex};
+use colibri_rust::skills::{skill_catalog, SkillIndex};
 use colibri_rust::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
 use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
@@ -1216,7 +1216,7 @@ read_only = true
 "#,
     )
     .unwrap();
-    let index = SkillIndex::scan(&[temp.join("skills")]);
+    let index = SkillIndex::scan(&temp.join("skills"));
     let release = index.get("release").unwrap();
 
     assert!(release.description.contains("Release helper"));
@@ -1737,7 +1737,7 @@ read_only = false
     )
     .unwrap();
     let mut config = AgentConfig::default();
-    config.skills.dirs = vec![temp.join("skills")];
+    config.skills.dir = temp.join("skills");
     let context = ToolContext::new(config, temp);
 
     let result = run_tool(
@@ -1752,26 +1752,56 @@ read_only = false
 }
 
 #[test]
-fn skill_index_includes_and_selects_builtin_create_colibri_skill_like_python() {
+fn skill_catalog_includes_builtin_and_local_like_python() {
     let temp = temp_dir("builtin-skill");
+    let skill_dir = temp.join("skills/release");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Release Notes\n\nUse this for release summaries.\n",
+    )
+    .unwrap();
     let mut config = AgentConfig::default();
-    config.skills.dirs = vec![temp.join("missing-skills")];
-    config.skills.max_loaded = 1;
-    let context = ToolContext::new(config.clone(), temp);
+    config.skills.dir = temp.join("skills");
+    let context = ToolContext::new(config, temp);
 
-    let (_unrelated_text, unrelated_skills, _truncated) =
-        relevant_skill_context("hello status", &context);
-    let (text, skills, truncated) = relevant_skill_context("帮我创建一个 colibri skill", &context);
+    let (text, skills, truncated) = skill_catalog(&context);
 
-    assert!(unrelated_skills.is_empty());
-    assert_eq!(skills, vec!["create-colibri-skill".to_string()]);
-    assert!(text.contains("[create-colibri-skill]"));
-    assert!(text.contains("SKILL.md"));
+    assert_eq!(skills[0], "create-colibri-skill");
+    assert!(skills.contains(&"release".to_string()));
+    assert!(text.starts_with("Available skills"));
+    assert!(text.contains("skill.read"));
+    assert!(text.contains("release:"));
+    assert!(!text.contains("Use this for release summaries"));
+    assert!(!text.contains("[release]"));
     assert!(!truncated);
 }
 
 #[test]
-fn skill_index_parses_metadata_and_loads_bounded_context_like_python() {
+fn skill_read_returns_bounded_body_like_python() {
+    let temp = temp_dir("skill-read");
+    let skill_dir = temp.join("skills/release");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("# Release Notes\n\n{}", "release ".repeat(100)),
+    )
+    .unwrap();
+    let mut config = AgentConfig::default();
+    config.skills.dir = temp.join("skills");
+    config.skills.max_instruction_chars = 80;
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool("skill.read", r#"{"name":"release"}"#, &context).unwrap();
+
+    assert!(result.ok);
+    assert!(result.text.starts_with("[release]"));
+    assert!(result.text.contains("Base directory:"));
+    assert!(result.truncated);
+}
+
+#[test]
+fn skill_index_parses_metadata_and_builds_catalog_like_python() {
     let temp = temp_dir("skill-index");
     let skill_dir = temp.join("skills/release");
     fs::create_dir_all(&skill_dir).unwrap();
@@ -1795,14 +1825,14 @@ read_only = false
     )
     .unwrap();
     let mut config = AgentConfig::default();
-    config.skills.dirs = vec![temp.join("skills")];
-    config.skills.max_loaded = 1;
-    config.skills.max_instruction_chars = 80;
-    let index = SkillIndex::scan(&config.skills.dirs);
+    config.skills.dir = temp.join("skills");
+    config.skills.max_catalog = 2;
+    config.skills.max_catalog_chars = 120;
+    let index = SkillIndex::scan(&config.skills.dir);
     let release = index.get("release").unwrap();
     let context = ToolContext::new(config, temp);
 
-    let (text, skills, truncated) = relevant_skill_context("please write release notes", &context);
+    let (text, skills, truncated) = skill_catalog(&context);
 
     assert_eq!(release.description, "Release helper");
     assert_eq!(release.commands[0].name, "render");
@@ -1812,10 +1842,8 @@ read_only = false
         vec!["scripts/render.py".to_string()]
     );
     assert!(!release.commands[0].read_only);
-    assert!(text.starts_with("Relevant skills:"));
-    assert!(text.contains("[release]"));
-    assert!(text.contains("Base directory:"));
-    assert_eq!(skills, vec!["release".to_string()]);
+    assert!(text.starts_with("Available skills"));
+    assert!(skills.len() <= 2);
     assert!(truncated);
 }
 

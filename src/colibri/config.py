@@ -79,7 +79,7 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     ),
     "shell": frozenset({"deny"}),
     "files": frozenset({"roots"}),
-    "skills": frozenset({"dirs", "max_loaded", "max_instruction_chars"}),
+    "skills": frozenset({"dir", "max_catalog", "max_catalog_chars", "max_instruction_chars"}),
     "console": frozenset({"status", "plain_answer"}),
     "memory": frozenset({"root", "max_search_results", "enabled", "max_recall_chars"}),
     "web_search": frozenset(
@@ -200,11 +200,13 @@ class FilesConfig:
 
 @dataclass(frozen=True)
 class SkillsConfig:
-    # 本地 skill 搜索目录。
-    dirs: list[Path] = field(default_factory=lambda: [expand_user_path("~/.colibri/skills")])
-    # 每轮最多加载的相关 skill 数量。
-    max_loaded: int = 3
-    # 单个 skill 指令注入上下文前的最大字符数。
+    # 本地 skill 目录（仅支持单一目录）。
+    dir: Path = field(default_factory=lambda: expand_user_path("~/.colibri/skills"))
+    # 注入 prompt 的 skill catalog 最多条目数（含 builtin）。
+    max_catalog: int = 32
+    # skill catalog 系统消息最大字符数。
+    max_catalog_chars: int = 4000
+    # skill.read 返回的单个 skill 正文最大字符数。
     max_instruction_chars: int = 8000
 
 
@@ -326,7 +328,7 @@ class AgentConfig:
             tools=_replace_dataclass(self.tools, data.get("tools", {})),
             shell=_replace_dataclass(self.shell, data.get("shell", {})),
             files=_replace_dataclass(self.files, _path_list_overrides(data.get("files", {}), "roots")),
-            skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
+            skills=_replace_dataclass(self.skills, _path_overrides(dict(data.get("skills", {})), "dir")),
             console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(dict(data.get("memory", {})), "root")),
             web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
@@ -346,6 +348,10 @@ def _validate_config_fields(data: dict[str, Any]) -> None:
         if not isinstance(value, dict):
             raise ConfigError(f"unknown config field: {section}")
         for field_name in value:
+            if section == "skills" and field_name == "dirs":
+                raise ConfigError("unknown config field: skills.dirs (use skills.dir)")
+            if section == "skills" and field_name == "max_loaded":
+                raise ConfigError("unknown config field: skills.max_loaded (use skills.max_catalog)")
             if field_name not in allowed:
                 raise ConfigError(f"unknown config field: {section}.{field_name}")
     channels = data.get("channels")

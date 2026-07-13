@@ -16,6 +16,7 @@ from colibri.tools.builtin import (
     MemorySearchTool,
     MemoryWriteTool,
     ShellRunTool,
+    SkillReadTool,
     SkillRunTool,
     WebSearchTool,
 )
@@ -42,7 +43,7 @@ class ToolRegistry:
         if "image" in enabled:
             tools.append(ImageUnderstandTool())
         if "skills" in enabled:
-            tools.append(SkillRunTool())
+            tools.extend([SkillReadTool(), SkillRunTool()])
         return cls(tools=tools, cwd=cwd)
 
     def specs(self) -> list[dict]:

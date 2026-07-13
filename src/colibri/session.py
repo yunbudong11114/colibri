@@ -152,10 +152,10 @@ class AgentSession:
                 "memory_context",
                 {"files": memory_result.files, "truncated": memory_result.truncated},
             )
-        skill_result = SkillIndex.scan(self.config.skills.dirs).context_for(user_text, self.config.skills)
+        skill_result = SkillIndex.scan(self.config.skills.dir).catalog(self.config.skills)
         if skill_result.text:
             self._write_transcript(
-                "skill_recall",
+                "skill_catalog",
                 {"skills": skill_result.skills, "truncated": skill_result.truncated},
             )
         return memory_result.text, skill_result.text

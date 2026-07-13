@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
@@ -36,7 +36,7 @@ Create this layout:
 Optional `skill.toml` can describe local commands for `skill.run`:
 
 ```toml
-description = "Short description used for skill selection."
+description = "Short description shown in the skill catalog."
 
 [[commands]]
 name = "check"
@@ -46,7 +46,7 @@ args = ["scripts/check.py"]
 read_only = true
 ```
 
-After creating a skill, test that Colibri selects it for a matching user request and does not select it for unrelated turns. Keep command permissions explicit and avoid long resident processes on small devices.
+After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. Keep command permissions explicit and avoid long resident processes on small devices.
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,8 +74,8 @@ pub struct SkillIndex {
 }
 
 impl SkillIndex {
-    pub fn scan(dirs: &[PathBuf]) -> Self {
-        let fingerprint = dirs_fingerprint(dirs);
+    pub fn scan(skill_dir: &Path) -> Self {
+        let fingerprint = dir_fingerprint(skill_dir);
         if let Ok(cache) = skill_scan_cache().lock() {
             if let Some(cached) = cache.get(&fingerprint) {
                 return cached.clone();
@@ -87,10 +87,7 @@ impl SkillIndex {
             .iter()
             .map(|skill| skill.name.clone())
             .collect::<BTreeSet<_>>();
-        for root in dirs {
-            let Ok(entries) = fs::read_dir(root) else {
-                continue;
-            };
+        if let Ok(entries) = fs::read_dir(skill_dir) {
             let mut entries = entries.flatten().collect::<Vec<_>>();
             entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
@@ -138,86 +135,110 @@ impl SkillIndex {
         self.skills.iter().find(|skill| skill.name == name)
     }
 
-    pub fn context_for(
-        &self,
-        user_text: &str,
-        config: &SkillsConfig,
-    ) -> (String, Vec<String>, bool) {
-        let selected = self.select(user_text, config.max_loaded);
+    pub fn catalog(&self, config: &SkillsConfig) -> (String, Vec<String>, bool) {
+        if config.max_catalog == 0 {
+            return (String::new(), Vec::new(), false);
+        }
+        let selected: Vec<&SkillMetadata> = self.skills.iter().take(config.max_catalog).collect();
         if selected.is_empty() {
             return (String::new(), Vec::new(), false);
         }
-        let mut chunks = vec!["Relevant skills:".to_string()];
+        let mut lines = vec![
+            "Available skills (use skill.read with name when needed):".to_string(),
+            String::new(),
+        ];
         let mut names = Vec::new();
-        for skill in selected {
-            let content = skill
-                .content
-                .clone()
-                .unwrap_or_else(|| fs::read_to_string(&skill.skill_file).unwrap_or_default());
-            if content.is_empty() {
-                continue;
-            }
-            chunks.push(format!(
-                "\n[{}]\nBase directory: {}\n\n{}",
-                skill.name,
-                skill.root.display(),
-                content.trim()
+        for skill in &selected {
+            let location = if skill.root.file_name().and_then(|name| name.to_str()) == Some("builtin")
+                && skill.content.is_some()
+            {
+                "[builtin]".to_string()
+            } else {
+                skill.root.display().to_string()
+            };
+            lines.push(format!(
+                "- {}: {} [{}]",
+                skill.name, skill.description, location
             ));
             names.push(skill.name.clone());
         }
-        let mut text = chunks.join("\n").trim().to_string();
-        if text.is_empty() {
-            return (String::new(), Vec::new(), false);
-        }
-        let truncated = text.chars().count() > config.max_instruction_chars;
+        let mut text = lines.join("\n").trim().to_string();
+        let truncated = text.chars().count() > config.max_catalog_chars;
         if truncated {
-            text = text
-                .chars()
-                .take(config.max_instruction_chars.saturating_sub(15))
-                .collect::<String>()
-                + "\n...[truncated]";
+            text = bound_skill_text(&text, config.max_catalog_chars);
         }
         (text, names, truncated)
     }
 
-    pub fn select(&self, user_text: &str, limit: usize) -> Vec<&SkillMetadata> {
-        if limit == 0 {
-            return Vec::new();
+    pub fn read_text(&self, name: &str, max_chars: usize) -> Option<(String, bool)> {
+        let skill = self.get(name)?;
+        let content = skill
+            .content
+            .clone()
+            .or_else(|| fs::read_to_string(&skill.skill_file).ok())?;
+        let text = format!(
+            "[{}]\nBase directory: {}\n\n{}",
+            skill.name,
+            skill.root.display(),
+            content.trim()
+        );
+        let truncated = text.chars().count() > max_chars;
+        if truncated {
+            Some((bound_skill_text(&text, max_chars), true))
+        } else {
+            Some((text, false))
         }
-        let query_terms = terms(user_text);
-        let mut scored = Vec::new();
-        for skill in &self.skills {
-            let score = skill_score(skill, &query_terms, user_text);
-            if score > 0 {
-                scored.push((score, skill.name.clone(), skill));
-            }
-        }
-        scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-        scored
-            .into_iter()
-            .take(limit)
-            .map(|(_, _, skill)| skill)
-            .collect()
     }
 }
 
-pub fn relevant_skill_context(prompt: &str, context: &ToolContext) -> (String, Vec<String>, bool) {
-    SkillIndex::scan(&context.config.skills.dirs).context_for(prompt, &context.config.skills)
+pub fn skill_catalog(context: &ToolContext) -> (String, Vec<String>, bool) {
+    SkillIndex::scan(&context.config.skills.dir).catalog(&context.config.skills)
+}
+
+pub fn read_skill(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
+    let Some(name) = args.get("name").map(|value| value.trim()).filter(|value| !value.is_empty())
+    else {
+        return ToolResult::error("invalid_arguments", "name is required");
+    };
+    let index = SkillIndex::scan(&context.config.skills.dir);
+    match index.read_text(name, context.config.skills.max_instruction_chars) {
+        Some((text, truncated)) => {
+            let mut result = ToolResult::ok(text);
+            result.truncated = truncated;
+            result
+        }
+        None => {
+            let available = index
+                .skills
+                .iter()
+                .take(20)
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let available = if available.is_empty() {
+                "none".to_string()
+            } else {
+                available
+            };
+            ToolResult::error(
+                "not_found",
+                format!("Unknown skill: {name}. Available: {available}"),
+            )
+        }
+    }
 }
 
 pub fn run_skill_command(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
     let Some(skill_name) = args.get("skill") else {
-        return ToolResult::error("invalid_arguments", "skill is required");
+        return ToolResult::error("invalid_arguments", "skill and command are required");
     };
     let Some(command_name) = args.get("command") else {
-        return ToolResult::error("invalid_arguments", "command is required");
+        return ToolResult::error("invalid_arguments", "skill and command are required");
     };
-    let index = SkillIndex::scan(&context.config.skills.dirs);
+    let extra_args = parse_string_list_arg(args.get("args"));
+    let index = SkillIndex::scan(&context.config.skills.dir);
     let Some(skill) = index.get(skill_name) else {
-        return ToolResult::error(
-            "not_found",
-            format!("Skill command not found: {} {}", skill_name, command_name),
-        );
+        return ToolResult::error("not_found", format!("Unknown skill: {skill_name}"));
     };
     let Some(command) = skill
         .commands
@@ -226,56 +247,138 @@ pub fn run_skill_command(args: &BTreeMap<String, String>, context: &ToolContext)
     else {
         return ToolResult::error(
             "not_found",
-            format!("Skill command not found: {} {}", skill_name, command_name),
+            format!("Unknown skill command: {command_name}"),
         );
     };
-    let output = Command::new(&command.command)
-        .args(&command.args)
-        .current_dir(&skill.root)
-        .output();
-    match output {
-        Ok(output) => {
-            let mut text = String::new();
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            if output.status.success() {
-                ToolResult::ok(text)
+    if command.command.is_empty() {
+        return ToolResult::error("invalid_config", "Skill command is empty");
+    }
+    let mut argv = command.args.clone();
+    argv.extend(extra_args);
+    let mut child = Command::new(&command.command);
+    child.args(&argv).current_dir(&skill.root);
+    let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.001));
+    match run_command_with_timeout(child, timeout) {
+        Ok((status, stdout, stderr)) => {
+            let text = if stdout.is_empty() { stderr } else { stdout };
+            let (bounded, truncated) = truncate_result(text, context.config.tools.max_result_chars);
+            if status {
+                let mut result = ToolResult::ok(bounded);
+                result.truncated = truncated;
+                result
             } else {
-                ToolResult::error("process_error", text)
+                let mut result = ToolResult::error("tool_error", bounded);
+                result.truncated = truncated;
+                result
             }
         }
-        Err(error) => ToolResult::error("io_error", error.to_string()),
+        Err(error) if error == "timeout" => {
+            let mut result = ToolResult::error("timeout", "Skill command timed out");
+            result.truncated = false;
+            result
+        }
+        Err(error) => ToolResult::error("tool_error", error),
     }
 }
 
-fn dirs_fingerprint(dirs: &[PathBuf]) -> Vec<(String, Option<u128>)> {
+fn parse_string_list_arg(raw: Option<&String>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    match value.as_array() {
+        Some(items) if items.iter().all(|item| item.as_str().is_some()) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn truncate_result(text: String, max_chars: usize) -> (String, bool) {
+    if text.chars().count() <= max_chars {
+        (text, false)
+    } else {
+        (bound_skill_text(&text, max_chars), true)
+    }
+}
+
+fn bound_skill_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let suffix = "\n...[truncated]";
+    let keep = max_chars.saturating_sub(suffix.chars().count());
+    text.chars().take(keep).collect::<String>() + suffix
+}
+
+fn run_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<(bool, String, String), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                return Ok((status.success(), stdout, stderr));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("timeout".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn dir_fingerprint(skill_dir: &Path) -> Vec<(String, Option<u128>)> {
     let mut parts = Vec::new();
-    for root in dirs {
-        let resolved = root
-            .canonicalize()
-            .unwrap_or_else(|_| root.clone())
-            .to_string_lossy()
-            .into_owned();
-        parts.push((resolved, None));
-        let Ok(entries) = fs::read_dir(root) else {
+    let resolved = skill_dir
+        .canonicalize()
+        .unwrap_or_else(|_| skill_dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    parts.push((resolved, None));
+    let Ok(entries) = fs::read_dir(skill_dir) else {
+        return parts;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
-        };
-        let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            for name in ["SKILL.md", "skill.toml"] {
-                let file = path.join(name);
-                let resolved = file
-                    .canonicalize()
-                    .unwrap_or_else(|_| file.clone())
-                    .to_string_lossy()
-                    .into_owned();
-                parts.push((resolved, file_mtime(&file)));
-            }
+        }
+        for name in ["SKILL.md", "skill.toml"] {
+            let file = path.join(name);
+            let resolved = file
+                .canonicalize()
+                .unwrap_or_else(|_| file.clone())
+                .to_string_lossy()
+                .into_owned();
+            parts.push((resolved, file_mtime(&file)));
         }
     }
     parts
@@ -366,51 +469,4 @@ fn derive_description(content: &str) -> Option<String> {
         return Some(stripped.to_string());
     }
     None
-}
-
-fn skill_score(skill: &SkillMetadata, query_terms: &BTreeSet<String>, user_text: &str) -> usize {
-    if skill.name == "create-colibri-skill" {
-        if !is_create_skill_request(user_text) {
-            return 0;
-        }
-        return 100
-            + query_terms
-                .intersection(&terms(&format!("{} {}", skill.name, skill.description)))
-                .count();
-    }
-    let haystack = terms(&format!("{} {}", skill.name, skill.description));
-    query_terms.intersection(&haystack).count()
-}
-
-fn is_create_skill_request(user_text: &str) -> bool {
-    let lowered = user_text.to_lowercase();
-    let term_set = terms(&lowered);
-    let has_skill_term =
-        term_set.contains("skill") || term_set.contains("skills") || lowered.contains("技能");
-    if !has_skill_term {
-        return false;
-    }
-    [
-        "create", "new", "add", "write", "design", "build", "创建", "新增", "添加", "编写", "设计",
-    ]
-    .iter()
-    .any(|word| lowered.contains(word))
-}
-
-fn terms(text: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch.to_ascii_lowercase());
-        } else if current.len() > 1 {
-            out.insert(std::mem::take(&mut current));
-        } else {
-            current.clear();
-        }
-    }
-    if current.len() > 1 {
-        out.insert(current);
-    }
-    out
 }

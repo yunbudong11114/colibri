@@ -198,6 +198,7 @@ weixin:<sender_id>
 - `memory.read`：读取 `MEMORY.md`、`USER.md`、`INDEX.md` 或 topic 文件。
 - `memory.search`：搜索 `INDEX.md` 目录行；详细 topic 需要再单独读取。
 - `memory.write`：经权限确认后追加或替换记忆文件。
+- `skill.read`：按 catalog 中的 name 读取完整 `SKILL.md`。
 - `skill.run`：运行本地 skill 中配置的命令。
 
 工具调用受 `session.max_tool_rounds` 限制，工具输出受 `tools.max_result_chars` 限制。
@@ -251,15 +252,16 @@ default_permission = "allow_read_confirm_write"
 
 ## 本地 Skills
 
-Skills 位于：
+Skills 统一放在单一目录：
 
 ```text
 ~/.colibri/skills/<name>/SKILL.md
+~/.colibri/skills/<name>/skill.toml   # 可选
 ```
 
-可选的 `skill.toml` 可以声明 `skill.run` 可执行的本地命令。
+每轮只注入有界 skill catalog（name / description / path）。模型需要完整说明时调用 `skill.read`；`skill.toml` 里声明的命令仍由 `skill.run` 执行。
 
-Colibri 内置 `create-colibri-skill` 指导 skill。Skill 加载采用渐进式披露：先索引 metadata，每轮只读取被选中的 skill 指令。
+内置 `create-colibri-skill` 仍是指导 skill，不从磁盘扫描。
 
 ## 上下文与内存相关默认值
 

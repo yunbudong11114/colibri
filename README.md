@@ -204,6 +204,7 @@ When the model returns tool calls, Colibri can execute:
 - `memory.read`: read `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file.
 - `memory.search`: search `INDEX.md` manifest lines; read matching topic files separately.
 - `memory.write`: append to or replace a memory file after permission approval.
+- `skill.read`: read full `SKILL.md` instructions for a catalog skill by name.
 - `skill.run`: run a configured local skill command.
 
 Tool calls are bounded by `session.max_tool_rounds` and tool output is capped by `tools.max_result_chars`.
@@ -257,15 +258,16 @@ Keep `USER.md` under 600 characters and `MEMORY.md` under 1800 characters. If a 
 
 ## Local Skills
 
-Skills live in configured directories such as:
+Skills live under a single directory:
 
 ```text
 ~/.colibri/skills/<name>/SKILL.md
+~/.colibri/skills/<name>/skill.toml   # optional
 ```
 
-Optional `skill.toml` files can declare commands for `skill.run`.
+Colibri injects a bounded skill catalog (name, description, path) into each turn. The model calls `skill.read` when it needs full instructions, and `skill.run` for commands declared in `skill.toml`.
 
-Colibri also ships the built-in `create-colibri-skill` guidance skill. Skill loading uses progressive disclosure: metadata is indexed first, and only selected skill instructions are read into a turn.
+Colibri also ships the built-in `create-colibri-skill` guidance skill (not scanned from disk).
 
 ## Context And Memory Limits
 

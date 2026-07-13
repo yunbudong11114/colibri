@@ -16,7 +16,8 @@ The active implementation specs are in `docs/superpowers/specs/`:
 - `2026-07-07-colibri-file-memory-tools-design.md`: file-backed memory tools.
 - `2026-07-07-colibri-memory-recall-design.md`: memory recall injection.
 - `2026-07-07-colibri-context-compacting-design.md`: context compacting.
-- `2026-07-07-colibri-local-skills-design.md`: local skills.
+- `2026-07-07-colibri-local-skills-design.md`: local skills (historical; superseded for injection by catalog redesign).
+- `2026-07-13-colibri-skills-catalog-design.md`: skill catalog + `skill.read` progressive disclosure.
 - `2026-07-08-colibri-dynamic-permissions-design.md`: dynamic permissions and project grants.
 - `2026-07-08-colibri-web-search-design.md`: web search tool.
 - `2026-07-08-colibri-weixin-gateway-design.md`: gateway and Weixin channel.

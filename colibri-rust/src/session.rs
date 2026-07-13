@@ -7,7 +7,7 @@ use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
 use crate::model::ModelClient;
 use crate::permissions::{PermissionPolicy, PermissionPrompter};
-use crate::skills::relevant_skill_context;
+use crate::skills::skill_catalog;
 use crate::steering::{
     format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
 };
@@ -209,10 +209,10 @@ impl AgentSession {
                 serde_json::json!({"files":memory.files,"truncated":memory.truncated}),
             );
         }
-        let (skill_text, skill_names, _truncated) = relevant_skill_context(&user_text, &context);
+        let (skill_text, skill_names, _truncated) = skill_catalog(&context);
         if !skill_text.is_empty() {
             self.write_transcript(
-                "skill_recall",
+                "skill_catalog",
                 serde_json::json!({"skills":skill_names,"truncated":_truncated}),
             );
         }

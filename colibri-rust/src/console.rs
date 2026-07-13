@@ -40,9 +40,13 @@ pub fn status_line_for_event(event_type: &str, payload: &Value) -> Option<String
             let files = join_string_array(payload.get("files"));
             Some(format!("[colibri] memory files={files}"))
         }
-        "skill_recall" => {
-            let skills = join_string_array(payload.get("skills"));
-            Some(format!("[colibri] skill skills={skills}"))
+        "skill_catalog" => {
+            let count = payload
+                .get("skills")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len())
+                .unwrap_or(0);
+            Some(format!("[colibri] skills catalog={count}"))
         }
         "tool_call" => {
             let name = payload

@@ -760,8 +760,8 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
             if config.memory.root.exists() { "true" } else { "false" }
         ),
         format!(
-            "skills_dirs={} skills_found={}",
-            config.skills.dirs.len(),
+            "skills_dir={} skills_found={}",
+            config.skills.dir.display(),
             count_available_skills(config)
         ),
         format!("project_permissions={}", project_permissions),
@@ -788,14 +788,12 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
 
 fn count_available_skills(config: &AgentConfig) -> usize {
     let mut count = 1;
-    for dir in &config.skills.dirs {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if entry.path().join("SKILL.md").is_file() {
-                count += 1;
-            }
+    let Ok(entries) = fs::read_dir(&config.skills.dir) else {
+        return count;
+    };
+    for entry in entries.flatten() {
+        if entry.path().join("SKILL.md").is_file() {
+            count += 1;
         }
     }
     count

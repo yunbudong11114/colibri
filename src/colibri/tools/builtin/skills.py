@@ -7,6 +7,40 @@ from colibri.skills import SkillIndex
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_text
 
 
+class SkillReadTool:
+    spec = ToolSpec(
+        name="skill.read",
+        description=(
+            "Read the full SKILL.md instructions for a skill listed in the catalog. "
+            "Prefer this over guessing skill contents."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact skill name from the catalog."},
+            },
+            "required": ["name"],
+        },
+        read_only=True,
+    )
+
+    def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        name = arguments.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return ToolResult(ok=False, text="name is required", error_type="invalid_arguments")
+
+        index = SkillIndex.scan(context.config.skills.dir)
+        text, truncated = index.read_text(name.strip(), context.config.skills.max_instruction_chars)
+        if text is None:
+            available = ", ".join(skill.name for skill in index.skills[:20]) or "none"
+            return ToolResult(
+                ok=False,
+                text=f"Unknown skill: {name.strip()}. Available: {available}",
+                error_type="not_found",
+            )
+        return ToolResult(ok=True, text=text, truncated=truncated)
+
+
 class SkillRunTool:
     spec = ToolSpec(
         name="skill.run",
@@ -32,7 +66,7 @@ class SkillRunTool:
         if not isinstance(extra_args, list) or not all(isinstance(arg, str) for arg in extra_args):
             return ToolResult(ok=False, text="args must be a list of strings", error_type="invalid_arguments")
 
-        index = SkillIndex.scan(context.config.skills.dirs)
+        index = SkillIndex.scan(context.config.skills.dir)
         skill = index.get(skill_name)
         if skill is None:
             return ToolResult(ok=False, text=f"Unknown skill: {skill_name}", error_type="not_found")
