@@ -26,6 +26,7 @@ from colibri.steering import (
     STEERING_QUEUE_MAX,
     format_steering_ack,
 )
+from colibri.textutil import bound_text
 from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
@@ -85,7 +86,7 @@ class AgentSession:
         registry, policy, image_analyzer = self._runtime_dependencies()
         context = self._tool_context(registry, image_analyzer)
         memory_text, skill_text = self._load_dynamic_context(bounded_text)
-        model_messages = self._budgeted_model_messages(memory_text, skill_text)
+        model_messages = self._model_messages_for_completion(memory_text, skill_text)
 
         self._turn_active = True
         try:
@@ -97,7 +98,7 @@ class AgentSession:
                     steered = self._drain_one_steering()
                     if steered is not None:
                         self._apply_steering(steered, skipped=0)
-                        model_messages = self._budgeted_model_messages(memory_text, skill_text)
+                        model_messages = self._model_messages_for_completion(memory_text, skill_text)
                         continue
                     return self._finish_response(assistant_text)
 
@@ -111,7 +112,7 @@ class AgentSession:
                             self._record_skipped_tool(skipped_call)
                         self._apply_steering(steered, skipped=skipped)
                         break
-                model_messages = self._budgeted_model_messages(memory_text, skill_text)
+                model_messages = self._model_messages_for_completion(memory_text, skill_text)
 
             return self._round_limit_response()
         finally:
@@ -134,7 +135,6 @@ class AgentSession:
             "user_message",
             {"text": text_with_media, "media": [_media_payload(part) for part in media]},
         )
-        self._compact_messages_if_needed()
         return text_with_media
 
     def _tool_context(self, registry: ToolRegistry, image_analyzer: ImageAnalyzer) -> ToolContext:
@@ -187,7 +187,6 @@ class AgentSession:
             "assistant_message",
             {"text": assistant_text, "tool_call_count": len(response.tool_calls)},
         )
-        self._compact_messages_if_needed()
         return assistant_text
 
     def _execute_tool_call(
@@ -252,7 +251,6 @@ class AgentSession:
             },
         )
         self.messages.append(Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id))
-        self._compact_messages_if_needed()
 
     def _finish_response(self, text: str) -> AgentResponse:
         self.last_activity_at = monotonic()
@@ -269,7 +267,6 @@ class AgentSession:
             "round_limit",
             {"max_tool_rounds": self.config.session.max_tool_rounds, "text": limit_text},
         )
-        self._compact_messages_if_needed()
         return self._finish_response(limit_text)
 
     def _restore_history_once(self) -> None:
@@ -354,10 +351,7 @@ class AgentSession:
 
     @staticmethod
     def _bound_text(text: str, max_chars: int) -> str:
-        if len(text) <= max_chars:
-            return text
-        keep = max(0, max_chars - len("\n...[truncated]"))
-        return text[:keep] + "\n...[truncated]"
+        return bound_text(text, max_chars)
 
     @staticmethod
     def _tool_result_text(result: ToolResult) -> str:
@@ -419,7 +413,6 @@ class AgentSession:
                 tool_call_id=call.id,
             )
         )
-        self._compact_messages_if_needed()
 
     def _apply_steering(self, text: str, *, skipped: int) -> None:
         self._write_transcript(
@@ -433,7 +426,6 @@ class AgentSession:
             "user_message",
             {"text": text, "media": [], "steering": True},
         )
-        self._compact_messages_if_needed()
 
     def _model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
         messages = list(self.messages)
@@ -447,7 +439,7 @@ class AgentSession:
             context_messages.append(Message(role="system", content=skill_text))
         return context_messages + messages
 
-    def _budgeted_model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
+    def _model_messages_for_completion(self, memory_text: str, skill_text: str = "") -> list[Message]:
         self._compact_messages_if_needed(memory_text, skill_text)
         return self._model_messages(memory_text, skill_text)
 
@@ -502,7 +494,7 @@ def _round_limit_text(messages: list[Message], max_tool_rounds: int, max_chars: 
         'If the user says "continue", continue from this stopped state with targeted reads and do not claim '
         "the previous task was fully completed."
     )
-    return _bound_text_block("\n".join(lines), max_chars)
+    return bound_text("\n".join(lines), max_chars)
 
 
 def _recent_tool_summaries(messages: list[Message], limit: int = 4) -> list[str]:
@@ -523,11 +515,3 @@ def _recent_tool_summaries(messages: list[Message], limit: int = 4) -> list[str]
         if len(summaries) >= limit:
             break
     return list(reversed(summaries))
-
-
-def _bound_text_block(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    suffix = "\n...[truncated]"
-    keep = max(0, max_chars - len(suffix))
-    return text[:keep] + suffix

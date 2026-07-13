@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import platform
 import resource
+import subprocess
 import sys
 
 from colibri.config import AgentConfig
@@ -40,7 +41,10 @@ def build_diagnostics(
     return lines
 
 
-def rss_kb() -> int | None:
+def rss_kb(pid: int | None = None) -> int | None:
+    if pid is not None:
+        return _pid_rss_kb(pid)
+
     proc_status = Path("/proc/self/status")
     try:
         for line in proc_status.read_text(encoding="utf-8").splitlines():
@@ -59,3 +63,27 @@ def rss_kb() -> int | None:
     if sys.platform == "darwin":
         return max(1, value // 1024)
     return value if value > 0 else None
+
+
+def _pid_rss_kb(pid: int) -> int | None:
+    proc_status = Path("/proc") / str(pid) / "status"
+    try:
+        for line in proc_status.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1])
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = result.stdout.strip()
+    return int(text) if text.isdigit() else None

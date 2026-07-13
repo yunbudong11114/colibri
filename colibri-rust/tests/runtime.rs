@@ -774,6 +774,79 @@ fn session_records_fake_response() {
 }
 
 #[test]
+fn session_compacts_at_model_boundary_not_after_assistant_like_python() {
+    let mut config = AgentConfig::default();
+    config.session.trigger_message_limit = 6;
+    config.session.recent_message_limit = 4;
+    config.session.model_compact = false;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
+
+    session.submit("one").unwrap();
+    session.submit("two").unwrap();
+    session.submit("three").unwrap();
+
+    assert_eq!(session.messages.len(), 6);
+    assert!(session.summary.is_empty());
+
+    session.submit("four").unwrap();
+
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "fake: two",
+            "three",
+            "fake: three",
+            "four",
+            "fake: four",
+        ]
+    );
+    assert!(session.summary.contains("user: one"));
+}
+
+#[test]
+fn session_close_closes_owned_transcript() {
+    let temp = temp_dir("session-close");
+    let path = temp.join("events.jsonl");
+    let writer = TranscriptWriter::new(path.clone(), BTreeMap::new(), 0, 0).unwrap();
+    let transcript = Arc::new(Mutex::new(writer));
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::from_shared(
+        Arc::new(config),
+        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Some(Arc::clone(&transcript)),
+        BTreeMap::new(),
+    );
+    session.submit("hello").unwrap();
+    assert!(path.is_file());
+    assert!(fs::read_to_string(&path).unwrap().contains("user_message"));
+
+    session.close();
+    // Exclusive Arc was closed; shared clone still exists but file handle released.
+    drop(transcript);
+}
+
+#[test]
+fn gateway_session_cache_close_closes_like_python() {
+    let mut config = AgentConfig::default();
+    config.gateway.max_sessions = 2;
+    config.gateway.session_idle_seconds = 0;
+    config.session.transcript = false;
+    let mut cache = GatewaySessionCache::new(config).unwrap();
+    cache.get_or_create("weixin:user-1").unwrap();
+    assert_eq!(cache.len(), 1);
+    cache.close();
+    assert_eq!(cache.len(), 0);
+}
+
+#[test]
 fn session_sends_media_result_through_media_sender_like_python() {
     let temp = temp_dir("session-send-media");
     let path = temp.join("report.txt");

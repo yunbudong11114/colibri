@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use crate::config::SessionConfig;
+use crate::config::{colibri_home, SessionConfig};
 use crate::messages::Message;
 
 const ATTACHMENT_MARKER: &str = "Attachments saved locally:";
@@ -31,16 +31,8 @@ impl TranscriptHistoryLoader {
     }
 
     pub fn default(config: &SessionConfig) -> Self {
-        let home = std::env::var_os("COLIBRI_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".colibri")
-            });
         Self::new(
-            home,
+            colibri_home(),
             config.restore_message_limit,
             config.restore_char_limit,
             config.restore_scan_bytes,

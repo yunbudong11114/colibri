@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -10,11 +9,9 @@ import subprocess
 import sys
 import time
 
-BEIJING_TZ = timezone(timedelta(hours=8))
-
-
-def _beijing_timestamp() -> str:
-    return datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
+from colibri.diagnostics import rss_kb
+from colibri.paths import colibri_home
+from colibri.transcript import format_beijing_timestamp
 
 
 @dataclass(frozen=True)
@@ -32,7 +29,7 @@ class GatewayProcessStatus:
 
 class GatewayProcessManager:
     def __init__(self, *, home: Path | None = None, cwd: Path | None = None):
-        self.home = home or _colibri_home()
+        self.home = home or colibri_home()
         self.cwd = cwd or Path.cwd()
         self.run_dir = self.home / "run"
         self.log_dir = self.home / "logs"
@@ -61,7 +58,7 @@ class GatewayProcessManager:
             "config": str(config_path.expanduser()) if config_path is not None else "default",
             "cwd": str(self.cwd),
             "log": str(self.log_path),
-            "started_at": _beijing_timestamp(),
+            "started_at": format_beijing_timestamp(),
             "command": command,
         }
         self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -150,8 +147,8 @@ def _gateway_run_command(config_path: Path | None) -> list[str]:
     return command
 
 
-def _colibri_home() -> Path:
-    return Path(os.environ.get("COLIBRI_HOME", "~/.colibri")).expanduser()
+def _rss_kb(pid: int) -> int | None:
+    return rss_kb(pid)
 
 
 def _pid_running(pid: int | None) -> bool:
@@ -193,30 +190,6 @@ def _pid_command(pid: int) -> str | None:
         return None
     text = result.stdout.strip()
     return text or None
-
-
-def _rss_kb(pid: int) -> int | None:
-    proc_status = Path("/proc") / str(pid) / "status"
-    try:
-        for line in proc_status.read_text(encoding="utf-8").splitlines():
-            if line.startswith("VmRSS:"):
-                parts = line.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-    except OSError:
-        pass
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "rss=", "-p", str(pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    text = result.stdout.strip()
-    return int(text) if text.isdigit() else None
 
 
 def _int_or_none(value) -> int | None:

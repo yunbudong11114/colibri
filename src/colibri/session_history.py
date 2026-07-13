@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from colibri.config import SessionConfig
 from colibri.messages import Message
+from colibri.paths import colibri_home
 
 
 _ATTACHMENT_MARKER = "Attachments saved locally:"
@@ -29,9 +29,8 @@ class TranscriptHistoryLoader:
 
     @classmethod
     def default(cls, config: SessionConfig) -> "TranscriptHistoryLoader":
-        home = Path(os.environ.get("COLIBRI_HOME", "~/.colibri")).expanduser()
         return cls(
-            home,
+            colibri_home(),
             message_limit=config.restore_message_limit,
             char_limit=config.restore_char_limit,
             scan_bytes=config.restore_scan_bytes,

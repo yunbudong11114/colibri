@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Protocol, TextIO
+
+from colibri.paths import colibri_home
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -54,10 +55,9 @@ class TranscriptWriter:
 
     @classmethod
     def default(cls, *, retention_days: int = 0, max_total_bytes: int = 0) -> "TranscriptWriter":
-        home = Path(os.environ.get("COLIBRI_HOME", "~/.colibri")).expanduser()
         today = beijing_date()
         return cls(
-            home / "transcripts" / f"{today}.jsonl",
+            colibri_home() / "transcripts" / f"{today}.jsonl",
             retention_days=retention_days,
             max_total_bytes=max_total_bytes,
         )

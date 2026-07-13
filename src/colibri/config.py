@@ -13,6 +13,98 @@ class ConfigError(RuntimeError):
 # 默认用户配置文件路径；CLI 未指定 --config 时优先读取这里。
 DEFAULT_USER_CONFIG = "~/.colibri/config.toml"
 
+_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        "model",
+        "vision",
+        "session",
+        "tools",
+        "shell",
+        "files",
+        "skills",
+        "console",
+        "memory",
+        "web_search",
+        "gateway",
+        "channels",
+    }
+)
+
+_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
+    "model": frozenset(
+        {
+            "provider",
+            "base_url",
+            "model",
+            "api_key",
+            "timeout_seconds",
+            "max_output_tokens",
+            "input_context_tokens",
+        }
+    ),
+    "vision": frozenset(
+        {
+            "model",
+            "base_url",
+            "api_key",
+            "timeout_seconds",
+            "max_image_bytes",
+        }
+    ),
+    "session": frozenset(
+        {
+            "max_tool_rounds",
+            "trigger_message_limit",
+            "recent_message_limit",
+            "summary_max_chars",
+            "model_compact",
+            "idle_exit_enabled",
+            "idle_exit_seconds",
+            "transcript",
+            "restore_transcript",
+            "restore_message_limit",
+            "restore_char_limit",
+            "restore_scan_bytes",
+            "transcript_retention_days",
+            "transcript_max_total_bytes",
+        }
+    ),
+    "tools": frozenset(
+        {
+            "enabled",
+            "default_permission",
+            "max_result_chars",
+            "max_shell_seconds",
+        }
+    ),
+    "shell": frozenset({"deny"}),
+    "files": frozenset({"roots"}),
+    "skills": frozenset({"dirs", "max_loaded", "max_instruction_chars"}),
+    "console": frozenset({"status", "plain_answer"}),
+    "memory": frozenset({"root", "max_search_results", "enabled", "max_recall_chars"}),
+    "web_search": frozenset(
+        {
+            "engine",
+            "api_key",
+            "endpoint",
+            "max_results",
+            "timeout_seconds",
+        }
+    ),
+    "gateway": frozenset({"enabled_channels", "max_sessions", "session_idle_seconds"}),
+}
+
+_ALLOWED_CHANNELS_WEIXIN = frozenset(
+    {
+        "enabled",
+        "token",
+        "base_url",
+        "allow_from",
+        "poll_timeout_seconds",
+        "auth_timeout_seconds",
+    }
+)
+
 
 def expand_user_path(value: str) -> Path:
     return Path(value).expanduser()
@@ -225,8 +317,7 @@ class AgentConfig:
         return cls.default().with_overrides(data)
 
     def with_overrides(self, data: dict[str, Any]) -> "AgentConfig":
-        memory_overrides = dict(data.get("memory", {}))
-        memory_overrides.pop("max_recall_topics", None)
+        _validate_config_fields(data)
         return replace(
             self,
             model=_replace_dataclass(self.model, data.get("model", {})),
@@ -237,11 +328,39 @@ class AgentConfig:
             files=_replace_dataclass(self.files, _path_list_overrides(data.get("files", {}), "roots")),
             skills=_replace_dataclass(self.skills, _path_list_overrides(data.get("skills", {}), "dirs")),
             console=_replace_dataclass(self.console, data.get("console", {})),
-            memory=_replace_dataclass(self.memory, _path_overrides(memory_overrides, "root")),
+            memory=_replace_dataclass(self.memory, _path_overrides(dict(data.get("memory", {})), "root")),
             web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
             gateway=_replace_dataclass(self.gateway, data.get("gateway", {})),
             channels=_replace_channels(self.channels, data.get("channels", {})),
         )
+
+
+def _validate_config_fields(data: dict[str, Any]) -> None:
+    for key in data:
+        if key not in _ALLOWED_TOP_LEVEL:
+            raise ConfigError(f"unknown config field: {key}")
+    for section, allowed in _ALLOWED_FIELDS.items():
+        value = data.get(section)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ConfigError(f"unknown config field: {section}")
+        for field_name in value:
+            if field_name not in allowed:
+                raise ConfigError(f"unknown config field: {section}.{field_name}")
+    channels = data.get("channels")
+    if channels is None:
+        return
+    if not isinstance(channels, dict):
+        raise ConfigError("unknown config field: channels")
+    for channel_name, channel_value in channels.items():
+        if channel_name != "weixin":
+            raise ConfigError(f"unknown config field: channels.{channel_name}")
+        if not isinstance(channel_value, dict):
+            raise ConfigError(f"unknown config field: channels.{channel_name}")
+        for field_name in channel_value:
+            if field_name not in _ALLOWED_CHANNELS_WEIXIN:
+                raise ConfigError(f"unknown config field: channels.weixin.{field_name}")
 
 
 def _replace_dataclass(instance: Any, overrides: dict[str, Any]) -> Any:

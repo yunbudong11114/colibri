@@ -153,8 +153,40 @@ def test_session_keeps_only_recent_messages():
     session.submit("one")
     session.submit("two")
     session.submit("three")
+    session.submit("four")
 
-    assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
+    assert [message.content for message in session.messages] == [
+        "fake: two",
+        "three",
+        "fake: three",
+        "four",
+        "fake: four",
+    ]
+
+
+def test_session_compacts_at_model_boundary_not_after_assistant():
+    config = AgentConfig.default().with_overrides(
+        {"session": {"trigger_message_limit": 6, "recent_message_limit": 4, "model_compact": False}}
+    )
+    session = AgentSession(config=config, model=FakeModelClient())
+
+    session.submit("one")
+    session.submit("two")
+    session.submit("three")
+
+    assert len(session.messages) == 6
+    assert session.summary == ""
+
+    session.submit("four")
+
+    assert [message.content for message in session.messages] == [
+        "fake: two",
+        "three",
+        "fake: three",
+        "four",
+        "fake: four",
+    ]
+    assert "user: one" in session.summary
 
 
 def test_session_compacts_message_buffer_into_summary():
@@ -173,12 +205,20 @@ def test_session_compacts_message_buffer_into_summary():
     session.submit("one")
     session.submit("two")
     session.submit("three")
+    session.submit("four")
 
-    assert [message.content for message in session.messages] == ["two", "fake: two", "three", "fake: three"]
+    assert [message.content for message in session.messages] == [
+        "fake: two",
+        "three",
+        "fake: three",
+        "four",
+        "fake: four",
+    ]
     assert "user: one" in session.summary
     assert "assistant: fake: one" in session.summary
     assert "user: three" in session.summary
     assert "assistant: fake: three" in session.summary
+    assert "user: four" in session.summary
 
 
 def test_session_does_not_compact_before_trigger_message_limit():
@@ -280,6 +320,7 @@ def test_session_uses_model_assisted_compact_without_tools():
 
     session.submit("one")
     session.submit("two")
+    session.submit("three")
 
     assert "Summary:" in session.summary
     assert "Primary Request and Intent" in session.summary
@@ -308,6 +349,7 @@ def test_session_falls_back_when_model_assisted_compact_fails():
 
     session.submit("one")
     session.submit("two")
+    session.submit("three")
 
     assert "user: one" in session.summary
     assert any(event_type == "context_compact_error" for event_type, _payload in transcript.events)
@@ -352,10 +394,11 @@ def test_session_logs_context_compact_event():
     session.submit("one")
     session.submit("two")
     session.submit("three")
+    session.submit("four")
 
     compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
-    assert sum(event["removed_messages"] for event in compact_events) == 2
-    assert compact_events[-1]["compacted_messages"] == 6
+    assert sum(event["removed_messages"] for event in compact_events) == 3
+    assert compact_events[-1]["compacted_messages"] == 7
     assert compact_events[-1]["kept_messages"] == 4
     assert compact_events[-1]["summary_chars"] == len(session.summary)
 

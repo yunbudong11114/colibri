@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from colibri.config import AgentConfig, expand_user_path
+from colibri.config import AgentConfig, ConfigError, expand_user_path
 
 
 def test_default_config_uses_small_device_limits():
@@ -174,7 +174,7 @@ model_input_char_limit = 192000
         encoding="utf-8",
     )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ConfigError, match="session.model_input_char_limit"):
         AgentConfig.load(config_path)
 
 
@@ -188,7 +188,7 @@ input_byte_limit = 192000
         encoding="utf-8",
     )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ConfigError, match="model.input_byte_limit"):
         AgentConfig.load(config_path)
 
 
@@ -258,12 +258,7 @@ def test_load_config_overrides_memory_values(tmp_path):
 root = "{memory_root}"
 max_search_results = 3
 enabled = false
-max_recall_topics = 2
 max_recall_chars = 1234
-
-[mcp]
-enabled = true
-startup = "eager"
 """.strip(),
         encoding="utf-8",
     )
@@ -276,6 +271,48 @@ startup = "eager"
     assert config.memory.max_recall_chars == 1234
     assert not hasattr(config.memory, "max_recall_topics")
     assert not hasattr(config, "mcp")
+
+
+def test_unknown_top_level_section_is_rejected(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[mcp]
+enabled = true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="unknown config field: mcp"):
+        AgentConfig.load(config_path)
+
+
+def test_deprecated_max_recall_topics_is_rejected(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[memory]
+max_recall_topics = 2
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="memory.max_recall_topics"):
+        AgentConfig.load(config_path)
+
+
+def test_unknown_nested_field_is_rejected(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[model]
+unknown_option = true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="model.unknown_option"):
+        AgentConfig.load(config_path)
 
 
 def test_expand_user_path_expands_home():

@@ -1,11 +1,15 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use crate::config::AgentConfig;
 
 const TRUNCATED_SUFFIX: &str = "\n...[truncated]";
 const MEMORY_LIMIT: usize = 1800;
 const USER_LIMIT: usize = 600;
+const BOOTSTRAP_SENTINELS: &[&str] = &["MEMORY.md", "USER.md", "INDEX.md"];
 
 const MEMORY_TEMPLATE: &str = r#"---
 type: system
@@ -52,6 +56,21 @@ updated: 2026-07-09
 - 修改规则：用户或大模型需要修改该 topic 时，请去重、合并、重写相关段落；如果主题说明变化，也要同步更新 `INDEX.md`。首次真实写入时直接覆盖样例，不要保留原本的示例文本。
 "#;
 
+static MEMORY_LOAD_CACHE: OnceLock<Mutex<HashMap<MemoryCacheKey, MemoryLoadResult>>> =
+    OnceLock::new();
+
+fn memory_load_cache() -> &'static Mutex<HashMap<MemoryCacheKey, MemoryLoadResult>> {
+    MEMORY_LOAD_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MemoryCacheKey {
+    root: String,
+    max_recall_chars: usize,
+    memory_mtime: Option<u128>,
+    user_mtime: Option<u128>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryLoadResult {
     pub text: String,
@@ -79,6 +98,16 @@ impl MemoryContext {
             });
         }
         let _ = bootstrap(&self.config);
+        let cache_key = memory_cache_key(
+            &self.config.memory.root,
+            self.config.memory.max_recall_chars,
+        );
+        if let Ok(cache) = memory_load_cache().lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.clone());
+            }
+        }
+
         let mut files = Vec::new();
         let mut blocks = vec!["Always-on memory:".to_string()];
         let mut any_file_truncated = false;
@@ -96,20 +125,25 @@ impl MemoryContext {
             files.push(name.to_string());
             blocks.push(format!("[{}]\n{}", name, text));
         }
-        if files.is_empty() {
-            return Ok(MemoryLoadResult {
+        let result = if files.is_empty() {
+            MemoryLoadResult {
                 text: String::new(),
                 files,
                 truncated: false,
-            });
+            }
+        } else {
+            let (text, total_truncated) =
+                truncate(blocks.join("\n\n"), self.config.memory.max_recall_chars);
+            MemoryLoadResult {
+                text,
+                files,
+                truncated: any_file_truncated || total_truncated,
+            }
+        };
+        if let Ok(mut cache) = memory_load_cache().lock() {
+            cache.insert(cache_key, result.clone());
         }
-        let (text, total_truncated) =
-            truncate(blocks.join("\n\n"), self.config.memory.max_recall_chars);
-        Ok(MemoryLoadResult {
-            text,
-            files,
-            truncated: any_file_truncated || total_truncated,
-        })
+        Ok(result)
     }
 }
 
@@ -118,7 +152,7 @@ pub fn bootstrap(config: &AgentConfig) -> Result<(), String> {
         return Ok(());
     }
     let root = &config.memory.root;
-    if root.exists() && contains_file(root) {
+    if has_bootstrap_sentinel(root) {
         return Ok(());
     }
     for (relative, content) in [
@@ -139,17 +173,27 @@ pub fn bootstrap(config: &AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn contains_file(root: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() || (path.is_dir() && contains_file(&path)) {
-            return true;
-        }
+fn has_bootstrap_sentinel(root: &Path) -> bool {
+    BOOTSTRAP_SENTINELS
+        .iter()
+        .any(|name| root.join(name).is_file())
+}
+
+fn memory_cache_key(root: &Path, max_recall_chars: usize) -> MemoryCacheKey {
+    MemoryCacheKey {
+        root: root.to_string_lossy().into_owned(),
+        max_recall_chars,
+        memory_mtime: file_mtime(&root.join("MEMORY.md")),
+        user_mtime: file_mtime(&root.join("USER.md")),
     }
-    false
+}
+
+fn file_mtime(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
 }
 
 fn read_text_lossy(path: &Path) -> Option<String> {

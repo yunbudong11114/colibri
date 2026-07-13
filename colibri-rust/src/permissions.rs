@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::AgentConfig;
+use crate::config::{expand_user_path, AgentConfig};
 use crate::tools::{ToolContext, ToolInfo};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -423,20 +423,6 @@ fn resolve_path(path: &str, cwd: &Path) -> PathBuf {
         cwd.join(path)
     };
     joined.canonicalize().unwrap_or(joined)
-}
-
-fn expand_user_path(value: &str) -> PathBuf {
-    if value == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(value)
 }
 
 fn shell_write_path(command: &str, argv: &[String], context: &ToolContext) -> Option<PathBuf> {

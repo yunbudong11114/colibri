@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::colibri_home;
+
 pub struct TranscriptWriter {
     path: PathBuf,
     file: Option<File>,
@@ -141,17 +143,6 @@ impl Drop for TranscriptWriter {
     fn drop(&mut self) {
         self.close();
     }
-}
-
-fn colibri_home() -> PathBuf {
-    std::env::var_os("COLIBRI_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".colibri")
-        })
 }
 
 fn format_beijing_timestamp(time: SystemTime) -> String {

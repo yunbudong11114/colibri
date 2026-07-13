@@ -1,8 +1,7 @@
 use crate::config::AgentConfig;
 use crate::context::{
-    append_summary, compact_prompt_message, estimate_model_input_tokens, format_model_summary,
-    retain_recent_message_groups, round_limit_text, summarize_messages, summary_context,
-    COMPACT_SYSTEM_PROMPT,
+    append_summary, compact_prompt_message, format_model_summary, retain_recent_message_groups,
+    round_limit_text, summarize_messages, summary_context, COMPACT_SYSTEM_PROMPT,
 };
 use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
@@ -126,6 +125,18 @@ impl AgentSession {
         self.steering.is_permission_pending()
     }
 
+    /// Close transcript resources. Shared gateway transcripts stay open until
+    /// `GatewaySessionCache::close` (matches Python ScopedTranscriptWriter).
+    pub fn close(&mut self) {
+        if let Some(transcript) = self.transcript.take() {
+            if let Ok(mutex) = Arc::try_unwrap(transcript) {
+                if let Ok(mut writer) = mutex.into_inner() {
+                    writer.close();
+                }
+            }
+        }
+    }
+
     pub fn submit(&mut self, text: &str) -> Result<AgentResponse, String> {
         self.submit_with_permission_prompter(text, None)
     }
@@ -178,7 +189,6 @@ impl AgentSession {
                 "media": media.iter().map(media_payload).collect::<Vec<_>>()
             }),
         );
-        self.compact_if_needed();
 
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
         let analyzer_config = Arc::clone(&self.config);
@@ -222,7 +232,7 @@ impl AgentSession {
         context: &ToolContext,
     ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
-            let model_messages = self.budgeted_model_messages(memory_text, skill_text);
+            let model_messages = self.model_messages_for_completion(memory_text, skill_text);
             let response = {
                 let mut model = self
                     .model
@@ -246,7 +256,6 @@ impl AgentSession {
                 "assistant_message",
                 serde_json::json!({"text":assistant_text,"tool_call_count":response.tool_calls.len()}),
             );
-            self.compact_if_needed();
 
             if response.tool_calls.is_empty() {
                 if let Some(steered) = self.steering.drain_one() {
@@ -282,7 +291,6 @@ impl AgentSession {
             "round_limit",
             serde_json::json!({"max_tool_rounds":self.config.session.max_tool_rounds,"text":text}),
         );
-        self.compact_if_needed();
         Ok(AgentResponse { text })
     }
 
@@ -352,7 +360,6 @@ impl AgentSession {
             )
         };
         self.messages.push(Message::tool(content, call.id.clone()));
-        self.compact_if_needed();
         Ok(())
     }
 
@@ -372,7 +379,6 @@ impl AgentSession {
         let content = format!("steered_skip: {SKIPPED_TOOL_RESULT}");
         self.messages
             .push(Message::tool(content, call.id.clone()));
-        self.compact_if_needed();
     }
 
     fn apply_steering(&mut self, text: &str, skipped: usize) {
@@ -398,7 +404,6 @@ impl AgentSession {
                 "steering": true
             }),
         );
-        self.compact_if_needed();
     }
 
     fn send_media_result_if_needed(&self, result: ToolResult) -> ToolResult {
@@ -431,8 +436,12 @@ impl AgentSession {
         self.messages.extend(loader());
     }
 
-    fn budgeted_model_messages(&mut self, memory_text: &str, skill_text: &str) -> Vec<Message> {
-        self.compact_for_model_input_if_needed(memory_text, skill_text);
+    fn model_messages_for_completion(
+        &mut self,
+        memory_text: &str,
+        skill_text: &str,
+    ) -> Vec<Message> {
+        self.compact_for_completion_if_needed(memory_text, skill_text);
         self.model_messages(memory_text, skill_text)
     }
 
@@ -452,21 +461,39 @@ impl AgentSession {
         messages
     }
 
-    fn compact_for_model_input_if_needed(&mut self, memory_text: &str, skill_text: &str) {
-        let token_limit = self.config.model.input_context_tokens;
-        if token_limit == 0 {
-            return;
+    /// Estimate tokens without cloning messages / tool_calls JSON.
+    fn estimate_completion_input_tokens(&self, memory_text: &str, skill_text: &str) -> usize {
+        let mut byte_count = 0usize;
+        let summary_text = summary_context(&self.summary);
+        if !summary_text.is_empty() {
+            byte_count += "system".len() + summary_text.len();
         }
-        let threshold = token_limit.saturating_mul(8) / 10;
-        if threshold == 0 || estimate_model_input_tokens(&self.model_messages(memory_text, skill_text)) < threshold {
-            return;
+        if !memory_text.is_empty() {
+            byte_count += "system".len() + memory_text.len();
         }
-        self.compact_now();
+        if !skill_text.is_empty() {
+            byte_count += "system".len() + skill_text.len();
+        }
+        for message in &self.messages {
+            byte_count += message.role.len() + message.content.len();
+        }
+        (byte_count + 3) / 4
     }
 
-    fn compact_if_needed(&mut self) {
+    fn compact_for_completion_if_needed(&mut self, memory_text: &str, skill_text: &str) {
         let trigger_limit = self.config.session.trigger_message_limit.max(1);
-        if self.messages.len() < trigger_limit {
+        let token_limit = self.config.model.input_context_tokens;
+        let token_threshold = if token_limit == 0 {
+            0
+        } else {
+            token_limit.saturating_mul(8) / 10
+        };
+        let mut should_compact = self.messages.len() >= trigger_limit;
+        if !should_compact && token_threshold > 0 {
+            should_compact =
+                self.estimate_completion_input_tokens(memory_text, skill_text) >= token_threshold;
+        }
+        if !should_compact || self.messages.is_empty() {
             return;
         }
         self.compact_now();

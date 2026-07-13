@@ -7,6 +7,7 @@ import re
 import tomllib
 
 from colibri.config import SkillsConfig
+from colibri.textutil import bound_text
 
 
 CREATE_COLIBRI_SKILL_CONTENT = """# Create Colibri Skill
@@ -76,6 +77,11 @@ class SkillIndex:
 
     @classmethod
     def scan(cls, dirs: list[Path]) -> "SkillIndex":
+        fingerprint = _dirs_fingerprint(dirs)
+        cached = _SKILL_SCAN_CACHE.get(fingerprint)
+        if cached is not None:
+            return cached
+
         skills: list[SkillMetadata] = _builtin_skills()
         seen: set[str] = {skill.name for skill in skills}
         for root in dirs:
@@ -107,7 +113,9 @@ class SkillIndex:
                     )
                 )
                 seen.add(name)
-        return cls(skills)
+        index = cls(skills)
+        _SKILL_SCAN_CACHE[fingerprint] = index
+        return index
 
     def get(self, name: str) -> SkillMetadata | None:
         return self._by_name.get(name)
@@ -145,6 +153,33 @@ class SkillIndex:
                 scored.append((score, skill.name, skill))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [skill for _score, _name, skill in scored[:limit]]
+
+
+_SKILL_SCAN_CACHE: dict[tuple, SkillIndex] = {}
+
+
+def _dirs_fingerprint(dirs: list[Path]) -> tuple:
+    parts: list[tuple[str, float | None]] = []
+    for root in dirs:
+        try:
+            resolved = str(root.expanduser().resolve())
+        except OSError:
+            resolved = str(root.expanduser())
+        parts.append((resolved, None))
+        try:
+            entries = sorted(root.expanduser().iterdir(), key=lambda path: path.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            for name in ("SKILL.md", "skill.toml"):
+                path = entry / name
+                try:
+                    parts.append((str(path.resolve()), path.stat().st_mtime))
+                except OSError:
+                    parts.append((str(path), None))
+    return tuple(parts)
 
 
 def _read_skill_toml(root: Path) -> dict[str, Any]:
@@ -242,6 +277,4 @@ def _terms(text: str) -> set[str]:
 
 
 def _bound_skill_context(text: str, max_chars: int) -> tuple[str, bool]:
-    suffix = "\n...[truncated]"
-    keep = max(0, max_chars - len(suffix))
-    return text[:keep] + suffix, True
+    return bound_text(text, max_chars), True

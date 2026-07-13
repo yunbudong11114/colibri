@@ -24,6 +24,7 @@ from colibri.tools.builtin import (
 class ToolRegistry:
     def __init__(self, tools: list[Tool], cwd: Path | None = None):
         self._tools = {tool.spec.name: tool for tool in tools}
+        self._specs = [tool.spec.as_openai_tool() for tool in tools]
         self.cwd = cwd or Path.cwd()
 
     @classmethod
@@ -45,7 +46,7 @@ class ToolRegistry:
         return cls(tools=tools, cwd=cwd)
 
     def specs(self) -> list[dict]:
-        return [tool.spec.as_openai_tool() for tool in self._tools.values()]
+        return list(self._specs)
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

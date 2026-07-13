@@ -1,11 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
 use crate::tools::ToolContext;
+
+static SKILL_SCAN_CACHE: OnceLock<Mutex<HashMap<Vec<(String, Option<u128>)>, SkillIndex>>> =
+    OnceLock::new();
+
+fn skill_scan_cache() -> &'static Mutex<HashMap<Vec<(String, Option<u128>)>, SkillIndex>> {
+    SKILL_SCAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 const CREATE_COLIBRI_SKILL_CONTENT: &str = r#"# Create Colibri Skill
 
@@ -66,6 +75,13 @@ pub struct SkillIndex {
 
 impl SkillIndex {
     pub fn scan(dirs: &[PathBuf]) -> Self {
+        let fingerprint = dirs_fingerprint(dirs);
+        if let Ok(cache) = skill_scan_cache().lock() {
+            if let Some(cached) = cache.get(&fingerprint) {
+                return cached.clone();
+            }
+        }
+
         let mut skills = builtin_skills();
         let mut seen = skills
             .iter()
@@ -111,7 +127,11 @@ impl SkillIndex {
                 seen.insert(name);
             }
         }
-        Self { skills }
+        let index = Self { skills };
+        if let Ok(mut cache) = skill_scan_cache().lock() {
+            cache.insert(fingerprint, index.clone());
+        }
+        index
     }
 
     pub fn get(&self, name: &str) -> Option<&SkillMetadata> {
@@ -226,6 +246,47 @@ pub fn run_skill_command(args: &BTreeMap<String, String>, context: &ToolContext)
         }
         Err(error) => ToolResult::error("io_error", error.to_string()),
     }
+}
+
+fn dirs_fingerprint(dirs: &[PathBuf]) -> Vec<(String, Option<u128>)> {
+    let mut parts = Vec::new();
+    for root in dirs {
+        let resolved = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.clone())
+            .to_string_lossy()
+            .into_owned();
+        parts.push((resolved, None));
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            for name in ["SKILL.md", "skill.toml"] {
+                let file = path.join(name);
+                let resolved = file
+                    .canonicalize()
+                    .unwrap_or_else(|_| file.clone())
+                    .to_string_lossy()
+                    .into_owned();
+                parts.push((resolved, file_mtime(&file)));
+            }
+        }
+    }
+    parts
+}
+
+fn file_mtime(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
 }
 
 fn builtin_skills() -> Vec<SkillMetadata> {

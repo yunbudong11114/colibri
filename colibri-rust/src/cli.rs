@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::{expand_user_path, AgentConfig, DEFAULT_USER_CONFIG};
+use crate::config::{expand_user_path, rss_kb, AgentConfig, DEFAULT_USER_CONFIG};
 use crate::console::format_answer_for_console;
 use crate::gateway::{
     format_gateway_status, restart_gateway, start_gateway, stop_gateway, GatewaySessionCache,
@@ -156,21 +156,25 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
                     TranscriptHistoryLoader::default(&session_config).load()
                 }));
             }
-            let response = {
-                let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
-                let mut prompter = ConsolePermissionPrompter {
-                    stdin: &mut stdin,
-                    stdout: &mut *stdout_guard,
+            let result = (|| -> Result<i32, String> {
+                let response = {
+                    let mut stdout_guard = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+                    let mut prompter = ConsolePermissionPrompter {
+                        stdin: &mut stdin,
+                        stdout: &mut *stdout_guard,
+                    };
+                    session.submit_with_permission_prompter(text, Some(&mut prompter))?
                 };
-                session.submit_with_permission_prompter(text, Some(&mut prompter))?
-            };
-            writeln!(
-                stdout.lock().map_err(|_| "stdout lock poisoned")?,
-                "{}",
-                format_answer_for_console(&response.text, plain_answer)
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(0)
+                writeln!(
+                    stdout.lock().map_err(|_| "stdout lock poisoned")?,
+                    "{}",
+                    format_answer_for_console(&response.text, plain_answer)
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(0)
+            })();
+            session.close();
+            result
         }
         "repl" => {
             status.write("ready", &[("model", config.model.model.as_str())]);
@@ -278,32 +282,38 @@ fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
         }
     });
     let mut get_updates_buf = String::new();
-    loop {
-        if let Ok(error) = error_rx.try_recv() {
-            let _ = worker.join();
-            return Err(error);
-        }
-        let (next_buf, messages) = poll_weixin_once(&config, &get_updates_buf)?;
-        get_updates_buf = next_buf;
-        for message in messages {
-            if deliver_weixin_waiter(&waiters, &message) {
-                continue;
+    let result = (|| -> Result<i32, String> {
+        loop {
+            if let Ok(error) = error_rx.try_recv() {
+                let _ = worker.join();
+                return Err(error);
             }
-            if message.media.is_empty() && !message.text.trim().is_empty() {
-                let key = format!("weixin:{}", message.sender_id);
-                let steered = sessions
-                    .lock()
-                    .map_err(|_| "gateway session cache lock poisoned".to_string())?
-                    .try_steer(&key, &message.text);
-                if steered {
+            let (next_buf, messages) = poll_weixin_once(&config, &get_updates_buf)?;
+            get_updates_buf = next_buf;
+            for message in messages {
+                if deliver_weixin_waiter(&waiters, &message) {
                     continue;
                 }
+                if message.media.is_empty() && !message.text.trim().is_empty() {
+                    let key = format!("weixin:{}", message.sender_id);
+                    let steered = sessions
+                        .lock()
+                        .map_err(|_| "gateway session cache lock poisoned".to_string())?
+                        .try_steer(&key, &message.text);
+                    if steered {
+                        continue;
+                    }
+                }
+                work_tx
+                    .send(message)
+                    .map_err(|error| format!("Weixin worker stopped: {}", error))?;
             }
-            work_tx
-                .send(message)
-                .map_err(|error| format!("Weixin worker stopped: {}", error))?;
         }
+    })();
+    if let Ok(mut cache) = sessions.lock() {
+        cache.close();
     }
+    result
 }
 
 fn run_weixin_worker(
@@ -521,6 +531,32 @@ fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
             TranscriptHistoryLoader::default(&session_config).load()
         }));
     }
+    let result = repl_loop(
+        &mut session,
+        &config,
+        stdin,
+        stdout,
+        stderr,
+        &mut status,
+        prefer_process_tty,
+        plain_answer,
+        status_enabled,
+    );
+    session.close();
+    result
+}
+
+fn repl_loop<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
+    session: &mut AgentSession,
+    config: &AgentConfig,
+    stdin: std::io::BufReader<R>,
+    stdout: Arc<Mutex<W>>,
+    stderr: Arc<Mutex<E>>,
+    status: &mut StatusWriter<E>,
+    prefer_process_tty: bool,
+    plain_answer: bool,
+    status_enabled: bool,
+) -> Result<i32, String> {
     let mut reader = stdin;
     let mut history: Vec<String> = Vec::new();
     let mut last_activity = Instant::now();
@@ -736,7 +772,7 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
             } else {
                 "false"
             },
-            rss_kb()
+            rss_kb(None)
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         ),
@@ -763,19 +799,6 @@ fn count_available_skills(config: &AgentConfig) -> usize {
         }
     }
     count
-}
-
-fn rss_kb() -> Option<u64> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            return rest
-                .split_whitespace()
-                .next()
-                .and_then(|value| value.parse::<u64>().ok());
-        }
-    }
-    None
 }
 
 struct StatusWriter<E: Write + Send + 'static> {

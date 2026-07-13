@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from colibri.config import AgentConfig
+from colibri.textutil import bound_text
 
 
 ALWAYS_ON_MEMORY_FILES = ("MEMORY.md", "USER.md")
 ALWAYS_ON_MEMORY_FILE_LIMITS = {"MEMORY.md": 1800, "USER.md": 600}
-_TRUNCATED_SUFFIX = "\n...[truncated]"
+_BOOTSTRAP_SENTINELS = ("MEMORY.md", "USER.md", "INDEX.md")
 _SAMPLE_MEMORY_FILES = {
     "MEMORY.md": """---
 type: system
@@ -53,6 +54,8 @@ updated: 2026-07-09
 """,
 }
 
+_MEMORY_LOAD_CACHE: dict[tuple, "MemoryContextResult"] = {}
+
 
 @dataclass(frozen=True)
 class MemoryContextResult:
@@ -71,6 +74,11 @@ class MemoryContext:
 
         root = self.config.memory.root.expanduser()
         _bootstrap_memory_root(root)
+        cache_key = _memory_cache_key(root, self.config.memory.max_recall_chars)
+        cached = _MEMORY_LOAD_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         blocks: list[str] = ["Always-on memory:"]
         loaded_files: list[str] = []
         any_file_truncated = False
@@ -91,29 +99,45 @@ class MemoryContext:
             blocks.extend(["", f"[{filename}]", content])
 
         if not loaded_files:
-            return MemoryContextResult(text="", files=[])
-
-        return self._bound_result("\n".join(blocks), loaded_files, any_file_truncated=any_file_truncated)
+            result = MemoryContextResult(text="", files=[])
+        else:
+            result = self._bound_result("\n".join(blocks), loaded_files, any_file_truncated=any_file_truncated)
+        _MEMORY_LOAD_CACHE[cache_key] = result
+        return result
 
     def _bound_result(self, text: str, files: list[str], *, any_file_truncated: bool = False) -> MemoryContextResult:
         max_chars = self.config.memory.max_recall_chars
         if len(text) <= max_chars:
             return MemoryContextResult(text=text, files=files, truncated=any_file_truncated)
-        keep = max(0, max_chars - len(_TRUNCATED_SUFFIX))
-        return MemoryContextResult(text=text[:keep] + _TRUNCATED_SUFFIX, files=files, truncated=True)
+        return MemoryContextResult(text=bound_text(text, max_chars), files=files, truncated=True)
+
+
+def _memory_cache_key(root: Path, max_recall_chars: int) -> tuple:
+    return (
+        str(root),
+        max_recall_chars,
+        _file_mtime(root / "MEMORY.md"),
+        _file_mtime(root / "USER.md"),
+    )
+
+
+def _file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _bound_file_content(filename: str, content: str) -> tuple[str, bool]:
     limit = ALWAYS_ON_MEMORY_FILE_LIMITS[filename]
     if len(content) <= limit:
         return content, False
-    keep = max(0, limit - len(_TRUNCATED_SUFFIX))
-    return content[:keep] + _TRUNCATED_SUFFIX, True
+    return bound_text(content, limit), True
 
 
 def _bootstrap_memory_root(root: Path) -> None:
     try:
-        if root.exists() and any(path.is_file() for path in root.rglob("*")):
+        if any((root / name).is_file() for name in _BOOTSTRAP_SENTINELS):
             return
         for relative_name, content in _SAMPLE_MEMORY_FILES.items():
             path = root / relative_name

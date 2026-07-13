@@ -3,14 +3,16 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::AgentConfig;
+use crate::config::{expand_user_path, AgentConfig};
 use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
 use crate::skills::run_skill_command;
+
+static TOOL_SPECS_CACHE: Mutex<Option<(Vec<String>, Vec<serde_json::Value>)>> = Mutex::new(None);
 
 #[derive(Clone)]
 pub struct ToolContext {
@@ -101,6 +103,21 @@ pub fn tool_specs_for_config(config: &AgentConfig) -> Vec<serde_json::Value> {
 }
 
 fn tool_specs_for_enabled(enabled: &[String]) -> Vec<serde_json::Value> {
+    if let Ok(cache) = TOOL_SPECS_CACHE.lock() {
+        if let Some((key, specs)) = cache.as_ref() {
+            if key.as_slice() == enabled {
+                return specs.clone();
+            }
+        }
+    }
+    let specs = build_tool_specs(enabled);
+    if let Ok(mut cache) = TOOL_SPECS_CACHE.lock() {
+        *cache = Some((enabled.to_vec(), specs.clone()));
+    }
+    specs
+}
+
+fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     let has = |name: &str| enabled.iter().any(|item| item == name);
     let mut specs = Vec::new();
     if has("files") {
@@ -974,20 +991,6 @@ fn resolve_arg_path(value: &str, context: &ToolContext) -> PathBuf {
         context.cwd.join(path)
     };
     canonicalize_existing_prefix(&joined)
-}
-
-fn expand_user_path(value: &str) -> PathBuf {
-    if value == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(value)
 }
 
 pub fn is_allowed(path: &Path, context: &ToolContext) -> bool {

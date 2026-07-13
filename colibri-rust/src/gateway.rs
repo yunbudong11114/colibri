@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::config::{expand_user_path, AgentConfig};
+use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
 use crate::model::{build_model, ModelClient};
 use crate::session::AgentSession;
@@ -208,6 +208,22 @@ impl GatewaySessionCache {
         }
     }
 
+    pub fn close(&mut self) {
+        let keys: Vec<String> = self.entries.keys().cloned().collect();
+        for key in keys {
+            if let Some(mut entry) = self.entries.remove(&key) {
+                entry.session.close();
+            }
+            self.steer_handles.remove(&key);
+        }
+        self.steer_handles.clear();
+        if let Some(transcript) = self.transcript.take() {
+            if let Ok(mut writer) = transcript.lock() {
+                writer.close();
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -232,7 +248,9 @@ impl GatewaySessionCache {
             .map(|(key, _)| key.clone())
             .collect();
         for key in expired {
-            self.entries.remove(&key);
+            if let Some(mut entry) = self.entries.remove(&key) {
+                entry.session.close();
+            }
             self.steer_handles.remove(&key);
         }
     }
@@ -246,7 +264,9 @@ impl GatewaySessionCache {
         else {
             return;
         };
-        self.entries.remove(&key);
+        if let Some(mut entry) = self.entries.remove(&key) {
+            entry.session.close();
+        }
         self.steer_handles.remove(&key);
     }
 }
@@ -284,7 +304,7 @@ impl GatewayStatus {
             .as_deref()
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|_| running)
-            .and_then(pid_rss_kb)
+            .and_then(|pid| process_rss_kb(Some(pid)))
             .map(|value| value.to_string());
         Self {
             running,
@@ -431,12 +451,6 @@ fn json_field(text: &str, key: &str) -> Option<String> {
     )
 }
 
-fn colibri_home() -> PathBuf {
-    std::env::var_os("COLIBRI_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| expand_user_path("~/.colibri"))
-}
-
 fn pid_running(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
@@ -481,29 +495,4 @@ fn pid_command(pid: u32) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
-}
-
-fn pid_rss_kb(pid: u32) -> Option<u64> {
-    let proc_path = PathBuf::from("/proc").join(pid.to_string()).join("status");
-    if let Ok(text) = fs::read_to_string(proc_path) {
-        for line in text.lines() {
-            if let Some(value) = line.strip_prefix("VmRSS:") {
-                if let Some(value) = value
-                    .split_whitespace()
-                    .next()
-                    .and_then(|value| value.parse().ok())
-                {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    let output = Command::new("ps")
-        .arg("-o")
-        .arg("rss=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }

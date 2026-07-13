@@ -257,6 +257,39 @@ pub fn expand_user_path(value: &str) -> PathBuf {
     }
 }
 
+pub fn colibri_home() -> PathBuf {
+    std::env::var_os("COLIBRI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| expand_user_path("~/.colibri"))
+}
+
+/// Process RSS in KiB. `None` = current process; `Some(pid)` = that process.
+pub fn rss_kb(pid: Option<u32>) -> Option<u64> {
+    let pid = pid.unwrap_or_else(std::process::id);
+    let proc_path = PathBuf::from("/proc").join(pid.to_string()).join("status");
+    if let Ok(text) = std::fs::read_to_string(proc_path) {
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("VmRSS:") {
+                if let Some(value) = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    let output = std::process::Command::new("ps")
+        .arg("-o")
+        .arg("rss=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
