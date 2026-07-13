@@ -987,7 +987,7 @@ fn session_does_not_log_context_budget_for_token_triggered_compaction_like_pytho
 }
 
 #[test]
-fn session_summarizes_large_tool_result_for_model_context_but_logs_full_transcript_like_python() {
+fn session_keeps_large_tool_result_text_for_model_context_like_python() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("session-tool-result-summary");
     let full_text = format!("{}\n{}", "A".repeat(80), "B".repeat(80));
@@ -1008,7 +1008,7 @@ fn session_summarizes_large_tool_result_for_model_context_but_logs_full_transcri
         BTreeMap::new(),
     );
 
-    session
+    let response = session
         .submit(r#"tool:files.read {"path":"note.txt"}"#)
         .unwrap();
 
@@ -1018,13 +1018,8 @@ fn session_summarizes_large_tool_result_for_model_context_but_logs_full_transcri
         .iter()
         .find(|message| message.role == "tool")
         .expect("tool message");
-    assert!(tool_message
-        .content
-        .starts_with("tool_result_summary: files.read ok"));
-    assert!(tool_message.content.contains("chars=161"));
-    assert!(tool_message.content.contains("head:"));
-    assert!(tool_message.content.contains("tail:"));
-    assert!(!tool_message.content.contains(&full_text));
+    assert_eq!(tool_message.content, full_text);
+    assert!(response.text.contains(&full_text));
     let transcript = fs::read_to_string(transcript_path).unwrap();
     assert!(transcript.contains(&"A".repeat(80)));
     assert!(transcript.contains(&"B".repeat(80)));

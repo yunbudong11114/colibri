@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially superseded by `2026-07-13-input-context-token-compaction-design.md`: the tool-result summarization and round-limit behavior remain, but `model_input_char_limit` has been removed and `model.input_context_tokens` now triggers proactive compaction.
+Superseded by `2026-07-13-input-context-token-compaction-design.md`: `model_input_char_limit` has been removed and `model.input_context_tokens` now triggers proactive compaction. The experimental pre-model tool-result summarization path is removed; successful tool results must be passed back to the model in full, subject only to the existing tool's own result limit.
 
 ## Goal
 
@@ -50,7 +50,7 @@ The `Message(role="tool")` content appended to `session.messages` is now a model
 - Errors remain `error_type: text`.
 - Short successful tool outputs remain unchanged.
 - Large successful tool outputs become a compact summary:
-  - first line: `tool_result_summary: <tool> ok chars=<N> truncated=<true|false>`
+  - Removed: pre-model tool result summaries such as `tool_result_summary: <tool> ok chars=<N> truncated=<true|false>` are no longer emitted.
   - if known: `path=<path>`
   - then `head:` and `tail:` snippets.
 
@@ -64,7 +64,7 @@ This is intentionally deterministic and does not call the model.
 - `input_chars_after`
 - `dropped_model_messages`
 - `largest_messages`: up to three `{role, tool, chars}` entries, including tool name when available.
-- `applied_strategies`: currently `drop_old_message_groups`; session may add `tool_result_summary` and `context_pressure_warning`.
+- `applied_strategies`: currently `drop_old_message_groups`; session may add `context_pressure_warning`.
 
 Transcript `context_budget` events keep the existing `input_chars` field for compatibility and add the above fields.
 
@@ -89,7 +89,7 @@ The round limit text is stored in `session.messages`. Therefore transcript resto
 Python:
 
 - `test_files_read_reads_line_range_and_respects_max_chars`
-- `test_tool_result_context_summarizes_large_success_but_transcript_keeps_text`
+- `test_tool_result_context_keeps_large_success_text_for_model`
 - `test_context_budget_event_records_before_after_largest_and_strategies`
 - `test_context_pressure_warning_is_injected_after_repeated_budget_events`
 - update round limit text assertion.

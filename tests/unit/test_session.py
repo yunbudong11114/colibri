@@ -384,7 +384,7 @@ def test_session_compacts_when_model_input_tokens_reach_threshold():
     assert compact_events
 
 
-def test_tool_result_context_summarizes_large_success_but_transcript_keeps_text(tmp_path):
+def test_tool_result_context_keeps_large_success_text_for_model(tmp_path):
     note = tmp_path / "note.txt"
     full_text = "A" * 80 + "\n" + "B" * 80
     note.write_text(full_text, encoding="utf-8")
@@ -407,11 +407,8 @@ def test_tool_result_context_summarizes_large_success_but_transcript_keeps_text(
     session.submit("read note")
 
     tool_message = next(message for message in session.messages if message.role == "tool")
-    assert tool_message.content.startswith("tool_result_summary: files.read ok")
-    assert "chars=161" in tool_message.content
-    assert "head:" in tool_message.content
-    assert "tail:" in tool_message.content
-    assert full_text not in tool_message.content
+    assert tool_message.content == full_text
+    assert model.second_call_tool_result_text == full_text
     transcript_result = next(payload for event_type, payload in transcript.events if event_type == "tool_result")
     assert transcript_result["text"] == full_text
 
@@ -862,6 +859,7 @@ class ScriptedToolModel:
         self.path = path
         self.calls = 0
         self.second_call_had_tool_result = False
+        self.second_call_tool_result_text = ""
 
     def complete(self, messages, tools, system, limits):
         self.calls += 1
@@ -874,6 +872,14 @@ class ScriptedToolModel:
 
         self.second_call_had_tool_result = any(
             message.role == "tool" and message.tool_call_id == "call_1" for message in messages
+        )
+        self.second_call_tool_result_text = next(
+            (
+                message.content
+                for message in messages
+                if message.role == "tool" and message.tool_call_id == "call_1"
+            ),
+            "",
         )
         return ModelResponse(text="final answer")
 

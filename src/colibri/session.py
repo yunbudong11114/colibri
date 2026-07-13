@@ -37,8 +37,6 @@ SYSTEM_PROMPT = (
     "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. "
     "Prefer short, practical responses and respect low memory, battery, and tool limits. "
 )
-TOOL_RESULT_SUMMARY_THRESHOLD = 120
-TOOL_RESULT_SUMMARY_SNIPPET_CHARS = 48
 
 
 @dataclass
@@ -253,7 +251,7 @@ class AgentSession:
                 "media": _media_payload(result.media),
             },
         )
-        self.messages.append(Message(role="tool", content=self._tool_context_text(call, result), tool_call_id=call.id))
+        self.messages.append(Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id))
         self._compact_messages_if_needed()
 
     def _finish_response(self, text: str) -> AgentResponse:
@@ -366,11 +364,6 @@ class AgentSession:
         if result.ok:
             return result.text
         return f"{result.error_type or 'tool_error'}: {result.text}"
-
-    def _tool_context_text(self, call: ToolCall, result: ToolResult) -> str:
-        if not result.ok:
-            return self._tool_result_text(result)
-        return _summarize_tool_result_for_context(call, result)
 
     def _send_media_result_if_needed(self, result: ToolResult) -> ToolResult:
         if not result.ok or result.media is None:
@@ -538,20 +531,3 @@ def _bound_text_block(text: str, max_chars: int) -> str:
     suffix = "\n...[truncated]"
     keep = max(0, max_chars - len(suffix))
     return text[:keep] + suffix
-
-
-def _summarize_tool_result_for_context(call: ToolCall, result: ToolResult) -> str:
-    if call.name != "files.read":
-        return result.text
-    if len(result.text) <= TOOL_RESULT_SUMMARY_THRESHOLD:
-        return result.text
-    lines = [
-        f"tool_result_summary: {call.name} ok chars={len(result.text)} truncated={str(result.truncated).lower()}",
-    ]
-    path = call.arguments.get("path")
-    if isinstance(path, str) and path:
-        lines.append(f"path={path}")
-    head = result.text[:TOOL_RESULT_SUMMARY_SNIPPET_CHARS]
-    tail = result.text[-TOOL_RESULT_SUMMARY_SNIPPET_CHARS:]
-    lines.extend(["head:", head, "tail:", tail])
-    return "\n".join(lines)

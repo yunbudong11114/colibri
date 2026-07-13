@@ -20,8 +20,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
-const TOOL_RESULT_SUMMARY_THRESHOLD: usize = 120;
-const TOOL_RESULT_SUMMARY_SNIPPET_CHARS: usize = 48;
 
 pub struct AgentSession {
     pub config: Arc<AgentConfig>,
@@ -343,7 +341,7 @@ impl AgentSession {
             }),
         );
         let content = if result.ok {
-            summarize_tool_result_for_context(call, &result)
+            result.text
         } else {
             format!(
                 "{}: {}",
@@ -607,43 +605,6 @@ fn denied_tool_text(call: &ToolCall) -> String {
         }
     }
     format!("User denied {}", call.name)
-}
-
-fn summarize_tool_result_for_context(call: &ToolCall, result: &ToolResult) -> String {
-    if call.name != "files.read" {
-        return result.text.clone();
-    }
-    if result.text.chars().count() <= TOOL_RESULT_SUMMARY_THRESHOLD {
-        return result.text.clone();
-    }
-    let mut lines = vec![format!(
-        "tool_result_summary: {} ok chars={} truncated={}",
-        call.name,
-        result.text.chars().count(),
-        result.truncated
-    )];
-    if let Some(path) = call.arguments.get("path").and_then(|value| value.as_str()) {
-        if !path.is_empty() {
-            lines.push(format!("path={path}"));
-        }
-    }
-    let head = result
-        .text
-        .chars()
-        .take(TOOL_RESULT_SUMMARY_SNIPPET_CHARS)
-        .collect::<String>();
-    let tail_chars = result
-        .text
-        .chars()
-        .rev()
-        .take(TOOL_RESULT_SUMMARY_SNIPPET_CHARS)
-        .collect::<Vec<_>>();
-    let tail = tail_chars.into_iter().rev().collect::<String>();
-    lines.push("head:".to_string());
-    lines.push(head);
-    lines.push("tail:".to_string());
-    lines.push(tail);
-    lines.join("\n")
 }
 
 fn user_text_with_media(text: &str, media: &[MediaPart]) -> String {
