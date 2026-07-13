@@ -158,8 +158,8 @@ fn files_tool_specs() -> Vec<serde_json::Value> {
         ),
         openai_tool(
             "files.read",
-            "Read a UTF-8 text file under an allowed root.",
-            serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            "Read a UTF-8 text file under an allowed root. Prefer start_line/end_line ranges for large files. Optional max_chars caps this read result and is itself capped by tools.max_result_chars.",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"max_chars":{"type":"integer","minimum":1}},"required":["path"]}),
         ),
         openai_tool(
             "files.write",
@@ -280,15 +280,64 @@ fn files_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     if !path.is_file() {
         return ToolResult::error("not_file", "Path is not a file");
     }
+    let Some((start_line, end_line, max_chars)) = read_range_args(args) else {
+        return ToolResult::error("invalid_arguments", "Invalid line range or max_chars");
+    };
+    if let (Some(start), Some(end)) = (start_line, end_line) {
+        if start > end {
+            return ToolResult::error("invalid_arguments", "start_line must be <= end_line");
+        }
+    }
     match fs::read_to_string(&path) {
-        Ok(text) => {
-            let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
+        Ok(mut text) => {
+            if start_line.is_some() || end_line.is_some() {
+                text = select_line_range(&text, start_line, end_line);
+            }
+            let limit = max_chars
+                .unwrap_or(context.config.tools.max_result_chars)
+                .min(context.config.tools.max_result_chars);
+            let (text, truncated) = truncate(text, limit);
             let mut result = ToolResult::ok(text);
             result.truncated = truncated;
             result
         }
         Err(error) => ToolResult::error("io_error", error.to_string()),
     }
+}
+
+fn read_range_args(args: &BTreeMap<String, String>) -> Option<(Option<usize>, Option<usize>, Option<usize>)> {
+    Some((
+        positive_usize_arg(args, "start_line")?,
+        positive_usize_arg(args, "end_line")?,
+        positive_usize_arg(args, "max_chars")?,
+    ))
+}
+
+fn positive_usize_arg(args: &BTreeMap<String, String>, name: &str) -> Option<Option<usize>> {
+    let Some(value) = args.get(name) else {
+        return Some(None);
+    };
+    let parsed = value.parse::<usize>().ok()?;
+    if parsed == 0 {
+        return None;
+    }
+    Some(Some(parsed))
+}
+
+fn select_line_range(text: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    let start = start_line.unwrap_or(1).saturating_sub(1);
+    let end = end_line.unwrap_or(usize::MAX);
+    text.split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(index, segment)| {
+            let line_no = index + 1;
+            if line_no > start && line_no <= end {
+                Some(segment)
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
 }
 
 fn files_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {

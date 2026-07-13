@@ -1,4 +1,4 @@
-from colibri.context import append_summary, budget_model_messages, format_model_summary, summarize_messages
+from colibri.context import append_summary, format_model_summary, summarize_messages
 from colibri.messages import Message, ToolCall
 
 
@@ -48,34 +48,3 @@ def test_format_model_summary_strips_analysis_and_keeps_summary_body():
     assert summary == "Summary:\n1. Primary Request and Intent:\nKeep the project moving."
     assert "private scratchpad" not in summary
 
-
-def test_budget_model_messages_drops_oldest_non_system_and_keeps_latest_user():
-    messages = [
-        Message(role="system", content="summary"),
-        Message(role="user", content="old user " + "x" * 20),
-        Message(role="assistant", content="old assistant " + "y" * 20),
-        Message(role="user", content="latest user"),
-    ]
-
-    budgeted, dropped = budget_model_messages(messages, max_chars=32)
-
-    assert dropped == 2
-    assert [message.content for message in budgeted] == ["summary", "latest user"]
-
-
-def test_budget_model_messages_drops_complete_tool_call_group():
-    call = ToolCall(id="call_1", name="files.read", arguments={"path": "notes.txt"})
-    messages = [
-        Message(role="user", content="u"),
-        Message(role="assistant", content="", tool_calls=[call]),
-        Message(role="tool", content="result", tool_call_id="call_1"),
-        Message(role="assistant", content="done"),
-    ]
-
-    budgeted, dropped = budget_model_messages(messages, max_chars=30)
-
-    assert dropped == 2
-    assert [(message.role, message.tool_call_id) for message in budgeted] == [
-        ("user", None),
-        ("assistant", None),
-    ]

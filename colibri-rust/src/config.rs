@@ -10,6 +10,7 @@ pub struct ModelConfig {
     pub api_key: String,
     pub timeout_seconds: u64,
     pub max_output_tokens: usize,
+    pub input_context_tokens: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -26,7 +27,6 @@ pub struct SessionConfig {
     pub max_tool_rounds: usize,
     pub trigger_message_limit: usize,
     pub recent_message_limit: usize,
-    pub model_input_char_limit: usize,
     pub summary_max_chars: usize,
     pub model_compact: bool,
     pub idle_exit_enabled: bool,
@@ -131,6 +131,7 @@ impl Default for AgentConfig {
                 api_key: String::new(),
                 timeout_seconds: 60,
                 max_output_tokens: 16384,
+                input_context_tokens: 48000,
             },
             vision: VisionConfig {
                 model: String::new(),
@@ -143,7 +144,6 @@ impl Default for AgentConfig {
                 max_tool_rounds: 32,
                 trigger_message_limit: 96,
                 recent_message_limit: 12,
-                model_input_char_limit: 192000,
                 summary_max_chars: 12000,
                 model_compact: true,
                 idle_exit_enabled: false,
@@ -284,6 +284,9 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         if let Some(value) = get_usize(table, "max_output_tokens") {
             config.model.max_output_tokens = value;
         }
+        if let Some(value) = get_usize(table, "input_context_tokens") {
+            config.model.input_context_tokens = value;
+        }
     }
     if let Some(table) = value.get("vision") {
         if let Some(value) = get_string(table, "model") {
@@ -311,9 +314,6 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         }
         if let Some(value) = get_usize(table, "recent_message_limit") {
             config.session.recent_message_limit = value;
-        }
-        if let Some(value) = get_usize(table, "model_input_char_limit") {
-            config.session.model_input_char_limit = value;
         }
         if let Some(value) = get_usize(table, "summary_max_chars") {
             config.session.summary_max_chars = value;
@@ -468,6 +468,7 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
             "api_key",
             "timeout_seconds",
             "max_output_tokens",
+            "input_context_tokens",
         ],
         &[],
     )?;
@@ -490,7 +491,6 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
             "max_tool_rounds",
             "trigger_message_limit",
             "recent_message_limit",
-            "model_input_char_limit",
             "summary_max_chars",
             "model_compact",
             "idle_exit_enabled",

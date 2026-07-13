@@ -33,7 +33,7 @@ def build_diagnostics(
         (
             f"trigger_message_limit={config.session.trigger_message_limit} "
             f"recent_message_limit={config.session.recent_message_limit} "
-            f"model_input_char_limit={config.session.model_input_char_limit} "
+            f"input_context_tokens={config.model.input_context_tokens} "
             f"summary_max_chars={config.session.summary_max_chars}"
         ),
     ]

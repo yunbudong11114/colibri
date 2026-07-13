@@ -11,6 +11,8 @@ api_key = ""
 timeout_seconds = 60
 # 单次模型回复的最大输出 token 数。
 max_output_tokens = 16384
+# 模型输入上下文 token 上限；达到 80% 时触发历史压缩。
+input_context_tokens = 48000
 
 [vision]
 # 视觉模型名称；为空时复用 [model].model。
@@ -31,8 +33,6 @@ max_tool_rounds = 32
 trigger_message_limit = 96
 # 压缩后保留的最近消息条数。
 recent_message_limit = 12
-# 每次发送给模型的输入字符上限，也用于限制单条用户输入长度。
-model_input_char_limit = 192000
 # 滚动摘要最多保留的字符数。
 summary_max_chars = 12000
 # 是否优先调用模型生成历史摘要；失败时会自动回退到本地摘要。

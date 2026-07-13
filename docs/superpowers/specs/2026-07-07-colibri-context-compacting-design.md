@@ -1,5 +1,7 @@
 # Colibri Context Compacting Design
 
+Superseded note: `session.model_input_char_limit` and `context_budget` trimming were removed by `2026-07-13-input-context-token-compaction-design.md`. Estimated token pressure now triggers normal compaction via `model.input_context_tokens`.
+
 Date: 2026-07-07
 Status: Approved by roadmap; enhanced on 2026-07-07
 Milestone: 6
@@ -15,7 +17,7 @@ After this milestone, Colibri should:
 - use the configured model to create Claude Code style continuation summaries when enabled,
 - inject the rolling summary into model input as temporary context,
 - keep the summary bounded by `session.summary_max_chars`,
-- cap model input messages by `session.model_input_char_limit`,
+- trigger compaction when estimated model input reaches 80% of `model.input_context_tokens`,
 - replace old tool results in summaries with compact metadata,
 - record compact events in transcript logs.
 
@@ -127,7 +129,7 @@ The summary context is sent as a temporary `system` message and must not be appe
 
 ## 5. Input Character Budget
 
-Before each model call, `AgentSession` should ensure temporary model input is bounded by `session.model_input_char_limit`.
+Before each model call, `AgentSession` should trigger summary compaction if estimated model input reaches 80% of `model.input_context_tokens`.
 
 Budget rules:
 
@@ -157,7 +159,7 @@ Event type:
 context_compact
 ```
 
-When model input is trimmed to fit `model_input_char_limit`, write:
+When model input pressure triggers compaction, write:
 
 ```json
 {

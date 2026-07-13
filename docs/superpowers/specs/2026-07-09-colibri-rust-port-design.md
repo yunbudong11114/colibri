@@ -1,5 +1,9 @@
 # Colibri Rust Port Design
 
+## Status
+
+Partially superseded by `2026-07-13-input-context-token-compaction-design.md`: Rust no longer enforces `model_input_char_limit` by dropping old messages. It uses `model.input_context_tokens` to trigger the same compaction path as message-count compaction.
+
 ## Goal
 
 Create a new Rust implementation under `colibri-rust/` that can be built with the locally installed Cargo toolchain and used directly as a lightweight Colibri binary. The Rust port must preserve the Python project's configuration schema, configuration file format, CLI commands, default fake model responses, bounded session loop, transcripts, built-in tools, gateway process management, and Weixin iLink auth/API plumbing.
@@ -25,7 +29,7 @@ The Rust version targets behavior parity with the Python runtime. It may use sma
 - Interactive permission confirmation mirrors Python's console prompter choices: shell prompts support once/session/executable-session/project/deny; file-path prompts support once/session-dir/project-dir/deny; normal tool prompts support once/session/project/deny.
 - REPL terminal behavior mirrors Python's user-visible behavior for prompt handling, `/quit` and `/exit`, EOF, idle timeout, Unicode plain-stream input, and history/raw-tty behavior where the Rust standard library and terminal support allow it.
 - `fake` model is deterministic and supports scripted tool calls for local smoke testing through a `tool:<name> <json>` prompt convention.
-- Context compaction mirrors Python behavior: when `trigger_message_limit` is reached, Rust retains the latest user message even when outside the recent window, supports model-assisted compaction for non-fake providers, falls back to local summarized messages when model compaction fails or is disabled, injects summary context as `Compacted conversation summary:`, and enforces `model_input_char_limit` by dropping oldest non-system, non-latest-user messages while logging the drop count.
+- Context compaction mirrors Python behavior: when `trigger_message_limit` is reached or estimated model input reaches 80% of `model.input_context_tokens`, Rust retains the latest user message even when outside the recent window, supports model-assisted compaction for non-fake providers, falls back to local summarized messages when model compaction fails or is disabled, and injects summary context as `Compacted conversation summary:`.
 - Skill handling mirrors Python's `SkillIndex`: Rust includes the built-in `create-colibri-skill`, scans local skill directories without storing user skill bodies, derives descriptions from `skill.toml` or `SKILL.md`, parses command metadata including `description`, `args`, and `read_only`, scores skills from name/description terms, selects the built-in creation skill only for skill creation requests, loads selected contexts with `Base directory:`, and applies `max_loaded` plus `max_instruction_chars`.
 - User media handling mirrors Python session behavior: inbound channel media is appended to the user message as an `Attachments saved locally:` block, transcript `user_message` payloads include structured media metadata, restored transcript history strips local attachment paths, and tool-result media is sent through the active channel before the tool response is exposed back to the model.
 - Transcript handling mirrors Python's JSONL schema: each event contains `ts`, `type`, and object `payload`; `COLIBRI_HOME` controls the default transcript root; scoped gateway transcripts merge channel metadata such as `channel`, `sender_id`, and `session_key` into each payload without closing the base writer.

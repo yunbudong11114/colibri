@@ -1,8 +1,8 @@
 use crate::config::AgentConfig;
 use crate::context::{
-    append_summary, budget_model_messages, compact_prompt_message, format_model_summary,
-    model_input_chars, retain_recent_message_groups, round_limit_text, summarize_messages,
-    summary_context, COMPACT_SYSTEM_PROMPT,
+    append_summary, compact_prompt_message, estimate_model_input_tokens, format_model_summary,
+    retain_recent_message_groups, round_limit_text, summarize_messages, summary_context,
+    COMPACT_SYSTEM_PROMPT,
 };
 use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
@@ -20,6 +20,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
+const TOOL_RESULT_SUMMARY_THRESHOLD: usize = 120;
+const TOOL_RESULT_SUMMARY_SNIPPET_CHARS: usize = 48;
 
 pub struct AgentSession {
     pub config: Arc<AgentConfig>,
@@ -170,12 +172,11 @@ impl AgentSession {
     ) -> Result<AgentResponse, String> {
         self.restore_history_once();
         let user_text = user_text_with_media(text, &media);
-        let bounded = bound_text(&user_text, self.config.session.model_input_char_limit);
-        self.messages.push(Message::new("user", &bounded));
+        self.messages.push(Message::new("user", &user_text));
         self.write_transcript(
             "user_message",
             serde_json::json!({
-                "text": bounded,
+                "text": user_text,
                 "media": media.iter().map(media_payload).collect::<Vec<_>>()
             }),
         );
@@ -200,7 +201,7 @@ impl AgentSession {
                 serde_json::json!({"files":memory.files,"truncated":memory.truncated}),
             );
         }
-        let (skill_text, skill_names, _truncated) = relevant_skill_context(&bounded, &context);
+        let (skill_text, skill_names, _truncated) = relevant_skill_context(&user_text, &context);
         if !skill_text.is_empty() {
             self.write_transcript(
                 "skill_recall",
@@ -208,7 +209,6 @@ impl AgentSession {
             );
         }
         let tools = tool_specs_for_config(&self.config);
-
         let steering = Arc::clone(&self.steering);
         steering.set_turn_active(true);
         let _turn_guard = TurnGuard { steering };
@@ -343,7 +343,7 @@ impl AgentSession {
             }),
         );
         let content = if result.ok {
-            result.text
+            summarize_tool_result_for_context(call, &result)
         } else {
             format!(
                 "{}: {}",
@@ -391,12 +391,11 @@ impl AgentSession {
         if let Some(notifier) = &self.steer_notifier {
             notifier(format_steering_ack(skipped, text));
         }
-        let bounded = bound_text(text, self.config.session.model_input_char_limit);
-        self.messages.push(Message::new("user", &bounded));
+        self.messages.push(Message::new("user", text));
         self.write_transcript(
             "user_message",
             serde_json::json!({
-                "text": bounded,
+                "text": text,
                 "media": [],
                 "steering": true
             }),
@@ -435,6 +434,11 @@ impl AgentSession {
     }
 
     fn budgeted_model_messages(&mut self, memory_text: &str, skill_text: &str) -> Vec<Message> {
+        self.compact_for_model_input_if_needed(memory_text, skill_text);
+        self.model_messages(memory_text, skill_text)
+    }
+
+    fn model_messages(&self, memory_text: &str, skill_text: &str) -> Vec<Message> {
         let mut messages = Vec::new();
         let summary_text = summary_context(&self.summary);
         if !summary_text.is_empty() {
@@ -447,23 +451,31 @@ impl AgentSession {
             messages.push(Message::new("system", skill_text));
         }
         messages.extend(self.messages.iter().cloned());
-        let (budgeted, dropped) =
-            budget_model_messages(messages, self.config.session.model_input_char_limit);
-        if dropped > 0 {
-            self.write_transcript(
-                "context_budget",
-                serde_json::json!({
-                    "dropped_model_messages": dropped,
-                    "input_chars": model_input_chars(&budgeted),
-                }),
-            );
+        messages
+    }
+
+    fn compact_for_model_input_if_needed(&mut self, memory_text: &str, skill_text: &str) {
+        let token_limit = self.config.model.input_context_tokens;
+        if token_limit == 0 {
+            return;
         }
-        budgeted
+        let threshold = token_limit.saturating_mul(8) / 10;
+        if threshold == 0 || estimate_model_input_tokens(&self.model_messages(memory_text, skill_text)) < threshold {
+            return;
+        }
+        self.compact_now();
     }
 
     fn compact_if_needed(&mut self) {
         let trigger_limit = self.config.session.trigger_message_limit.max(1);
         if self.messages.len() < trigger_limit {
+            return;
+        }
+        self.compact_now();
+    }
+
+    fn compact_now(&mut self) {
+        if self.messages.is_empty() {
             return;
         }
         let messages_to_compact = std::mem::take(&mut self.messages);
@@ -595,6 +607,43 @@ fn denied_tool_text(call: &ToolCall) -> String {
         }
     }
     format!("User denied {}", call.name)
+}
+
+fn summarize_tool_result_for_context(call: &ToolCall, result: &ToolResult) -> String {
+    if call.name != "files.read" {
+        return result.text.clone();
+    }
+    if result.text.chars().count() <= TOOL_RESULT_SUMMARY_THRESHOLD {
+        return result.text.clone();
+    }
+    let mut lines = vec![format!(
+        "tool_result_summary: {} ok chars={} truncated={}",
+        call.name,
+        result.text.chars().count(),
+        result.truncated
+    )];
+    if let Some(path) = call.arguments.get("path").and_then(|value| value.as_str()) {
+        if !path.is_empty() {
+            lines.push(format!("path={path}"));
+        }
+    }
+    let head = result
+        .text
+        .chars()
+        .take(TOOL_RESULT_SUMMARY_SNIPPET_CHARS)
+        .collect::<String>();
+    let tail_chars = result
+        .text
+        .chars()
+        .rev()
+        .take(TOOL_RESULT_SUMMARY_SNIPPET_CHARS)
+        .collect::<Vec<_>>();
+    let tail = tail_chars.into_iter().rev().collect::<String>();
+    lines.push("head:".to_string());
+    lines.push(head);
+    lines.push("tail:".to_string());
+    lines.push(tail);
+    lines.join("\n")
 }
 
 fn user_text_with_media(text: &str, media: &[MediaPart]) -> String {

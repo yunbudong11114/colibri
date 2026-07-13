@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from colibri.config import AgentConfig
 from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
@@ -358,22 +360,101 @@ def test_session_logs_context_compact_event():
     assert compact_events[-1]["summary_chars"] == len(session.summary)
 
 
-def test_session_budgets_model_input_and_logs_event():
+def test_session_compacts_when_model_input_tokens_reach_threshold():
     config = AgentConfig.default().with_overrides(
-        {"session": {"model_input_char_limit": 80, "recent_message_limit": 20}}
+        {
+            "model": {"input_context_tokens": 30},
+            "session": {"trigger_message_limit": 99, "recent_message_limit": 2, "model_compact": False},
+        }
     )
     transcript = MemoryTranscript()
     model = BudgetAwareModel()
     session = AgentSession(config=config, model=model, transcript=transcript)
 
-    session.submit("first " + "x" * 30)
-    session.submit("second " + "y" * 30)
+    session.messages = [
+        Message(role="user", content="old user " + "x" * 50),
+        Message(role="assistant", content="old assistant " + "y" * 50),
+    ]
+    session.submit("latest message")
 
-    assert any(message.content.startswith("second") for message in model.first_messages)
-    assert not any(message.content.startswith("first") for message in model.first_messages)
-    budget_events = [payload for event_type, payload in transcript.events if event_type == "context_budget"]
-    assert budget_events
-    assert budget_events[-1]["dropped_model_messages"] > 0
+    assert session.summary
+    assert any(message.content.startswith("latest message") for message in model.first_messages)
+    assert not any(message.content.startswith("old user") for message in model.first_messages)
+    compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
+    assert compact_events
+
+
+def test_tool_result_context_summarizes_large_success_but_transcript_keeps_text(tmp_path):
+    note = tmp_path / "note.txt"
+    full_text = "A" * 80 + "\n" + "B" * 80
+    note.write_text(full_text, encoding="utf-8")
+    config = AgentConfig.default().with_overrides(
+        {
+            "files": {"roots": [str(tmp_path)]},
+            "memory": {"enabled": False, "root": str(tmp_path / "memory")},
+            "tools": {"max_result_chars": 500},
+        }
+    )
+    transcript = MemoryTranscript()
+    model = ScriptedToolModel(path=str(note))
+    session = AgentSession(
+        config=config,
+        model=model,
+        tools=ToolRegistry.from_config(config, cwd=tmp_path),
+        transcript=transcript,
+    )
+
+    session.submit("read note")
+
+    tool_message = next(message for message in session.messages if message.role == "tool")
+    assert tool_message.content.startswith("tool_result_summary: files.read ok")
+    assert "chars=161" in tool_message.content
+    assert "head:" in tool_message.content
+    assert "tail:" in tool_message.content
+    assert full_text not in tool_message.content
+    transcript_result = next(payload for event_type, payload in transcript.events if event_type == "tool_result")
+    assert transcript_result["text"] == full_text
+
+
+def test_context_budget_event_is_not_written_for_token_triggered_compaction():
+    config = AgentConfig.default().with_overrides(
+        {
+            "model": {"input_context_tokens": 30},
+            "session": {"trigger_message_limit": 99, "recent_message_limit": 2, "model_compact": False},
+        }
+    )
+    transcript = MemoryTranscript()
+    model = BudgetAwareModel()
+    session = AgentSession(config=config, model=model, transcript=transcript)
+    session.messages = [
+        Message(role="user", content="old user " + "x" * 50),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="call_1", name="files.read", arguments={"path": "big.rs"})],
+        ),
+        Message(role="tool", content="tool output " + "y" * 120, tool_call_id="call_1"),
+    ]
+
+    session.submit("latest message")
+
+    assert session.summary
+    assert [payload for event_type, payload in transcript.events if event_type == "context_budget"] == []
+
+
+def test_context_pressure_warning_is_not_injected_for_large_model_input():
+    config = AgentConfig.default().with_overrides({"model": {"input_context_tokens": 30}, "session": {"max_tool_rounds": 4}})
+    model = RepeatedBudgetPressureModel()
+    session = AgentSession(
+        config=config,
+        model=model,
+        tools=ToolRegistry([LargeResultTool()], cwd=Path.cwd()),
+    )
+
+    session.submit("start")
+
+    assert not model.saw_pressure_warning
+    assert not any("Context budget is tight" in message.content for message in session.messages)
 
 
 def test_reset_clears_messages_and_summary():
@@ -483,6 +564,7 @@ def test_submit_stops_at_max_tool_rounds(tmp_path):
     assert "Tool round limit reached after 1 round" in response.text
     assert "Recent tool results:" in response.text
     assert "files.list" in response.text
+    assert "do not claim the previous task was fully completed" in response.text
 
 
 def test_denied_tool_call_adds_result_without_running_tool(tmp_path):
@@ -645,6 +727,7 @@ def test_session_writes_round_limit_event(tmp_path):
 
     assert "Tool round limit reached after 1 round" in response.text
     assert "files.list" in response.text
+    assert "do not claim the previous task was fully completed" in response.text
     assert transcript.events[-1][0] == "round_limit"
     assert transcript.events[-1][1]["text"] == response.text
 
@@ -800,6 +883,28 @@ class AlwaysToolModel:
         return ModelResponse(
             text="",
             tool_calls=[ToolCall(id="call_1", name="files.list", arguments={"path": "."})],
+        )
+
+
+class RepeatedBudgetPressureModel:
+    def __init__(self):
+        self.calls = 0
+        self.saw_pressure_warning = False
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if any(message.role == "system" and "Context budget is tight" in message.content for message in messages):
+            self.saw_pressure_warning = True
+            return ModelResponse(text="stopped bulk read")
+        return ModelResponse(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id=f"call_{self.calls}",
+                    name="large.tool",
+                    arguments={"payload": "x" * 200},
+                )
+            ],
         )
 
 
@@ -971,6 +1076,17 @@ class CountingTool:
     def run(self, arguments, context: ToolContext) -> ToolResult:
         self.calls += 1
         return ToolResult(ok=True, text="ran")
+
+
+class LargeResultTool:
+    spec = ToolSpec(
+        name="large.tool",
+        description="Return a large result",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    def run(self, arguments, context: ToolContext) -> ToolResult:
+        return ToolResult(ok=True, text="large " + "z" * 300)
 
 
 class MemoryTranscript:

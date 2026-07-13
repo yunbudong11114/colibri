@@ -741,10 +741,10 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         format!(
-            "trigger_message_limit={} recent_message_limit={} model_input_char_limit={} summary_max_chars={}",
+            "trigger_message_limit={} recent_message_limit={} input_context_tokens={} summary_max_chars={}",
             config.session.trigger_message_limit,
             config.session.recent_message_limit,
-            config.session.model_input_char_limit,
+            config.model.input_context_tokens,
             config.session.summary_max_chars
         ),
     ]

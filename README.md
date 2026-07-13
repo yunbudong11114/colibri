@@ -275,12 +275,12 @@ Important defaults:
 [model]
 max_output_tokens = 16384
 timeout_seconds = 60
+input_context_tokens = 48000
 
 [session]
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-model_input_char_limit = 192000
 summary_max_chars = 12000
 model_compact = true
 transcript = true
@@ -293,7 +293,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-When the session reaches `trigger_message_limit` messages, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. Model input is trimmed to fit `model_input_char_limit` while preserving the latest user message.
+When the session reaches `trigger_message_limit` messages, or when the estimated model input tokens reach 80% of `model.input_context_tokens`, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. If no tokenizer is available, Colibri estimates input tokens as UTF-8 bytes divided by 4. It does not drop old messages with a separate pruning pass.
 
 ## Transcripts
 

@@ -32,6 +32,8 @@ class ModelConfig:
     timeout_seconds: int = 60
     # 单次模型回复最大输出 token 数。
     max_output_tokens: int = 16384
+    # 模型输入上下文 token 上限；达到 80% 时触发历史压缩。
+    input_context_tokens: int = 48000
 
 
 @dataclass(frozen=True)
@@ -56,8 +58,6 @@ class SessionConfig:
     trigger_message_limit: int = 96
     # 压缩后保留的最近消息条数。
     recent_message_limit: int = 12
-    # 每次发送给模型的输入字符上限，也用于限制单条用户输入长度。
-    model_input_char_limit: int = 192000
     # 滚动摘要最多保留的字符数。
     summary_max_chars: int = 12000
     # 是否优先调用模型生成历史摘要；失败时回退到本地摘要。

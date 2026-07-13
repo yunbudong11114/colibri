@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from colibri.config import AgentConfig, expand_user_path
 
 
@@ -10,6 +12,7 @@ def test_default_config_uses_small_device_limits():
     assert config.model.model == "fake-colibri-model"
     assert config.model.api_key == ""
     assert config.model.max_output_tokens == 16384
+    assert config.model.input_context_tokens == 48000
     assert config.vision.model == ""
     assert config.vision.base_url == ""
     assert config.vision.api_key == ""
@@ -18,7 +21,6 @@ def test_default_config_uses_small_device_limits():
     assert config.session.max_tool_rounds == 32
     assert config.session.trigger_message_limit == 96
     assert config.session.recent_message_limit == 12
-    assert config.session.model_input_char_limit == 192000
     assert config.session.summary_max_chars == 12000
     assert config.session.model_compact
     assert not config.session.idle_exit_enabled
@@ -67,6 +69,7 @@ provider = "openai_compatible"
 model = "gpt-4.1-mini"
 timeout_seconds = 45
 api_key = "inline-key"
+input_context_tokens = 1000000
 
 [vision]
 model = "vision-model"
@@ -126,6 +129,7 @@ auth_timeout_seconds = 22
     assert config.model.model == "gpt-4.1-mini"
     assert config.model.api_key == "inline-key"
     assert config.model.timeout_seconds == 45
+    assert config.model.input_context_tokens == 1000000
     assert config.vision.model == "vision-model"
     assert config.vision.base_url == "https://vision.example/v1"
     assert config.vision.api_key == "vision-key"
@@ -158,6 +162,34 @@ auth_timeout_seconds = 22
     assert config.channels.weixin.allow_from == ["user-1"]
     assert config.channels.weixin.poll_timeout_seconds == 11
     assert config.channels.weixin.auth_timeout_seconds == 22
+
+
+def test_legacy_model_input_char_limit_is_rejected(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[session]
+model_input_char_limit = 192000
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError):
+        AgentConfig.load(config_path)
+
+
+def test_legacy_model_input_byte_limit_is_rejected(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[model]
+input_byte_limit = 192000
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError):
+        AgentConfig.load(config_path)
 
 
 def test_load_without_path_reads_user_default_config(monkeypatch, tmp_path):

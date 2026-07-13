@@ -101,6 +101,43 @@ def test_files_read_reads_allowed_file_and_truncates(tmp_path):
     assert len(result.text) <= config.tools.max_result_chars
 
 
+def test_files_read_reads_line_range_and_respects_max_chars(tmp_path):
+    path = tmp_path / "note.txt"
+    path.write_text("one\ntwo\nthreeeeeeeeee\nfour\n", encoding="utf-8")
+    config = make_config(tmp_path, tools={"max_result_chars": 100, "max_shell_seconds": 1})
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(
+            id="1",
+            name="files.read",
+            arguments={"path": str(path), "start_line": 2, "end_line": 4, "max_chars": 20},
+        ),
+        context,
+    )
+
+    assert result.ok
+    assert result.truncated
+    assert result.text == "two\nt\n...[truncated]"
+
+
+def test_files_read_rejects_invalid_line_range(tmp_path):
+    path = tmp_path / "note.txt"
+    path.write_text("one\n", encoding="utf-8")
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(id="1", name="files.read", arguments={"path": str(path), "start_line": 3, "end_line": 2}),
+        context,
+    )
+
+    assert not result.ok
+    assert result.error_type == "invalid_arguments"
+
+
 def test_files_write_writes_allowed_file(tmp_path):
     config = make_config(tmp_path)
     registry = ToolRegistry.from_config(config, cwd=tmp_path)

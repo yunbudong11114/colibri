@@ -89,6 +89,7 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.model.provider, "fake");
     assert_eq!(config.model.model, "fake-colibri-model");
     assert_eq!(config.model.max_output_tokens, 16384);
+    assert_eq!(config.model.input_context_tokens, 48000);
     assert_eq!(config.vision.model, "");
     assert_eq!(config.vision.base_url, "");
     assert_eq!(config.vision.api_key, "");
@@ -97,6 +98,7 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.session.max_tool_rounds, 32);
     assert_eq!(config.session.trigger_message_limit, 96);
     assert_eq!(config.session.recent_message_limit, 12);
+    assert_eq!(config.session.summary_max_chars, 12000);
     assert!(config.session.restore_transcript);
     assert_eq!(config.session.restore_message_limit, 24);
     assert_eq!(config.session.restore_char_limit, 24000);
@@ -129,6 +131,7 @@ provider = "openai_compatible"
 model = "gpt-4.1-mini"
 api_key = "inline-key"
 timeout_seconds = 45
+input_context_tokens = 1000000
 
 [vision]
 model = "vision-model"
@@ -173,6 +176,7 @@ max_active_servers = 3
     assert_eq!(config.model.model, "gpt-4.1-mini");
     assert_eq!(config.model.api_key, "inline-key");
     assert_eq!(config.model.timeout_seconds, 45);
+    assert_eq!(config.model.input_context_tokens, 1000000);
     assert_eq!(config.vision.model, "vision-model");
     assert_eq!(config.vision.base_url, "https://vision.example/v1");
     assert_eq!(config.vision.api_key, "vision-key");
@@ -888,53 +892,29 @@ fn session_uses_model_assisted_compact_and_retains_latest_user_like_python() {
 }
 
 #[test]
-fn session_budgets_model_input_and_keeps_latest_user_like_python() {
+fn session_compacts_when_model_input_tokens_reach_threshold_like_python() {
     let mut config = AgentConfig::default();
-    config.session.model_input_char_limit = 80;
+    config.model.input_context_tokens = 30;
+    config.session.trigger_message_limit = 99;
+    config.session.recent_message_limit = 2;
+    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(BudgetInspectModel));
     session
         .messages
-        .push(Message::new("user", "old message that should be dropped"));
+        .push(Message::new("user", &format!("old user {}", "x".repeat(50))));
     session.messages.push(Message::new(
         "assistant",
-        "old assistant message that should be dropped",
+        &format!("old assistant {}", "y".repeat(50)),
     ));
 
     let response = session
-        .submit("latest message must survive the budget pruning")
+        .submit("latest message")
         .unwrap();
 
     assert_eq!(response.text, "budget ok");
-}
-
-#[test]
-fn budget_model_messages_drops_complete_tool_call_group_like_python() {
-    let call = ToolCall {
-        id: "call_1".to_string(),
-        name: "files.read".to_string(),
-        arguments: serde_json::Map::new(),
-    };
-    let mut assistant = Message::new("assistant", "");
-    assistant.tool_calls = vec![call];
-    let messages = vec![
-        Message::new("user", "u"),
-        assistant,
-        Message::tool("result", "call_1"),
-        Message::new("assistant", "done"),
-    ];
-
-    let (budgeted, dropped) = colibri_rust::context::budget_model_messages(messages, 30);
-
-    assert_eq!(dropped, 2);
-    assert_eq!(
-        budgeted
-            .iter()
-            .map(|message| (message.role.as_str(), message.tool_call_id.as_deref()))
-            .collect::<Vec<_>>(),
-        vec![("user", None), ("assistant", None)]
-    );
+    assert!(!session.summary.is_empty());
 }
 
 #[test]
@@ -977,12 +957,12 @@ fn retain_recent_message_groups_keeps_tool_pairs_intact_like_python() {
 }
 
 #[test]
-fn session_logs_context_budget_and_compact_mode_like_python() {
+fn session_does_not_log_context_budget_for_token_triggered_compaction_like_python() {
     let temp = temp_dir("session-context-events");
     let transcript_path = temp.join("transcripts/events.jsonl");
     let mut config = AgentConfig::default();
-    config.session.model_input_char_limit = 80;
-    config.session.trigger_message_limit = 4;
+    config.model.input_context_tokens = 30;
+    config.session.trigger_message_limit = 99;
     config.session.recent_message_limit = 2;
     config.session.model_compact = false;
     config.session.transcript = true;
@@ -999,10 +979,79 @@ fn session_logs_context_budget_and_compact_mode_like_python() {
     session.submit("second yyyyyyyyyyyyyyyyyyyyyyyy").unwrap();
 
     let text = fs::read_to_string(transcript_path).unwrap();
-    assert!(text.contains("\"type\":\"context_budget\""));
-    assert!(text.contains("\"dropped_model_messages\""));
+    assert!(!text.contains("\"type\":\"context_budget\""));
+    assert!(!text.contains("\"dropped_model_messages\""));
+    assert!(!text.contains("drop_old_message_groups"));
     assert!(text.contains("\"type\":\"context_compact\""));
     assert!(text.contains("\"mode\":\"fallback\""));
+}
+
+#[test]
+fn session_summarizes_large_tool_result_for_model_context_but_logs_full_transcript_like_python() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("session-tool-result-summary");
+    let full_text = format!("{}\n{}", "A".repeat(80), "B".repeat(80));
+    fs::write(temp.join("note.txt"), &full_text).unwrap();
+    let transcript_path = temp.join("transcripts/events.jsonl");
+    let old = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&temp).unwrap();
+    let mut config = AgentConfig::default();
+    config.files.roots = vec![temp.clone()];
+    config.memory.enabled = false;
+    config.tools.max_result_chars = 500;
+    config.session.transcript = true;
+    let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
+    let mut session = AgentSession::from_shared(
+        Arc::new(config),
+        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Some(Arc::new(Mutex::new(writer))),
+        BTreeMap::new(),
+    );
+
+    session
+        .submit(r#"tool:files.read {"path":"note.txt"}"#)
+        .unwrap();
+
+    std::env::set_current_dir(old).unwrap();
+    let tool_message = session
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .expect("tool message");
+    assert!(tool_message
+        .content
+        .starts_with("tool_result_summary: files.read ok"));
+    assert!(tool_message.content.contains("chars=161"));
+    assert!(tool_message.content.contains("head:"));
+    assert!(tool_message.content.contains("tail:"));
+    assert!(!tool_message.content.contains(&full_text));
+    let transcript = fs::read_to_string(transcript_path).unwrap();
+    assert!(transcript.contains(&"A".repeat(80)));
+    assert!(transcript.contains(&"B".repeat(80)));
+}
+
+#[test]
+fn context_pressure_warning_is_not_injected_for_large_model_input_like_python() {
+    let mut config = AgentConfig::default();
+    config.model.input_context_tokens = 30;
+    config.session.max_tool_rounds = 4;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(config, Box::new(RepeatedBudgetPressureModel::new()));
+    session
+        .messages
+        .push(Message::new("user", &format!("old {}", "x".repeat(160))));
+    session
+        .messages
+        .push(Message::new("assistant", &format!("old {}", "y".repeat(160))));
+
+    let response = session.submit("start").unwrap();
+
+    assert!(response.text.contains("Tool round limit reached after 4 rounds."));
+    assert!(!session
+        .messages
+        .iter()
+        .any(|message| message.content.contains("Context budget is tight")));
 }
 
 #[test]
@@ -1053,6 +1102,9 @@ fn session_round_limit_text_matches_python() {
     assert!(response.text.contains("The task may still be incomplete."));
     assert!(response.text.contains("Recent tool results:"));
     assert!(response.text.contains("You can continue the task"));
+    assert!(response
+        .text
+        .contains("do not claim the previous task was fully completed"));
 }
 
 #[test]
@@ -1294,6 +1346,36 @@ fn files_tool_lists_reads_and_writes_inside_allowed_root() {
         fs::read_to_string(temp.join("nested/out.txt")).unwrap(),
         "hello"
     );
+}
+
+#[test]
+fn files_read_range_and_max_chars_match_python() {
+    let temp = temp_dir("files-read-range");
+    fs::write(temp.join("note.txt"), "one\ntwo\nthreeeeeeeeee\nfour\n").unwrap();
+    let mut config = AgentConfig::default();
+    config.files.roots = vec![temp.clone()];
+    config.tools.max_result_chars = 100;
+    let context = ToolContext::new(config, temp.clone());
+
+    let read = run_tool(
+        "files.read",
+        r#"{"path":"note.txt","start_line":2,"end_line":4,"max_chars":20}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert!(read.ok);
+    assert!(read.truncated);
+    assert_eq!(read.text, "two\nt\n...[truncated]");
+
+    let invalid = run_tool(
+        "files.read",
+        r#"{"path":"note.txt","start_line":3,"end_line":2}"#,
+        &context,
+    )
+    .unwrap();
+    assert!(!invalid.ok);
+    assert_eq!(invalid.error_type.as_deref(), Some("invalid_arguments"));
 }
 
 #[test]
@@ -2311,6 +2393,28 @@ fn config_rejects_unknown_nested_field_instead_of_silently_ignoring_it() {
 }
 
 #[test]
+fn config_rejects_legacy_model_input_char_limit_like_python() {
+    let temp = temp_dir("config-legacy-input-char-limit");
+    let path = temp.join("config.toml");
+    fs::write(&path, "[session]\nmodel_input_char_limit = 192000\n").unwrap();
+
+    let error = AgentConfig::load(Some(&path)).unwrap_err();
+
+    assert!(error.contains("session.model_input_char_limit"), "{error}");
+}
+
+#[test]
+fn config_rejects_legacy_model_input_byte_limit_like_python() {
+    let temp = temp_dir("legacy-input-byte-limit-config");
+    let path = temp.join("agent.toml");
+    fs::write(&path, "[model]\ninput_byte_limit = 192000\n").unwrap();
+
+    let error = AgentConfig::load(Some(&path)).unwrap_err().to_string();
+
+    assert!(error.contains("model.input_byte_limit"), "{error}");
+}
+
+#[test]
 fn memory_bootstrap_content_and_per_file_limits_match_python() {
     let temp = temp_dir("memory-bootstrap-exact");
     let mut config = AgentConfig::default();
@@ -2882,13 +2986,51 @@ impl ModelClient for BudgetInspectModel {
         _limits: &ModelLimits,
     ) -> Result<colibri_rust::messages::ModelResponse, String> {
         assert!(messages.iter().any(|message| message.role == "user"
-            && message.content == "latest message must survive the budget pruning"));
-        assert!(!messages.iter().any(|message| message
-            .content
-            .contains("old message that should be dropped")));
+            && message.content == "latest message"));
+        assert!(!messages.iter().any(|message| {
+            message.role == "user" && message.content.starts_with("old user")
+        }));
         Ok(colibri_rust::messages::ModelResponse {
             text: "budget ok".to_string(),
             tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct RepeatedBudgetPressureModel {
+    calls: usize,
+}
+
+impl RepeatedBudgetPressureModel {
+    fn new() -> Self {
+        Self { calls: 0 }
+    }
+}
+
+impl ModelClient for RepeatedBudgetPressureModel {
+    fn complete(
+        &mut self,
+        messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if messages.iter().any(|message| {
+            message.role == "system" && message.content.contains("Context budget is tight")
+        }) {
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "stopped bulk read".to_string(),
+                tool_calls: Vec::new(),
+            });
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: format!("call_{}", self.calls),
+                name: "unknown.tool".to_string(),
+                arguments: serde_json::Map::new(),
+            }],
         })
     }
 }

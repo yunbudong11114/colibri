@@ -86,10 +86,18 @@ class FilesListTool:
 class FilesReadTool:
     spec = ToolSpec(
         name="files.read",
-        description="Read a UTF-8 text file under an allowed root.",
+        description=(
+            "Read a UTF-8 text file under an allowed root. Prefer start_line/end_line ranges for large files. "
+            "Optional max_chars caps this read result and is itself capped by tools.max_result_chars."
+        ),
         input_schema={
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "max_chars": {"type": "integer", "minimum": 1},
+            },
             "required": ["path"],
         },
     )
@@ -106,8 +114,15 @@ class FilesReadTool:
         if not path.is_file():
             return ToolResult(ok=False, text="Path is not a file", error_type="not_file")
 
+        range_args = _line_range_arguments(arguments)
+        if isinstance(range_args, ToolResult):
+            return range_args
+        start_line, end_line, max_chars = range_args
         text = path.read_text(encoding="utf-8", errors="replace")
-        bounded, truncated = bound_tool_text(text, context.config.tools.max_result_chars)
+        if start_line is not None or end_line is not None:
+            text = _select_line_range(text, start_line, end_line)
+        limit = min(context.config.tools.max_result_chars, max_chars or context.config.tools.max_result_chars)
+        bounded, truncated = bound_tool_text(text, limit)
         return ToolResult(ok=True, text=bounded, truncated=truncated)
 
 
@@ -203,3 +218,40 @@ def _media_type_for_content(content_type: str) -> str:
     if content_type.startswith("audio/"):
         return "audio"
     return "file"
+
+
+def _line_range_arguments(arguments: dict[str, Any]) -> tuple[int | None, int | None, int | None] | ToolResult:
+    start_line = _positive_int_argument(arguments, "start_line")
+    end_line = _positive_int_argument(arguments, "end_line")
+    max_chars = _positive_int_argument(arguments, "max_chars")
+    for value in (start_line, end_line, max_chars):
+        if value == "invalid":
+            return ToolResult(ok=False, text="Invalid line range or max_chars", error_type="invalid_arguments")
+    assert start_line != "invalid"
+    assert end_line != "invalid"
+    assert max_chars != "invalid"
+    if start_line is not None and end_line is not None and start_line > end_line:
+        return ToolResult(ok=False, text="start_line must be <= end_line", error_type="invalid_arguments")
+    return start_line, end_line, max_chars
+
+
+def _positive_int_argument(arguments: dict[str, Any], name: str) -> int | None | str:
+    if name not in arguments:
+        return None
+    value = arguments.get(name)
+    if isinstance(value, bool):
+        return "invalid"
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+    else:
+        return "invalid"
+    return parsed if parsed >= 1 else "invalid"
+
+
+def _select_line_range(text: str, start_line: int | None, end_line: int | None) -> str:
+    lines = text.splitlines(keepends=True)
+    start = max(0, (start_line or 1) - 1)
+    end = end_line if end_line is not None else len(lines)
+    return "".join(lines[start:end])

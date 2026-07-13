@@ -97,21 +97,6 @@ def summary_context(summary: str) -> str:
     return f"{SUMMARY_HEADER}\n\n{summary}"
 
 
-def budget_model_messages(messages: list[Message], max_chars: int) -> tuple[list[Message], int]:
-    if _message_chars(messages) <= max_chars:
-        return messages, 0
-
-    kept = _message_groups(messages)
-    dropped = 0
-    while len(kept) > 1 and _message_chars(_flatten_groups(kept)) > max_chars:
-        drop_index = _oldest_droppable_group_index(kept)
-        if drop_index is None:
-            break
-        dropped += len(kept[drop_index])
-        kept.pop(drop_index)
-    return _flatten_groups(kept), dropped
-
-
 def retain_recent_message_groups(messages: list[Message], recent_limit: int) -> list[Message]:
     if not messages:
         return []
@@ -133,8 +118,9 @@ def retain_recent_message_groups(messages: list[Message], recent_limit: int) -> 
     return _flatten_groups(kept_groups)
 
 
-def model_input_chars(messages: list[Message]) -> int:
-    return _message_chars(messages)
+def estimate_model_input_tokens(messages: list[Message]) -> int:
+    byte_count = sum(len(message.role.encode("utf-8")) + len(message.content.encode("utf-8")) for message in messages)
+    return (byte_count + 3) // 4
 
 
 def _tool_names_by_id(messages: list[Message]) -> dict[str, str]:
@@ -178,10 +164,6 @@ def _extract_tag_block(text: str, tag: str) -> str | None:
     return text[start + len(start_marker) : end]
 
 
-def _message_chars(messages: list[Message]) -> int:
-    return sum(len(message.role) + len(message.content) for message in messages)
-
-
 def _message_groups(messages: list[Message]) -> list[list[Message]]:
     groups: list[list[Message]] = []
     index = 0
@@ -203,17 +185,6 @@ def _message_groups(messages: list[Message]) -> list[list[Message]]:
 
 def _flatten_groups(groups: list[list[Message]]) -> list[Message]:
     return [message for group in groups for message in group]
-
-
-def _oldest_droppable_group_index(groups: list[list[Message]]) -> int | None:
-    latest_user_group = _latest_user_group(groups)
-    for index, group in enumerate(groups):
-        if any(message.role == "system" for message in group):
-            continue
-        if group is latest_user_group:
-            continue
-        return index
-    return None
 
 
 def _latest_user_group(groups: list[list[Message]]) -> list[Message] | None:

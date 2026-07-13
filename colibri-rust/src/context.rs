@@ -138,22 +138,6 @@ pub fn summary_context(summary: &str) -> String {
     }
 }
 
-pub fn budget_model_messages(messages: Vec<Message>, max_chars: usize) -> (Vec<Message>, usize) {
-    if message_chars(&messages) <= max_chars {
-        return (messages, 0);
-    }
-    let mut kept = message_groups(messages);
-    let mut dropped = 0usize;
-    while kept.len() > 1 && message_chars(&flatten_groups(&kept)) > max_chars {
-        let Some(drop_index) = oldest_droppable_group_index(&kept) else {
-            break;
-        };
-        dropped += kept[drop_index].len();
-        kept.remove(drop_index);
-    }
-    (flatten_groups(&kept), dropped)
-}
-
 pub fn retain_recent_message_groups(messages: Vec<Message>, recent_limit: usize) -> Vec<Message> {
     if messages.is_empty() {
         return Vec::new();
@@ -180,8 +164,12 @@ pub fn retain_recent_message_groups(messages: Vec<Message>, recent_limit: usize)
     flatten_groups(&kept_groups)
 }
 
-pub fn model_input_chars(messages: &[Message]) -> usize {
-    message_chars(messages)
+pub fn estimate_model_input_tokens(messages: &[Message]) -> usize {
+    let byte_count: usize = messages
+        .iter()
+        .map(|message| message.role.len() + message.content.len())
+        .sum();
+    (byte_count + 3) / 4
 }
 
 pub fn round_limit_text(messages: &[Message], max_tool_rounds: usize, max_chars: usize) -> String {
@@ -204,6 +192,10 @@ pub fn round_limit_text(messages: &[Message], max_tool_rounds: usize, max_chars:
     }
     lines.push(
         "You can continue the task, or increase session.max_tool_rounds if this is expected."
+            .to_string(),
+    );
+    lines.push(
+        "If the user says \"continue\", continue from this stopped state with targeted reads and do not claim the previous task was fully completed."
             .to_string(),
     );
     bound_text_block(&lines.join("\n"), max_chars)
@@ -301,13 +293,6 @@ fn extract_tag_block(text: &str, tag: &str) -> Option<String> {
     Some(text[start + start_marker.len()..end].to_string())
 }
 
-fn message_chars(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|message| message.role.chars().count() + message.content.chars().count())
-        .sum()
-}
-
 fn message_groups(messages: Vec<Message>) -> Vec<Vec<Message>> {
     let mut groups = Vec::new();
     let mut index = 0usize;
@@ -340,19 +325,6 @@ fn message_groups(messages: Vec<Message>) -> Vec<Vec<Message>> {
 
 fn flatten_groups(groups: &[Vec<Message>]) -> Vec<Message> {
     groups.iter().flatten().cloned().collect()
-}
-
-fn oldest_droppable_group_index(groups: &[Vec<Message>]) -> Option<usize> {
-    let latest_user = latest_user_group(groups);
-    groups.iter().enumerate().find_map(|(index, group)| {
-        if group.iter().any(|message| message.role == "system") {
-            return None;
-        }
-        if latest_user.is_some_and(|latest| group == latest) {
-            return None;
-        }
-        Some(index)
-    })
 }
 
 fn latest_user_group(groups: &[Vec<Message>]) -> Option<&Vec<Message>> {

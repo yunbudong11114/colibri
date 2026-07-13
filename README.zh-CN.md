@@ -267,12 +267,12 @@ Colibri 内置 `create-colibri-skill` 指导 skill。Skill 加载采用渐进式
 [model]
 max_output_tokens = 16384
 timeout_seconds = 60
+input_context_tokens = 48000
 
 [session]
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-model_input_char_limit = 192000
 summary_max_chars = 12000
 model_compact = true
 transcript = true
@@ -285,7 +285,7 @@ max_sessions = 4
 session_idle_seconds = 600
 ```
 
-当 session 达到 `trigger_message_limit` 条消息时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。模型输入会按 `model_input_char_limit` 裁剪，同时保留最新用户消息。
+当 session 达到 `trigger_message_limit` 条消息，或估算模型输入 token 达到 `model.input_context_tokens` 的 80% 时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。如果运行时没有 tokenizer，则按 UTF-8 字节数除以 4 估算 token。它不会再额外通过裁剪旧消息来控制输入大小。
 
 ## Transcript
 

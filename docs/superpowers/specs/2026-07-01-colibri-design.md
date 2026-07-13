@@ -1,5 +1,7 @@
 # Colibri Lightweight Python Agent Design
 
+Superseded note: `model_input_char_limit` was removed by `2026-07-13-input-context-token-compaction-design.md`. Model input pressure is now controlled by `model.input_context_tokens`, which triggers compaction instead of pruning.
+
 Date: 2026-07-01
 Status: Design approved for route 1
 Target device: M5Stack CardputerZero, Raspberry Pi Compute Module 0 class Linux device, about 512MB RAM
@@ -190,7 +192,7 @@ max_output_tokens = 16384
 max_tool_rounds = 32
 trigger_message_limit = 96
 recent_message_limit = 12
-model_input_char_limit = 192000
+input_context_tokens = 48000
 summary_max_chars = 12000
 idle_exit_enabled = false
 idle_exit_seconds = 300
@@ -521,7 +523,7 @@ The first compact strategy:
 - Summarize the current message buffer into a rolling `summary`.
 - Keep the last `recent_message_limit` messages after compacting.
 - Also keep the latest user message if it is not inside that recent window.
-- Bound model input by `model_input_char_limit` before each model call.
+- Trigger compaction when estimated model input reaches 80% of `model.input_context_tokens` before each model call.
 - Keep the rolling summary within `summary_max_chars`.
 - Drop or shrink old tool results aggressively.
 

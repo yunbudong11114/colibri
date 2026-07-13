@@ -9,10 +9,9 @@ from colibri.config import AgentConfig
 from colibri.context import (
     COMPACT_SYSTEM_PROMPT,
     append_summary,
-    budget_model_messages,
     compact_prompt_message,
     format_model_summary,
-    model_input_chars,
+    estimate_model_input_tokens,
     retain_recent_message_groups,
     summarize_messages,
     summary_context,
@@ -38,6 +37,8 @@ SYSTEM_PROMPT = (
     "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. "
     "Prefer short, practical responses and respect low memory, battery, and tool limits. "
 )
+TOOL_RESULT_SUMMARY_THRESHOLD = 120
+TOOL_RESULT_SUMMARY_SNIPPET_CHARS = 48
 
 
 @dataclass
@@ -130,14 +131,13 @@ class AgentSession:
 
     def _prepare_user_message(self, user_text: str, media: list[MediaPart]) -> str:
         text_with_media = _user_text_with_media(user_text, media)
-        bounded_text = self._bound_text(text_with_media, self.config.session.model_input_char_limit)
-        self.messages.append(Message(role="user", content=bounded_text))
+        self.messages.append(Message(role="user", content=text_with_media))
         self._write_transcript(
             "user_message",
-            {"text": bounded_text, "media": [_media_payload(part) for part in media]},
+            {"text": text_with_media, "media": [_media_payload(part) for part in media]},
         )
         self._compact_messages_if_needed()
-        return bounded_text
+        return text_with_media
 
     def _tool_context(self, registry: ToolRegistry, image_analyzer: ImageAnalyzer) -> ToolContext:
         return ToolContext(
@@ -253,9 +253,7 @@ class AgentSession:
                 "media": _media_payload(result.media),
             },
         )
-        self.messages.append(
-            Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id)
-        )
+        self.messages.append(Message(role="tool", content=self._tool_context_text(call, result), tool_call_id=call.id))
         self._compact_messages_if_needed()
 
     def _finish_response(self, text: str) -> AgentResponse:
@@ -300,26 +298,33 @@ class AgentSession:
             self._image_analyzer = ImageAnalyzer(self.config, self.model)
         return self.tools, self.permission_policy, self._image_analyzer
 
-    def _compact_messages_if_needed(self) -> None:
+    def _compact_messages_if_needed(self, memory_text: str = "", skill_text: str = "") -> None:
         trigger_limit = max(1, self.config.session.trigger_message_limit)
-        if len(self.messages) >= trigger_limit:
-            messages_to_compact = list(self.messages)
-            addition, mode = self._compact_messages(messages_to_compact)
-            self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
-            self.messages = retain_recent_message_groups(
-                messages_to_compact,
-                max(0, self.config.session.recent_message_limit),
-            )
-            self._write_transcript(
-                "context_compact",
-                {
-                    "removed_messages": len(messages_to_compact) - len(self.messages),
-                    "compacted_messages": len(messages_to_compact),
-                    "kept_messages": len(self.messages),
-                    "mode": mode,
-                    "summary_chars": len(self.summary),
-                },
-            )
+        token_limit = max(0, self.config.model.input_context_tokens)
+        token_threshold = token_limit * 8 // 10 if token_limit else 0
+        should_compact = len(self.messages) >= trigger_limit
+        if not should_compact and token_threshold:
+            should_compact = estimate_model_input_tokens(self._model_messages(memory_text, skill_text)) >= token_threshold
+        if not should_compact or not self.messages:
+            return
+
+        messages_to_compact = list(self.messages)
+        addition, mode = self._compact_messages(messages_to_compact)
+        self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
+        self.messages = retain_recent_message_groups(
+            messages_to_compact,
+            max(0, self.config.session.recent_message_limit),
+        )
+        self._write_transcript(
+            "context_compact",
+            {
+                "removed_messages": len(messages_to_compact) - len(self.messages),
+                "compacted_messages": len(messages_to_compact),
+                "kept_messages": len(self.messages),
+                "mode": mode,
+                "summary_chars": len(self.summary),
+            },
+        )
 
     def _compact_messages(self, messages: list[Message]) -> tuple[str, str]:
         if self._should_model_compact():
@@ -361,6 +366,11 @@ class AgentSession:
         if result.ok:
             return result.text
         return f"{result.error_type or 'tool_error'}: {result.text}"
+
+    def _tool_context_text(self, call: ToolCall, result: ToolResult) -> str:
+        if not result.ok:
+            return self._tool_result_text(result)
+        return _summarize_tool_result_for_context(call, result)
 
     def _send_media_result_if_needed(self, result: ToolResult) -> ToolResult:
         if not result.ok or result.media is None:
@@ -425,11 +435,10 @@ class AgentSession:
         )
         if self.steer_notifier is not None:
             self.steer_notifier(format_steering_ack(skipped, text))
-        bounded = self._bound_text(text, self.config.session.model_input_char_limit)
-        self.messages.append(Message(role="user", content=bounded))
+        self.messages.append(Message(role="user", content=text))
         self._write_transcript(
             "user_message",
-            {"text": bounded, "media": [], "steering": True},
+            {"text": text, "media": [], "steering": True},
         )
         self._compact_messages_if_needed()
 
@@ -446,17 +455,8 @@ class AgentSession:
         return context_messages + messages
 
     def _budgeted_model_messages(self, memory_text: str, skill_text: str = "") -> list[Message]:
-        messages = self._model_messages(memory_text, skill_text)
-        budgeted, dropped = budget_model_messages(messages, self.config.session.model_input_char_limit)
-        if dropped:
-            self._write_transcript(
-                "context_budget",
-                {
-                    "dropped_model_messages": dropped,
-                    "input_chars": model_input_chars(budgeted),
-                },
-            )
-        return budgeted
+        self._compact_messages_if_needed(memory_text, skill_text)
+        return self._model_messages(memory_text, skill_text)
 
 def _denied_tool_text(call: ToolCall) -> str:
     if call.name == "shell.run":
@@ -505,6 +505,10 @@ def _round_limit_text(messages: list[Message], max_tool_rounds: int, max_chars: 
         lines.append("Recent tool results:")
         lines.extend(f"- {item}" for item in recent)
     lines.append("You can continue the task, or increase session.max_tool_rounds if this is expected.")
+    lines.append(
+        'If the user says "continue", continue from this stopped state with targeted reads and do not claim '
+        "the previous task was fully completed."
+    )
     return _bound_text_block("\n".join(lines), max_chars)
 
 
@@ -534,3 +538,20 @@ def _bound_text_block(text: str, max_chars: int) -> str:
     suffix = "\n...[truncated]"
     keep = max(0, max_chars - len(suffix))
     return text[:keep] + suffix
+
+
+def _summarize_tool_result_for_context(call: ToolCall, result: ToolResult) -> str:
+    if call.name != "files.read":
+        return result.text
+    if len(result.text) <= TOOL_RESULT_SUMMARY_THRESHOLD:
+        return result.text
+    lines = [
+        f"tool_result_summary: {call.name} ok chars={len(result.text)} truncated={str(result.truncated).lower()}",
+    ]
+    path = call.arguments.get("path")
+    if isinstance(path, str) and path:
+        lines.append(f"path={path}")
+    head = result.text[:TOOL_RESULT_SUMMARY_SNIPPET_CHARS]
+    tail = result.text[-TOOL_RESULT_SUMMARY_SNIPPET_CHARS:]
+    lines.extend(["head:", head, "tail:", tail])
+    return "\n".join(lines)
