@@ -81,6 +81,21 @@ pub fn build_channel_registry(
     Ok(registry)
 }
 
+pub fn validate_channel_envelope(
+    channel: &dyn GatewayChannel,
+    envelope: &InboundEnvelope,
+) -> Result<(), String> {
+    if envelope.channel == channel.name() {
+        Ok(())
+    } else {
+        Err(format!(
+            "channel adapter mismatch: expected {}, got {}",
+            channel.name(),
+            envelope.channel
+        ))
+    }
+}
+
 #[derive(Default)]
 pub struct ChannelPermissionWaiters {
     inner: Mutex<ChannelPermissionWaiterState>,

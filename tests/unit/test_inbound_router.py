@@ -31,3 +31,17 @@ def test_inbound_router_same_session_not_concurrent():
     key, item = router.acquire(timeout=0.1)
     assert (key, item) == ("a", "2")
     router.release("a")
+
+
+def test_inbound_router_is_idle_only_after_active_turn_releases():
+    router = InboundRouter[str](max_pending=1)
+    assert router.try_enqueue("channel:user-1", "hello")
+    assert router.acquire(timeout=0.1) == ("channel:user-1", "hello")
+
+    assert router.pending_len == 0
+    assert router.active_len == 1
+    assert not router.wait_idle(timeout=0.01)
+
+    router.release("channel:user-1")
+    assert router.wait_idle(timeout=0.1)
+    assert router.active_len == 0

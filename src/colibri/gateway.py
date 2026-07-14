@@ -4,12 +4,11 @@ import queue
 from dataclasses import dataclass
 from pathlib import Path
 import threading
-import time
 from time import monotonic
 from typing import Callable
 
 from colibri.channels.base import Channel, ChannelContext, InboundMessage
-from colibri.channels.registry import build_enabled_channels
+from colibri.channels.registry import build_channel_registry, build_enabled_channels
 from colibri.config import AgentConfig, ConfigError
 from colibri.inbound_router import InboundRouter
 from colibri.media import MediaPart
@@ -226,7 +225,7 @@ class GatewayRunner:
         channels = self._build_channels()
         if not channels:
             raise ConfigError("No gateway channels are enabled")
-        channels_by_name = {channel.name: channel for channel in channels}
+        channels_by_name = build_channel_registry(channels)
         router: InboundRouter[InboundMessage] = InboundRouter(
             max(1, self.config.gateway.max_pending_inbound)
         )
@@ -257,14 +256,17 @@ class GatewayRunner:
             for poller in pollers:
                 poller.start()
 
-            while not stop_requested() and not stop_event.is_set():
+            while not stop_requested():
                 try:
                     error = errors.get(timeout=0.2)
                 except queue.Empty:
                     if not any(thread.is_alive() for thread in pollers):
-                        # Pollers finished (finite test adapters); drain shared bus first.
-                        while router.pending_len > 0 and not stop_event.is_set():
-                            time.sleep(0.05)
+                        while not router.wait_idle(timeout=WORK_QUEUE_WAIT_SECONDS):
+                            if stop_event.is_set():
+                                try:
+                                    raise errors.get_nowait()
+                                except queue.Empty:
+                                    return
                         return
                     continue
                 raise error
@@ -272,7 +274,7 @@ class GatewayRunner:
             stop_event.set()
             router.close()
             for worker in workers:
-                worker.join(timeout=WORKER_JOIN_SECONDS)
+                worker.join()
             for poller in pollers:
                 poller.join(timeout=WORKER_JOIN_SECONDS)
             self.sessions.close()
@@ -286,6 +288,10 @@ class GatewayRunner:
         errors: queue.Queue[BaseException],
     ) -> None:
         def offer(message: InboundMessage) -> bool:
+            if message.channel != channel.name:
+                raise ConfigError(
+                    f"channel adapter mismatch: expected {channel.name}, got {message.channel}"
+                )
             key = f"{message.channel}:{message.sender_id}"
             return router.try_enqueue(key, message)
 

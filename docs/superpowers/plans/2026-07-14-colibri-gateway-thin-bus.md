@@ -26,10 +26,10 @@
 - Modify: `colibri-rust/src/channel.rs`
 - Test: `colibri-rust/tests/runtime.rs`
 
-- [ ] Add failing tests proving two channels sharing `sender_id` have isolated waiters.
-- [ ] Run the focused Rust test and confirm it fails because waiters use bare sender IDs.
-- [ ] Add `GatewayChannel`, `ChannelRegistry`, and `ChannelPermissionWaiters`; make the prompter accept a complete waiter key.
-- [ ] Run the focused tests and confirm they pass.
+- [x] Add failing tests proving two channels sharing `sender_id` have isolated waiters.
+- [x] Run the focused Rust test and confirm it fails because waiters use bare sender IDs.
+- [x] Add `GatewayChannel`, `ChannelRegistry`, and `ChannelPermissionWaiters`; make the prompter accept a complete waiter key.
+- [x] Run the focused tests and confirm they pass.
 
 ### Task 2: Rust Weixin adapter and registry
 
@@ -39,11 +39,11 @@
 - Modify: `colibri-rust/src/weixin.rs`
 - Test: `colibri-rust/tests/runtime.rs`
 
-- [ ] Add failing tests for config-driven registry construction and a fake adapter's outbound/media behavior.
-- [ ] Run the focused tests and confirm the adapter/registry API is missing.
-- [ ] Implement `WeixinGatewayChannel`, keeping poll cursor and Weixin sink inside `weixin.rs`.
-- [ ] Implement `build_enabled_channels` as the only production composition root.
-- [ ] Run the focused tests and confirm they pass.
+- [x] Add failing tests for config-driven registry construction and a fake adapter's outbound/media behavior.
+- [x] Run the focused tests and confirm the adapter/registry API is missing.
+- [x] Implement `WeixinGatewayChannel`, keeping poll cursor and Weixin sink inside `weixin.rs`.
+- [x] Implement `build_enabled_channels` as the only production composition root.
+- [x] Run the focused tests and confirm they pass.
 
 ### Task 3: Remove Weixin knowledge from Rust gateway
 
@@ -52,12 +52,12 @@
 - Test: `colibri-rust/src/gateway.rs`
 - Test: `colibri-rust/tests/runtime.rs`
 
-- [ ] Add a failing fake-channel dispatch test covering poll envelope, media resolution, outbound text and permission waiter delivery.
-- [ ] Run it and confirm the gateway cannot dispatch without a Weixin branch.
-- [ ] Replace `run_weixin_poll_loop`, `resolve_envelope_media`, `outbound_for`, and the enabled-name list with registry-driven generic code.
-- [ ] Ensure a taken session is put back after both successful and failed submit.
-- [ ] Assert by source scan that generic gateway has no Weixin import, literal or channel-name match.
-- [ ] Run Rust gateway, runtime and parity tests.
+- [x] Add a failing fake-channel dispatch test covering poll envelope, media resolution, outbound text and permission waiter delivery.
+- [x] Run it and confirm the gateway cannot dispatch without a Weixin branch.
+- [x] Replace `run_weixin_poll_loop`, `resolve_envelope_media`, `outbound_for`, and the enabled-name list with registry-driven generic code.
+- [x] Ensure a taken session is put back after both successful and failed submit.
+- [x] Assert by source scan that generic gateway has no Weixin import, literal or channel-name match.
+- [x] Run Rust gateway, runtime and parity tests.
 
 ### Task 4: Python active-turn drain and explicit waiter identity
 
@@ -69,12 +69,12 @@
 - Test: `tests/unit/test_channels.py`
 - Test: `tests/unit/test_gateway_steering.py`
 
-- [ ] Add failing tests showing `idle` includes active work and a slow acquired turn finishes before gateway return/session close.
-- [ ] Add a failing test showing waiter storage uses the full channel session key.
-- [ ] Run the focused Python tests and confirm the old pending-only drain fails.
-- [ ] Implement router `active_len`/`wait_idle` and use it during finite-poller shutdown.
-- [ ] Key Python channel waiter storage through the shared session-key helper.
-- [ ] Run focused tests and confirm they pass.
+- [x] Add failing tests showing `idle` includes active work and a slow acquired turn finishes before gateway return/session close.
+- [x] Add a failing test showing waiter storage uses the full channel session key.
+- [x] Run the focused Python tests and confirm the old pending-only drain fails.
+- [x] Implement router `active_len`/`wait_idle` and use it during finite-poller shutdown.
+- [x] Key Python channel waiter storage through the shared session-key helper.
+- [x] Run focused tests and confirm they pass.
 
 ### Task 5: Cross-runtime parity and documentation audit
 
@@ -82,10 +82,10 @@
 - Modify: `colibri-rust/tests/parity.rs`
 - Modify: `README.md` only if the documented channel extension or permission behavior is stale
 
-- [ ] Map every new Python behavior test to an executable Rust counterpart.
-- [ ] Verify numeric permission prompts and timeout-to-deny behavior remain identical.
-- [ ] Verify config fields/defaults did not drift.
-- [ ] Run full Python and Rust test suites.
+- [x] Map every new Python behavior test to an executable Rust counterpart.
+- [x] Verify numeric permission prompts and timeout-to-deny behavior remain identical.
+- [x] Verify config fields/defaults did not drift.
+- [x] Run full Python and Rust test suites.
 
 ### Task 6: Release verification
 

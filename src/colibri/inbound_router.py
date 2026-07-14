@@ -73,7 +73,7 @@ class InboundRouter(Generic[T]):
             queue = self._queues.get(key)
             if queue and key not in self._rr:
                 self._rr.append(key)
-            self._condition.notify()
+            self._condition.notify_all()
 
     def close(self) -> None:
         with self._condition:
@@ -84,3 +84,21 @@ class InboundRouter(Generic[T]):
     def pending_len(self) -> int:
         with self._condition:
             return self._total
+
+    @property
+    def active_len(self) -> int:
+        with self._condition:
+            return len(self._active)
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        with self._condition:
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while self._total > 0 or self._active:
+                if deadline is None:
+                    self._condition.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            return True

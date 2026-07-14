@@ -7,7 +7,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::channel::{ChannelPermissionWaiters, ChannelRegistry, GatewayChannel, InboundEnvelope};
+use crate::channel::{
+    validate_channel_envelope, ChannelPermissionWaiters, ChannelRegistry, GatewayChannel,
+    InboundEnvelope,
+};
 use crate::channel_registry::build_enabled_channels;
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
@@ -600,7 +603,7 @@ impl<T> InboundRouter<T> {
         if has_work && !guard.rr.iter().any(|item| item == key) {
             guard.rr.push_back(key.to_string());
         }
-        self.cv.notify_one();
+        self.cv.notify_all();
     }
 
     pub fn close(&self) {
@@ -614,6 +617,43 @@ impl<T> InboundRouter<T> {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .total
+    }
+
+    pub fn active_len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active
+            .len()
+    }
+
+    pub fn wait_idle(&self, timeout: Option<Duration>) -> bool {
+        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let deadline = timeout.map(|duration| Instant::now() + duration);
+        loop {
+            if guard.total == 0 && guard.active.is_empty() {
+                return true;
+            }
+            let Some(deadline) = deadline else {
+                guard = self
+                    .cv
+                    .wait(guard)
+                    .unwrap_or_else(|error| error.into_inner());
+                continue;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next_guard, wait_result) = self
+                .cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            guard = next_guard;
+            if wait_result.timed_out() && (guard.total > 0 || !guard.active.is_empty()) {
+                return false;
+            }
+        }
     }
 }
 
@@ -693,13 +733,7 @@ fn run_channel_poll_loop(
 ) -> Result<(), String> {
     loop {
         for envelope in channel.poll_once()? {
-            if envelope.channel != channel.name() {
-                return Err(format!(
-                    "channel adapter mismatch: expected {}, got {}",
-                    channel.name(),
-                    envelope.channel
-                ));
-            }
+            validate_channel_envelope(channel.as_ref(), &envelope)?;
             let key = envelope.session_key();
             if envelope.text_only() && waiters.deliver(&key, &envelope.text) {
                 continue;
@@ -802,7 +836,8 @@ mod tests {
         OutboundSink,
     };
     use crate::config::AgentConfig;
-    use crate::messages::MediaPart;
+    use crate::messages::{MediaPart, Message, ModelLimits, ModelResponse};
+    use crate::model::ModelClient;
 
     struct RecordingSink {
         texts: Arc<Mutex<Vec<String>>>,
@@ -825,6 +860,20 @@ mod tests {
 
     struct MismatchedChannel {
         polled: AtomicBool,
+    }
+
+    struct FailingModel;
+
+    impl ModelClient for FailingModel {
+        fn complete(
+            &mut self,
+            _messages: &[Message],
+            _tools: &[serde_json::Value],
+            _system: &str,
+            _limits: &ModelLimits,
+        ) -> Result<ModelResponse, String> {
+            Err("model failed".to_string())
+        }
     }
 
     impl GatewayChannel for MismatchedChannel {
@@ -971,5 +1020,44 @@ mod tests {
             error,
             "channel adapter mismatch: expected expected, got wrong"
         );
+    }
+
+    #[test]
+    fn generic_turn_worker_returns_taken_session_after_model_error() {
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let channel: Arc<dyn GatewayChannel> = Arc::new(FakeChannel { texts });
+        let channels = Arc::new(build_channel_registry(vec![channel]).unwrap());
+        let router = Arc::new(InboundRouter::new(1));
+        router
+            .try_enqueue(
+                "other:user-1".to_string(),
+                InboundEnvelope {
+                    channel: "other".to_string(),
+                    sender_id: "user-1".to_string(),
+                    text: "hello".to_string(),
+                    message_id: "message-1".to_string(),
+                    media: Vec::new(),
+                    media_refs: Vec::new(),
+                    context: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        router.close();
+        let waiters = Arc::new(ChannelPermissionWaiters::default());
+        let mut config = AgentConfig::default();
+        config.session.transcript = false;
+        config.session.restore_transcript = false;
+        let mut cache = GatewaySessionCache::new(config).unwrap();
+        cache.model = Arc::new(Mutex::new(Box::new(FailingModel)));
+        let sessions = Arc::new(Mutex::new(cache));
+
+        let error = run_turn_worker(router, channels, waiters, Arc::clone(&sessions)).unwrap_err();
+
+        assert_eq!(error, "model failed");
+        assert!(sessions
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key("other:user-1"));
     }
 }

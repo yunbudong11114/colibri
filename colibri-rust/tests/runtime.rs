@@ -7,8 +7,9 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 
 use colibri_rust::channel::{
-    build_channel_registry, parse_permission_choice, ChannelPermissionWaiters,
-    ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope, OutboundSink,
+    build_channel_registry, parse_permission_choice, validate_channel_envelope,
+    ChannelPermissionWaiters, ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope,
+    OutboundSink,
 };
 use colibri_rust::channel_registry::build_enabled_channels;
 use colibri_rust::cli::{run_steering_pump, run_with_io};
@@ -3235,6 +3236,17 @@ fn gateway_channel_registry_rejects_duplicate_adapter_names() {
 }
 
 #[test]
+fn gateway_channel_adapter_rejects_mismatched_envelope_like_python() {
+    let adapter = FakeGatewayChannel;
+    let mut envelope = adapter.poll_once().unwrap().remove(0);
+    envelope.channel = "wrong".to_string();
+
+    let error = validate_channel_envelope(&adapter, &envelope).unwrap_err();
+
+    assert_eq!(error, "channel adapter mismatch: expected other, got wrong");
+}
+
+#[test]
 fn rust_channel_registry_builds_only_configured_enabled_adapters() {
     let mut config = AgentConfig::default();
     assert!(build_enabled_channels(&config).unwrap().is_empty());
@@ -3892,4 +3904,23 @@ fn inbound_router_same_session_not_concurrent_like_python() {
     let (key, value) = router.acquire().unwrap();
     assert_eq!((key.as_str(), value), ("a", 2));
     router.release("a");
+}
+
+#[test]
+fn inbound_router_idle_waits_for_active_release_like_python() {
+    use colibri_rust::gateway::InboundRouter;
+
+    let router = InboundRouter::new(1);
+    assert!(router.try_enqueue("channel:user-1".into(), "hello").is_ok());
+    assert_eq!(
+        router.acquire(),
+        Some(("channel:user-1".to_string(), "hello"))
+    );
+    assert_eq!(router.pending_len(), 0);
+    assert_eq!(router.active_len(), 1);
+    assert!(!router.wait_idle(Some(Duration::from_millis(1))));
+
+    router.release("channel:user-1");
+    assert!(router.wait_idle(Some(Duration::from_millis(10))));
+    assert_eq!(router.active_len(), 0);
 }

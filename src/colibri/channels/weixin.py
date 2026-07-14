@@ -36,7 +36,6 @@ MEDIA_RETENTION_SECONDS = 24 * 60 * 60
 MEDIA_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 MEDIA_CLEANUP_INTERVAL_SECONDS = 60
 WORK_QUEUE_WAIT_SECONDS = 0.05
-WORKER_JOIN_SECONDS = 1.0
 _media_cleanup_lock = threading.Lock()
 _last_media_cleanup_at = 0.0
 
@@ -366,13 +365,18 @@ class WeixinChannel:
         )
         try:
             self.run_poll(offer, poll_context)
+            while not router.wait_idle(timeout=WORK_QUEUE_WAIT_SECONDS):
+                if stop_event.is_set():
+                    if not errors.empty():
+                        raise errors.get_nowait()
+                    return
             if not errors.empty():
                 raise errors.get_nowait()
         finally:
             stop_event.set()
             router.close()
             for worker in workers:
-                worker.join(timeout=WORKER_JOIN_SECONDS)
+                worker.join()
 
     def poll_messages(self) -> list[InboundMessage]:
         data = self.api.get_updates(self.get_updates_buf)
@@ -484,7 +488,7 @@ class WeixinChannel:
     def _register_text_waiter(self, sender_id: str) -> queue.Queue[str]:
         waiter: queue.Queue[str] = queue.Queue(maxsize=1)
         with self._waiter_lock:
-            self._text_waiters[sender_id] = waiter
+            self._text_waiters[self._waiter_key(sender_id)] = waiter
         return waiter
 
     @staticmethod
@@ -496,14 +500,15 @@ class WeixinChannel:
 
     def _remove_text_waiter(self, sender_id: str, waiter: queue.Queue[str]) -> None:
         with self._waiter_lock:
-            if self._text_waiters.get(sender_id) is waiter:
-                self._text_waiters.pop(sender_id, None)
+            key = self._waiter_key(sender_id)
+            if self._text_waiters.get(key) is waiter:
+                self._text_waiters.pop(key, None)
 
     def _deliver_text_waiter(self, message: InboundMessage) -> bool:
         if message.media or message.media_refs or not message.text.strip():
             return False
         with self._waiter_lock:
-            waiter = self._text_waiters.get(message.sender_id)
+            waiter = self._text_waiters.get(self._waiter_key(message.sender_id))
         if waiter is None:
             return False
         try:
@@ -511,6 +516,9 @@ class WeixinChannel:
         except queue.Full:
             return False
         return True
+
+    def _waiter_key(self, sender_id: str) -> str:
+        return f"{self.name}:{sender_id}"
 
     def _parse_inbound(self, raw: dict[str, Any]) -> InboundMessage | None:
         if int(raw.get("message_type") or 0) != 1:

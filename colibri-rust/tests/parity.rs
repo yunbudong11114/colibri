@@ -18,6 +18,13 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "auth_weixin_uses_native_http_and_saves_token_without_printing_secret",
                 "gateway_session_cache_reuses_and_evicts_oldest_like_python",
                 "gateway_session_transcript_injects_channel_metadata_like_python",
+                "channel_permission_waiters_isolate_same_sender_across_channels",
+                "gateway_channel_adapter_rejects_mismatched_envelope_like_python",
+                "gateway_channel_registry_accepts_fake_adapter_without_gateway_changes",
+                "gateway_channel_registry_rejects_duplicate_adapter_names",
+                "inbound_router_idle_waits_for_active_release_like_python",
+                "rust_channel_registry_builds_only_configured_enabled_adapters",
+                "weixin_gateway_channel_exposes_transport_through_generic_adapter",
                 "gateway_stop_refuses_unverified_pid_like_python",
                 "weixin_updates_parse_text_and_media_with_context_like_python",
                 "weixin_updates_keep_text_when_media_download_fails_like_python",
@@ -111,6 +118,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
             rust_tests: &[
                 "inbound_router_global_bound_and_orders_sessions_like_python",
                 "inbound_router_same_session_not_concurrent_like_python",
+                "inbound_router_idle_waits_for_active_release_like_python",
             ],
             status: "covered",
         },
@@ -297,6 +305,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_weixin_api_upload_media_encrypts_and_uploads_file",
             "test_weixin_api_send_media_uses_uploaded_metadata",
             "test_weixin_permission_prompter_sends_prompt_and_maps_reply",
+            "test_weixin_permission_waiter_uses_full_channel_session_key",
             "test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content",
             "test_gateway_session_cache_reuses_and_evicts_oldest",
             "test_gateway_session_cache_passes_shared_history_loader_to_new_sessions",
@@ -305,6 +314,10 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_gateway_runner_sends_file_tool_media_through_channel",
             "test_gateway_runner_writes_channel_metadata_to_transcript",
             "test_gateway_runner_runs_all_enabled_channels",
+            "test_gateway_runner_waits_for_active_turn_before_closing_sessions",
+            "test_weixin_standalone_run_waits_for_active_handler",
+            "test_gateway_runner_rejects_duplicate_channel_names",
+            "test_gateway_runner_rejects_envelope_from_wrong_channel",
             "test_perform_weixin_auth_prints_terminal_qr",
         ],
         "test_cli.py" => &[
@@ -387,6 +400,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
         "test_inbound_router.py" => &[
             "test_inbound_router_bounds_global_pending_and_orders_per_session",
             "test_inbound_router_same_session_not_concurrent",
+            "test_inbound_router_is_idle_only_after_active_turn_releases",
         ],
         "test_channel_permission.py" => &[
             "test_channel_text_permission_prompter_is_transport_agnostic",

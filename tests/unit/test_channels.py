@@ -8,6 +8,7 @@ import threading
 import pytest
 
 import colibri.channels.weixin as weixin_module
+import colibri.gateway as gateway_module
 from colibri.channels.base import ChannelContext, InboundMessage
 from colibri.channels.permission import ChannelTextPermissionPrompter
 from colibri.channels.weixin import (
@@ -16,7 +17,7 @@ from colibri.channels.weixin import (
     _encrypt_aes_ecb,
     perform_weixin_auth,
 )
-from colibri.config import AgentConfig, WeixinChannelConfig
+from colibri.config import AgentConfig, ConfigError, WeixinChannelConfig
 from colibri.gateway import GatewayRunner, GatewaySessionCache
 from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
@@ -862,6 +863,17 @@ def test_weixin_permission_prompter_sends_prompt_and_maps_reply():
     assert "5. user-executable" in api.sent[0][2]
 
 
+def test_weixin_permission_waiter_uses_full_channel_session_key():
+    channel = WeixinChannel(WeixinChannelConfig(enabled=True, token="token"), api=FakeWeixinApi())
+
+    waiter = channel._register_text_waiter("user-1")
+    try:
+        assert "weixin:user-1" in channel._text_waiters
+        assert "user-1" not in channel._text_waiters
+    finally:
+        channel._remove_text_waiter("user-1", waiter)
+
+
 def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content(tmp_path):
     api = FakeWeixinApi(
         [
@@ -1057,6 +1069,125 @@ def test_gateway_runner_runs_all_enabled_channels(tmp_path, monkeypatch):
 
     assert first.replies == ["fake: one"]
     assert second.replies == ["fake: two"]
+
+
+class BlockingModel:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def complete(self, messages, tools, system, limits):
+        self.started.set()
+        self.release.wait(timeout=2)
+        return ModelResponse(text="slow reply")
+
+
+def test_gateway_runner_waits_for_active_turn_before_closing_sessions(tmp_path, monkeypatch):
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
+    channel = FakeChannel(
+        "other",
+        [InboundMessage(channel="other", sender_id="user-1", text="hello")],
+    )
+    model = BlockingModel()
+    runner = GatewayRunner(
+        config=config,
+        model=model,
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+    monkeypatch.setattr(runner, "_build_channels", lambda: [channel])
+    monkeypatch.setattr(gateway_module, "WORKER_JOIN_SECONDS", 0.01)
+    returned = threading.Event()
+
+    def run_gateway():
+        runner.run()
+        returned.set()
+
+    thread = threading.Thread(target=run_gateway, daemon=True)
+    thread.start()
+    assert model.started.wait(timeout=1)
+    returned_early = returned.wait(timeout=0.5)
+    model.release.set()
+    thread.join(timeout=2)
+
+    assert not returned_early
+    assert returned.is_set()
+    assert channel.replies == ["slow reply"]
+
+
+def test_weixin_standalone_run_waits_for_active_handler():
+    api = FakeWeixinApi(
+        [
+            {
+                "get_updates_buf": "next",
+                "msgs": [
+                    {
+                        "message_type": 1,
+                        "message_state": 2,
+                        "from_user_id": "user-1",
+                        "context_token": "ctx",
+                        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                    }
+                ],
+            }
+        ]
+    )
+    channel = WeixinChannel(WeixinChannelConfig(enabled=True, token="token"), api=api)
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    def handler(message):
+        started.set()
+        release.wait(timeout=2)
+        return "slow reply"
+
+    def run_channel():
+        channel.run(handler, ChannelContext(stop_requested=started.is_set))
+        returned.set()
+
+    thread = threading.Thread(target=run_channel, daemon=True)
+    thread.start()
+    assert started.wait(timeout=1)
+    returned_early = returned.wait(timeout=0.2)
+    release.set()
+    thread.join(timeout=2)
+
+    assert not returned_early
+    assert returned.is_set()
+    assert api.sent[-1][2] == "slow reply"
+
+
+def test_gateway_runner_rejects_duplicate_channel_names(tmp_path, monkeypatch):
+    config = AgentConfig.default()
+    runner = GatewayRunner(
+        config=config,
+        model=FakeModelClient(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_channels",
+        lambda: [FakeChannel("same", []), FakeChannel("same", [])],
+    )
+
+    with pytest.raises(ConfigError, match="duplicate gateway channel: same"):
+        runner.run()
+
+
+def test_gateway_runner_rejects_envelope_from_wrong_channel(tmp_path, monkeypatch):
+    config = AgentConfig.default()
+    channel = FakeChannel(
+        "expected",
+        [InboundMessage(channel="wrong", sender_id="user-1", text="hello")],
+    )
+    runner = GatewayRunner(
+        config=config,
+        model=FakeModelClient(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+    monkeypatch.setattr(runner, "_build_channels", lambda: [channel])
+
+    with pytest.raises(ConfigError, match="channel adapter mismatch: expected expected, got wrong"):
+        runner.run()
 
 
 def test_perform_weixin_auth_prints_terminal_qr(monkeypatch):
