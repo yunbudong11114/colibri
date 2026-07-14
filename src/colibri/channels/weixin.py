@@ -18,11 +18,12 @@ import urllib.request
 
 from Crypto.Cipher import AES
 
-from colibri.channels.base import ChannelContext, InboundMessage
+from colibri.channels.base import ChannelContext, InboundMessage, OfferInbound
+from colibri.channels.permission import ChannelTextPermissionPrompter
 from colibri.config import WeixinChannelConfig
+from colibri.inbound_router import InboundRouter
 from colibri.media import MediaPart
 from colibri.terminal_qr import render_terminal_qr
-from colibri.tools.permissions import PermissionRequest, format_permission_prompt_lines
 
 
 WEIXIN_CHANNEL_VERSION = "2.1.1"
@@ -34,10 +35,8 @@ MEDIA_TEMP_DIR = Path("/tmp/colibri/media")
 MEDIA_RETENTION_SECONDS = 24 * 60 * 60
 MEDIA_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 MEDIA_CLEANUP_INTERVAL_SECONDS = 60
-MAX_PENDING_MESSAGES = 8
 WORK_QUEUE_WAIT_SECONDS = 0.05
 WORKER_JOIN_SECONDS = 1.0
-_WORKER_STOP = object()
 _media_cleanup_lock = threading.Lock()
 _last_media_cleanup_at = 0.0
 
@@ -316,25 +315,17 @@ class WeixinChannel:
         self._text_waiters: dict[str, queue.Queue[str]] = {}
         self._receive_loop_active = False
 
-    def run(self, handler: Callable[[InboundMessage], str], context: ChannelContext) -> None:
+    def permission_prompter(self, recipient_id: str) -> ChannelTextPermissionPrompter:
+        return ChannelTextPermissionPrompter(self, recipient_id)
+
+    def run_poll(self, offer: OfferInbound, context: ChannelContext) -> None:
+        """Gateway shared-bus poll loop: light envelopes only."""
         if not self.config.token:
             raise WeixinChannelError("channels.weixin.token is required")
         _maybe_cleanup_inbound_media()
-        work: queue.Queue[InboundMessage | object] = queue.Queue(maxsize=MAX_PENDING_MESSAGES)
-        errors: queue.Queue[BaseException] = queue.Queue()
-        stop_event = threading.Event()
-        worker = threading.Thread(
-            target=self._run_message_worker,
-            args=(handler, work, errors, stop_event),
-            name="colibri-weixin-messages",
-            daemon=True,
-        )
         self._receive_loop_active = True
-        worker.start()
         try:
-            while not context.stop_requested() and not stop_event.is_set():
-                if not errors.empty():
-                    raise errors.get_nowait()
+            while not context.stop_requested():
                 for message in self.poll_messages():
                     if self._deliver_text_waiter(message):
                         continue
@@ -342,21 +333,46 @@ class WeixinChannel:
                         context.try_steer is not None
                         and message.text.strip()
                         and not message.media
+                        and not message.media_refs
                         and context.try_steer(message.sender_id, message.text)
                     ):
                         continue
-                    if not _publish_work(work, message, stop_event):
-                        break
+                    offer(message)
+        finally:
+            self._receive_loop_active = False
+
+    def run(self, handler: Callable[[InboundMessage], str], context: ChannelContext) -> None:
+        """Standalone helper for unit tests: local shared-bus shape (router + workers)."""
+        router: InboundRouter[InboundMessage] = InboundRouter(8)
+        errors: queue.Queue[BaseException] = queue.Queue()
+        stop_event = threading.Event()
+        workers = [
+            threading.Thread(
+                target=self._run_local_turn_worker,
+                args=(handler, router, errors, stop_event),
+                name="colibri-weixin-local-turn",
+                daemon=True,
+            )
+        ]
+        for worker in workers:
+            worker.start()
+
+        def offer(message: InboundMessage) -> bool:
+            return router.try_enqueue(f"{self.name}:{message.sender_id}", message)
+
+        poll_context = ChannelContext(
+            stop_requested=lambda: context.stop_requested() or stop_event.is_set(),
+            try_steer=context.try_steer,
+        )
+        try:
+            self.run_poll(offer, poll_context)
             if not errors.empty():
                 raise errors.get_nowait()
         finally:
-            self._receive_loop_active = False
             stop_event.set()
-            try:
-                work.put_nowait(_WORKER_STOP)
-            except queue.Full:
-                pass
-            worker.join(timeout=WORKER_JOIN_SECONDS)
+            router.close()
+            for worker in workers:
+                worker.join(timeout=WORKER_JOIN_SECONDS)
 
     def poll_messages(self) -> list[InboundMessage]:
         data = self.api.get_updates(self.get_updates_buf)
@@ -367,6 +383,27 @@ class WeixinChannel:
             if message is not None:
                 messages.append(message)
         return messages
+
+    def resolve_inbound_media(self, message: InboundMessage) -> InboundMessage:
+        if not message.media_refs:
+            return message
+        media_parts: list[MediaPart] = []
+        for item in message.media_refs:
+            if not isinstance(item, dict):
+                continue
+            try:
+                media_parts.append(self.api.download_inbound_media(item))
+            except Exception:
+                continue
+        return InboundMessage(
+            channel=message.channel,
+            sender_id=message.sender_id,
+            text=message.text,
+            message_id=message.message_id,
+            media=media_parts,
+            media_refs=[],
+            context=dict(message.context),
+        )
 
     def wait_for_text(self, sender_id: str, timeout_seconds: int) -> str | None:
         if self._receive_loop_active:
@@ -417,31 +454,32 @@ class WeixinChannel:
         if _api_failed(send_response):
             raise WeixinChannelError(_api_error_text("sendmessage", send_response))
 
-    def _run_message_worker(
+    def _run_local_turn_worker(
         self,
         handler: Callable[[InboundMessage], str],
-        work: queue.Queue[InboundMessage | object],
+        router: InboundRouter[InboundMessage],
         errors: queue.Queue[BaseException],
         stop_event: threading.Event,
     ) -> None:
         try:
-            while True:
-                try:
-                    message = work.get(timeout=WORK_QUEUE_WAIT_SECONDS)
-                except queue.Empty:
+            while not stop_event.is_set():
+                acquired = router.acquire(timeout=WORK_QUEUE_WAIT_SECONDS)
+                if acquired is None:
                     if stop_event.is_set():
                         return
                     continue
-                if message is _WORKER_STOP:
-                    return
-                if not isinstance(message, InboundMessage):
-                    continue
-                reply = handler(message)
-                if reply.strip():
-                    self.send_text(message.sender_id, reply)
+                key, message = acquired
+                try:
+                    resolved = self.resolve_inbound_media(message)
+                    reply = handler(resolved)
+                    if reply.strip():
+                        self.send_text(resolved.sender_id, reply)
+                finally:
+                    router.release(key)
         except BaseException as error:
             errors.put(error)
             stop_event.set()
+            router.close()
 
     def _register_text_waiter(self, sender_id: str) -> queue.Queue[str]:
         waiter: queue.Queue[str] = queue.Queue(maxsize=1)
@@ -462,7 +500,7 @@ class WeixinChannel:
                 self._text_waiters.pop(sender_id, None)
 
     def _deliver_text_waiter(self, message: InboundMessage) -> bool:
-        if message.media or not message.text.strip():
+        if message.media or message.media_refs or not message.text.strip():
             return False
         with self._waiter_lock:
             waiter = self._text_waiters.get(message.sender_id)
@@ -485,24 +523,26 @@ class WeixinChannel:
         context_token = str(raw.get("context_token") or "")
         if context_token:
             self.context_tokens[sender_id] = context_token
-        text, media = self._content_from_items(raw.get("item_list") or [])
-        if not text.strip() and not media:
+        text, media_refs = self._content_from_items(raw.get("item_list") or [])
+        if not text.strip() and not media_refs:
             return None
         return InboundMessage(
             channel=self.name,
             sender_id=sender_id,
             text=text.strip(),
             message_id=str(raw.get("message_id") or ""),
-            media=media,
+            media=[],
+            media_refs=media_refs,
+            context={"context_token": context_token} if context_token else {},
         )
 
     def _is_allowed(self, sender_id: str) -> bool:
         allow_from = [item for item in self.config.allow_from if item]
         return not allow_from or "*" in allow_from or sender_id in allow_from
 
-    def _content_from_items(self, items: list[Any]) -> tuple[str, list[MediaPart]]:
+    def _content_from_items(self, items: list[Any]) -> tuple[str, list[dict[str, Any]]]:
         texts: list[str] = []
-        media_parts: list[MediaPart] = []
+        media_refs: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -514,35 +554,18 @@ class WeixinChannel:
                     if isinstance(text, str) and text.strip():
                         texts.append(text.strip())
                 continue
-            if media_parts or item_type not in {2, 4}:
+            if media_refs or item_type not in {2, 4}:
                 continue
             try:
-                media = self.api.download_inbound_media(item)
+                _media_type, filename, _media_ref = _inbound_media_info(item)
             except Exception:
                 continue
-            media_parts.append(media)
+            media_refs.append(item)
             if item_type == 2:
-                texts.append(f"[image: {media.filename}]")
+                texts.append(f"[image: {filename}]")
             else:
-                texts.append(f"[file: {media.filename}]")
-        return "\n".join(texts), media_parts
-
-
-class WeixinPermissionPrompter:
-    def __init__(self, channel: WeixinChannel, recipient_id: str, timeout_seconds: int = 300):
-        self.channel = channel
-        self.recipient_id = recipient_id
-        self.timeout_seconds = timeout_seconds
-
-    def confirm(self, request: PermissionRequest) -> str:
-        reply = self.channel.prompt_for_text(
-            self.recipient_id,
-            _permission_prompt_text(request),
-            self.timeout_seconds,
-        )
-        if reply is None:
-            return "0"
-        return _permission_choice(reply)
+                texts.append(f"[file: {filename}]")
+        return "\n".join(texts), media_refs
 
 
 def perform_weixin_auth(base_url: str, timeout_seconds: int, print_func: Callable[[str], None] = print) -> WeixinAuthResult:
@@ -764,51 +787,6 @@ def _cleanup_media_directory(
             return
 
 
-def _publish_work(
-    work: queue.Queue[InboundMessage | object],
-    message: InboundMessage,
-    stop_event: threading.Event,
-) -> bool:
-    while not stop_event.is_set():
-        try:
-            work.put(message, timeout=WORK_QUEUE_WAIT_SECONDS)
-            return True
-        except queue.Full:
-            continue
-    return False
-
-
 def _safe_filename(filename: str) -> str:
     name = Path(filename.strip()).name
     return name if name and name not in {".", "/"} else "file.bin"
-
-
-def _permission_prompt_text(request: PermissionRequest) -> str:
-    lines = [f"Colibri wants to run {request.tool_name}."]
-    for line in format_permission_prompt_lines(request):
-        if request.subject.kind == "file_path" and line.startswith("file: "):
-            lines.append("path: " + line.removeprefix("file: ").split(" ", 1)[-1])
-        else:
-            lines.append(line)
-    lines.extend(["", "choose:"])
-    if request.subject.kind == "shell":
-        lines.extend(
-            [
-                "1. once",
-                "2. session-command",
-                "3. session-executable",
-                "4. user-command",
-                "5. user-executable",
-                "0. deny",
-            ]
-        )
-    elif request.subject.kind == "file_path":
-        lines.extend(["1. once", "2. session-dir", "4. user-dir", "0. deny"])
-    else:
-        lines.extend(["1. once", "2. session", "4. user", "0. deny"])
-    return "\n".join(lines)
-
-
-def _permission_choice(reply: str) -> str:
-    first = reply.strip().split(maxsplit=1)[0] if reply.strip() else "0"
-    return first if first in {"0", "1", "2", "3", "4", "5"} else "0"

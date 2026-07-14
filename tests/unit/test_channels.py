@@ -9,10 +9,10 @@ import pytest
 
 import colibri.channels.weixin as weixin_module
 from colibri.channels.base import ChannelContext, InboundMessage
+from colibri.channels.permission import ChannelTextPermissionPrompter
 from colibri.channels.weixin import (
     WeixinApiClient,
     WeixinChannel,
-    WeixinPermissionPrompter,
     _encrypt_aes_ecb,
     perform_weixin_auth,
 )
@@ -75,15 +75,29 @@ class FakeChannel:
         self.messages = messages
         self.replies = []
 
-    def run(self, handler, context):
+    def run_poll(self, offer, context):
         for message in self.messages:
-            self.replies.append(handler(message))
+            if (
+                context.try_steer is not None
+                and message.text.strip()
+                and not message.media
+                and not message.media_refs
+                and context.try_steer(message.sender_id, message.text)
+            ):
+                continue
+            offer(message)
 
     def send_text(self, recipient_id, text):
         self.replies.append(text)
 
     def send_media(self, recipient_id, media):
         self.replies.append((recipient_id, media))
+
+    def resolve_inbound_media(self, message):
+        return message
+
+    def permission_prompter(self, recipient_id):
+        return None
 
 
 class ToolCallModel:
@@ -125,7 +139,15 @@ def test_weixin_channel_parses_allowed_finished_text_message():
 
     messages = channel.poll_messages()
 
-    assert messages == [InboundMessage(channel="weixin", sender_id="user-1", text="hello", message_id="42")]
+    assert messages == [
+        InboundMessage(
+            channel="weixin",
+            sender_id="user-1",
+            text="hello",
+            message_id="42",
+            context={"context_token": "ctx-1"},
+        )
+    ]
     assert channel.get_updates_buf == "next"
     assert channel.context_tokens["user-1"] == "ctx-1"
 
@@ -336,7 +358,7 @@ def test_weixin_channel_routes_permission_reply_to_active_waiter():
     )
 
     def handler(message):
-        choices.append(WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request))
+        choices.append(ChannelTextPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request))
         return "done"
 
     channel.run(handler, ChannelContext(stop_requested=lambda: bool(choices)))
@@ -481,9 +503,13 @@ def test_weixin_channel_parses_inbound_file_media_message():
 
     assert len(messages) == 1
     assert messages[0].text == "[file: report.txt]"
-    assert messages[0].media == [
+    assert messages[0].media == []
+    assert len(messages[0].media_refs) == 1
+    resolved = channel.resolve_inbound_media(messages[0])
+    assert resolved.media == [
         MediaPart(type="file", path=Path("/tmp/colibri/media/report.txt"), filename="report.txt", content_type="text/plain")
     ]
+    assert resolved.media_refs == []
 
 
 def test_weixin_channel_parses_inbound_image_media_message():
@@ -512,9 +538,13 @@ def test_weixin_channel_parses_inbound_image_media_message():
 
     assert len(messages) == 1
     assert messages[0].text == "[image: image.png]"
-    assert messages[0].media == [
+    assert messages[0].media == []
+    assert len(messages[0].media_refs) == 1
+    resolved = channel.resolve_inbound_media(messages[0])
+    assert resolved.media == [
         MediaPart(type="image", path=Path("/tmp/colibri/media/image.png"), filename="image.png", content_type="image/png")
     ]
+    assert resolved.media_refs == []
 
 
 def test_weixin_channel_keeps_text_when_inbound_media_download_fails():
@@ -549,7 +579,14 @@ def test_weixin_channel_keeps_text_when_inbound_media_download_fails():
 
     messages = channel.poll_messages()
 
-    assert messages == [InboundMessage(channel="weixin", sender_id="user-1", text="hello")]
+    assert len(messages) == 1
+    assert messages[0].text == "hello\n[file: report.txt]"
+    assert messages[0].media == []
+    assert len(messages[0].media_refs) == 1
+    resolved = channel.resolve_inbound_media(messages[0])
+    assert resolved.text == "hello\n[file: report.txt]"
+    assert resolved.media == []
+    assert resolved.media_refs == []
 
 
 def test_weixin_api_download_inbound_file_decrypts_and_stores_media(monkeypatch, tmp_path):
@@ -815,7 +852,7 @@ def test_weixin_permission_prompter_sends_prompt_and_maps_reply():
         subject=PermissionSubject(kind="shell", tool_name="shell.run", shell_command="pwd"),
     )
 
-    choice = WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
+    choice = ChannelTextPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
 
     assert choice == "5"
     assert api.sent[0][0] == "user-1"
@@ -855,7 +892,7 @@ def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content
         ),
     )
 
-    choice = WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
+    choice = ChannelTextPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
 
     prompt = api.sent[0][2]
     assert choice == "1"

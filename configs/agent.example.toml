@@ -116,10 +116,14 @@ timeout_seconds = 10
 [gateway]
 # gateway 启用的 channel 列表。
 enabled_channels = ["weixin"]
-# gateway 同时保留在内存中的 channel session 数量上限。
+# 同时保留在内存中的 channel session 数量上限。
 max_sessions = 4
 # channel session 空闲驱逐时间，单位秒。
 session_idle_seconds = 600
+# 入站待处理消息全局上限（所有 session 合计）。
+max_pending_inbound = 8
+# 同时执行的 agent submit 上限；小设备建议保持 1。
+max_concurrent_turns = 1
 
 [channels.weixin]
 # 是否启用微信 channel。

@@ -93,6 +93,26 @@ def test_get_existing_does_not_create_session(tmp_path):
     assert cache.get_existing("weixin:user-1") is created
 
 
+def test_take_or_create_keeps_steer_available_while_session_outside_cache(tmp_path):
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
+    cache = GatewaySessionCache(
+        config=config,
+        model=FakeModelClient(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+        max_sessions=1,
+        idle_seconds=0,
+    )
+    session = cache.take_or_create("weixin:user-1", policy=None)
+    session._turn_active = True
+
+    assert cache.get_existing("weixin:user-1") is session
+    assert cache.try_steer("weixin:user-1", "change plan") is True
+    assert session._steering.get_nowait() == "change plan"
+
+    cache.put_back("weixin:user-1", session)
+    assert cache.get_existing("weixin:user-1") is session
+
+
 def test_weixin_receive_skips_queue_when_try_steer_true():
     api = FakeWeixinApi([_text_update("steer me")])
     channel = WeixinChannel(WeixinChannelConfig(enabled=True, token="token"), api=api)

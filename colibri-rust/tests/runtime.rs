@@ -28,9 +28,10 @@ use colibri_rust::steering::{
 use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
+use colibri_rust::channel::parse_permission_choice;
 use colibri_rust::weixin::{
     cleanup_media_directory, decrypt_aes_ecb, download_inbound_media, encrypt_aes_ecb,
-    parse_weixin_updates, permission_choice, send_weixin_media, send_weixin_text,
+    parse_weixin_updates, resolve_inbound_media, send_weixin_media, send_weixin_text,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -113,6 +114,10 @@ fn default_config_matches_python_runtime_defaults() {
     assert!(!config.tools.enabled.contains(&"mcp".to_string()));
     assert_eq!(config.web_search.engine, "baidu");
     assert_eq!(config.gateway.enabled_channels, vec!["weixin".to_string()]);
+    assert_eq!(config.gateway.max_sessions, 4);
+    assert_eq!(config.gateway.session_idle_seconds, 600);
+    assert_eq!(config.gateway.max_pending_inbound, 8);
+    assert_eq!(config.gateway.max_concurrent_turns, 1);
     assert!(!config.channels_weixin.enabled);
     assert_eq!(config.shell.deny[0], "rm");
     assert_eq!(config.files.roots[1], Path::new("/tmp/colibri"));
@@ -2975,9 +2980,6 @@ fn gateway_stop_refuses_unverified_pid_like_python() {
 
 #[test]
 fn weixin_updates_parse_text_and_media_with_context_like_python() {
-    let temp = temp_dir("weixin-parse-media");
-    let image_path = temp.join("photo.png");
-    fs::write(&image_path, b"image").unwrap();
     let mut config = AgentConfig::default();
     config.channels_weixin.allow_from = vec!["user-1".to_string()];
     let body = r#"{
@@ -2988,25 +2990,24 @@ fn weixin_updates_parse_text_and_media_with_context_like_python() {
         ]
     }"#;
 
-    let (next, messages) = parse_weixin_updates(&config, body, |_item| {
-        Ok(MediaPart::new(
-            "image",
-            image_path.clone(),
-            "photo.png",
-            "image/png",
-            "",
-        ))
-    })
-    .unwrap();
+    let (next, messages) = parse_weixin_updates(&config, body).unwrap();
 
     assert_eq!(next, "next");
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].text, "hello");
     assert!(messages[0].media.is_empty());
+    assert!(messages[0].pending_media_items.is_empty());
     assert_eq!(messages[1].text, "[image: photo.png]");
     assert_eq!(messages[1].message_id, "m2");
     assert_eq!(messages[1].context_token, "ctx");
-    assert_eq!(messages[1].media[0].path, image_path);
+    assert!(messages[1].media.is_empty());
+    assert_eq!(messages[1].pending_media_items.len(), 1);
+
+    let mut media_message = messages[1].clone();
+    // Resolve hits network and fails; pending is cleared and media stays empty.
+    resolve_inbound_media(&config, &mut media_message).unwrap();
+    assert!(media_message.pending_media_items.is_empty());
+    assert!(media_message.media.is_empty());
 }
 
 #[test]
@@ -3014,12 +3015,17 @@ fn weixin_updates_keep_text_when_media_download_fails_like_python() {
     let config = AgentConfig::default();
     let body = r#"{"msgs":[{"message_type":1,"message_state":2,"from_user_id":"user","item_list":[{"type":1,"text_item":{"text":"keep me"}},{"type":4,"file_item":{"file_name":"bad.bin","media":{"full_url":"https://bad"}}}]}]}"#;
 
-    let (_, messages) =
-        parse_weixin_updates(&config, body, |_item| Err("download failed".to_string())).unwrap();
+    let (_, messages) = parse_weixin_updates(&config, body).unwrap();
 
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].text, "keep me");
+    assert_eq!(messages[0].text, "keep me\n[file: bad.bin]");
     assert!(messages[0].media.is_empty());
+    assert_eq!(messages[0].pending_media_items.len(), 1);
+
+    let mut message = messages[0].clone();
+    resolve_inbound_media(&config, &mut message).unwrap();
+    assert!(message.media.is_empty());
+    assert!(message.pending_media_items.is_empty());
 }
 
 #[test]
@@ -3069,7 +3075,7 @@ fn weixin_permission_numeric_choices_match_python() {
         ("deny", "0"),
         ("something else", "0"),
     ] {
-        assert_eq!(permission_choice(reply), expected);
+        assert_eq!(parse_permission_choice(reply), expected);
     }
 }
 
@@ -3653,4 +3659,42 @@ fn write_http_response(mut stream: TcpStream, response: TestHttpResponse) -> Res
 
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[test]
+fn inbound_router_global_bound_and_orders_sessions_like_python() {
+    use colibri_rust::gateway::InboundRouter;
+
+    let router = InboundRouter::new(2);
+    assert!(router.try_enqueue("a".into(), 1).is_ok());
+    assert!(router.try_enqueue("b".into(), 2).is_ok());
+    assert!(router.try_enqueue("a".into(), 3).is_err());
+    assert_eq!(router.pending_len(), 2);
+
+    let (key, value) = router.acquire().unwrap();
+    assert_eq!((key.as_str(), value), ("a", 1));
+    assert!(router.try_enqueue("a".into(), 3).is_ok());
+    router.release("a");
+
+    let mut got = vec![router.acquire().unwrap(), router.acquire().unwrap()];
+    got.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(got, vec![("a".into(), 3), ("b".into(), 2)]);
+    router.release("a");
+    router.release("b");
+}
+
+#[test]
+fn inbound_router_same_session_not_concurrent_like_python() {
+    use colibri_rust::gateway::InboundRouter;
+
+    let router = InboundRouter::new(4);
+    assert!(router.try_enqueue("a".into(), 1).is_ok());
+    assert!(router.try_enqueue("a".into(), 2).is_ok());
+    let (key, value) = router.acquire().unwrap();
+    assert_eq!((key.as_str(), value), ("a", 1));
+    assert_eq!(router.pending_len(), 1);
+    router.release("a");
+    let (key, value) = router.acquire().unwrap();
+    assert_eq!((key.as_str(), value), ("a", 2));
+    router.release("a");
 }

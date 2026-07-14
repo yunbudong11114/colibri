@@ -51,6 +51,8 @@ def test_default_config_uses_small_device_limits():
     assert config.gateway.enabled_channels == ["weixin"]
     assert config.gateway.max_sessions == 4
     assert config.gateway.session_idle_seconds == 600
+    assert config.gateway.max_pending_inbound == 8
+    assert config.gateway.max_concurrent_turns == 1
     assert not config.channels.weixin.enabled
     assert config.channels.weixin.base_url == "https://ilinkai.weixin.qq.com/"
     assert config.channels.weixin.allow_from == []

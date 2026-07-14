@@ -173,6 +173,8 @@ Configure Weixin in private config:
 enabled_channels = ["weixin"]
 max_sessions = 4
 session_idle_seconds = 600
+max_pending_inbound = 8
+max_concurrent_turns = 1
 
 [channels.weixin]
 enabled = true
@@ -303,6 +305,8 @@ max_result_chars = 32000
 [gateway]
 max_sessions = 4
 session_idle_seconds = 600
+max_pending_inbound = 8
+max_concurrent_turns = 1
 ```
 
 When the session reaches `trigger_message_limit` messages, or when the estimated model input tokens reach 80% of `model.input_context_tokens`, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. If no tokenizer is available, Colibri estimates input tokens as UTF-8 bytes divided by 4. It does not drop old messages with a separate pruning pass.

@@ -1,17 +1,15 @@
-use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{expand_user_path, rss_kb, AgentConfig, DEFAULT_USER_CONFIG};
 use crate::console::format_answer_for_console;
 use crate::gateway::{
-    format_gateway_status, restart_gateway, start_gateway, stop_gateway, GatewaySessionCache,
-    GatewayStatus,
+    format_gateway_status, restart_gateway, run_gateway, start_gateway, stop_gateway, GatewayStatus,
 };
 use crate::model::build_model;
 use crate::permissions::{PermissionPrompter, PermissionRequest};
@@ -21,10 +19,7 @@ use crate::repl_input::{
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::steering::SteerHandle;
-use crate::weixin::{
-    perform_weixin_auth, permission_choice, poll_weixin_once, save_weixin_auth_config,
-    send_weixin_media, send_weixin_text, InboundWeixinMessage,
-};
+use crate::weixin::{perform_weixin_auth, save_weixin_auth_config};
 
 use std::io::IsTerminal;
 
@@ -257,185 +252,7 @@ fn gateway_command<W: Write + Send + 'static, E: Write + Send + 'static>(
 }
 
 fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
-    if !config
-        .gateway
-        .enabled_channels
-        .iter()
-        .any(|item| item == "weixin")
-        || !config.channels_weixin.enabled
-    {
-        return Err("No gateway channels are enabled".to_string());
-    }
-    let (work_tx, work_rx) = mpsc::sync_channel::<InboundWeixinMessage>(8);
-    let (error_tx, error_rx) = mpsc::channel::<String>();
-    let waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config.clone())?));
-    let worker_config = config.clone();
-    let worker_waiters = Arc::clone(&waiters);
-    let worker_sessions = Arc::clone(&sessions);
-    let worker_error_tx = error_tx.clone();
-    let worker = std::thread::spawn(move || {
-        if let Err(error) =
-            run_weixin_worker(worker_config, work_rx, worker_waiters, worker_sessions)
-        {
-            let _ = worker_error_tx.send(error);
-        }
-    });
-    let mut get_updates_buf = String::new();
-    let result = (|| -> Result<i32, String> {
-        loop {
-            if let Ok(error) = error_rx.try_recv() {
-                let _ = worker.join();
-                return Err(error);
-            }
-            let (next_buf, messages) = poll_weixin_once(&config, &get_updates_buf)?;
-            get_updates_buf = next_buf;
-            for message in messages {
-                if deliver_weixin_waiter(&waiters, &message) {
-                    continue;
-                }
-                if message.media.is_empty() && !message.text.trim().is_empty() {
-                    let key = format!("weixin:{}", message.sender_id);
-                    let steered = sessions
-                        .lock()
-                        .map_err(|_| "gateway session cache lock poisoned".to_string())?
-                        .try_steer(&key, &message.text);
-                    if steered {
-                        continue;
-                    }
-                }
-                work_tx
-                    .send(message)
-                    .map_err(|error| format!("Weixin worker stopped: {}", error))?;
-            }
-        }
-    })();
-    if let Ok(mut cache) = sessions.lock() {
-        cache.close();
-    }
-    result
-}
-
-fn run_weixin_worker(
-    config: AgentConfig,
-    work_rx: mpsc::Receiver<InboundWeixinMessage>,
-    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
-    sessions: Arc<Mutex<GatewaySessionCache>>,
-) -> Result<(), String> {
-    let config = Arc::new(config);
-    while let Ok(message) = work_rx.recv() {
-        let key = format!("weixin:{}", message.sender_id);
-        let sender_id = message.sender_id.clone();
-        let context_token = message.context_token.clone();
-        let media_sender_config = Arc::clone(&config);
-        let media_sender_id = sender_id.clone();
-        let media_context_token = context_token.clone();
-        let media_sender = Arc::new(move |media| {
-            send_weixin_media(
-                &media_sender_config,
-                &media_sender_id,
-                &media_context_token,
-                &media,
-            )
-        });
-        let mut session = {
-            let mut guard = sessions
-                .lock()
-                .map_err(|_| "gateway session cache lock poisoned".to_string())?;
-            guard.take_or_create_with_metadata_and_media_sender(
-                &key,
-                std::collections::BTreeMap::from([
-                    ("channel".to_string(), "weixin".to_string()),
-                    ("sender_id".to_string(), sender_id.clone()),
-                    ("session_key".to_string(), key.clone()),
-                ]),
-                Some(media_sender),
-            )?
-        };
-        let notifier_config = Arc::clone(&config);
-        let notifier_sender = sender_id.clone();
-        let notifier_token = context_token.clone();
-        session.set_steer_notifier(Some(Arc::new(move |ack| {
-            let _ = send_weixin_text(&notifier_config, &notifier_sender, &notifier_token, &ack);
-        })));
-        let mut prompter = WeixinPermissionPrompter {
-            config: Arc::clone(&config),
-            sender_id: sender_id.clone(),
-            context_token: context_token.clone(),
-            waiters: Arc::clone(&waiters),
-            timeout_seconds: 300,
-        };
-        let response = session.submit_with_media_and_permission_prompter(
-            &message.text,
-            message.media,
-            Some(&mut prompter),
-        )?;
-        {
-            let mut guard = sessions
-                .lock()
-                .map_err(|_| "gateway session cache lock poisoned".to_string())?;
-            guard.put_back(&key, session);
-            guard.touch(&key);
-        }
-        if !response.text.trim().is_empty() {
-            send_weixin_text(&config, &sender_id, &context_token, &response.text)?;
-        }
-    }
-    Ok(())
-}
-
-fn deliver_weixin_waiter(
-    waiters: &Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
-    message: &InboundWeixinMessage,
-) -> bool {
-    if !message.media.is_empty() || message.text.trim().is_empty() {
-        return false;
-    }
-    let waiter = waiters
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&message.sender_id).cloned());
-    let Some(waiter) = waiter else {
-        return false;
-    };
-    waiter.try_send(message.text.trim().to_string()).is_ok()
-}
-
-struct WeixinPermissionPrompter {
-    config: Arc<AgentConfig>,
-    sender_id: String,
-    context_token: String,
-    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
-    timeout_seconds: u64,
-}
-
-impl PermissionPrompter for WeixinPermissionPrompter {
-    fn confirm(&mut self, request: PermissionRequest) -> String {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.insert(self.sender_id.clone(), tx);
-        }
-        let prompt = format_weixin_permission_prompt(&request);
-        let send_result =
-            send_weixin_text(&self.config, &self.sender_id, &self.context_token, &prompt);
-        if send_result.is_err() {
-            if let Ok(mut waiters) = self.waiters.lock() {
-                waiters.remove(&self.sender_id);
-            }
-            return "0".to_string();
-        }
-        let reply = rx
-            .recv_timeout(std::time::Duration::from_secs(self.timeout_seconds))
-            .ok();
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.remove(&self.sender_id);
-        }
-        reply
-            .as_deref()
-            .map(permission_choice)
-            .unwrap_or_else(|| "0".to_string())
-    }
+    run_gateway(config)
 }
 
 /// Background loop: forward stdin lines to `session.steer` while a turn runs.
@@ -710,48 +527,6 @@ fn format_permission_prompt_lines(request: &PermissionRequest) -> Vec<String> {
             summarized_arguments(&request.arguments)
         )],
     }
-}
-
-fn format_weixin_permission_prompt(request: &PermissionRequest) -> String {
-    let mut lines = vec![format!("Colibri wants to run {}.", request.tool_name)];
-    for line in format_permission_prompt_lines(request) {
-        if request.subject_kind == "file_path" && line.starts_with("file: ") {
-            let path = line
-                .strip_prefix("file: ")
-                .and_then(|text| text.split_once(' ').map(|(_, path)| path))
-                .unwrap_or_else(|| line.strip_prefix("file: ").unwrap_or(&line));
-            lines.push(format!("path: {}", path));
-        } else {
-            lines.push(line);
-        }
-    }
-    lines.push(String::new());
-    lines.push("choose:".to_string());
-    match request.subject_kind.as_str() {
-        "shell" => lines.extend(
-            [
-                "1. once",
-                "2. session-command",
-                "3. session-executable",
-                "4. user-command",
-                "5. user-executable",
-                "0. deny",
-            ]
-            .into_iter()
-            .map(String::from),
-        ),
-        "file_path" => lines.extend(
-            ["1. once", "2. session-dir", "4. user-dir", "0. deny"]
-                .into_iter()
-                .map(String::from),
-        ),
-        _ => lines.extend(
-            ["1. once", "2. session", "4. user", "0. deny"]
-                .into_iter()
-                .map(String::from),
-        ),
-    }
-    lines.join("\n")
 }
 
 fn content_summary(value: Option<&String>) -> String {

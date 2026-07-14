@@ -24,14 +24,16 @@ The active implementation specs are in `docs/superpowers/specs/`:
 - `2026-07-09-colibri-weixin-media-design.md`: Weixin file/image send and receive behavior, including Rust parity requirements.
 - `2026-07-09-colibri-channel-followups.md`: selected channel follow-up issue.
 - `2026-07-10-colibri-steering-display-design.md`: steering UX on Weixin + lightweight concurrent REPL (Approach 2).
+- `2026-07-14-colibri-gateway-thin-bus-design.md`: light inbound envelopes, per-session queues, outbound sink, concurrent turns.
 
 ## Plans
 
 Implementation plans are kept in `docs/superpowers/plans/`. They are historical execution aids; prefer the current specs and root README files for the latest behavior.
 
-Recent plan (implemented):
+Recent plans:
 
 - `2026-07-10-colibri-steering.md`: mid-turn steering + Weixin ack + concurrent REPL (Python/Rust). Spec: `2026-07-10-colibri-steering-display-design.md`.
+- `2026-07-14-colibri-gateway-thin-bus.md`: gateway thin-bus (Rust-first, Python parity). Spec: `2026-07-14-colibri-gateway-thin-bus-design.md`.
 
 ## Private Reference Notes
 

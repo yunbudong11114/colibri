@@ -164,6 +164,8 @@ uv run python -m colibri.cli gateway status
 enabled_channels = ["weixin"]
 max_sessions = 4
 session_idle_seconds = 600
+max_pending_inbound = 8
+max_concurrent_turns = 1
 
 [channels.weixin]
 enabled = true
@@ -285,6 +287,8 @@ max_result_chars = 32000
 [gateway]
 max_sessions = 4
 session_idle_seconds = 600
+max_pending_inbound = 8
+max_concurrent_turns = 1
 ```
 
 当 session 达到 `trigger_message_limit` 条消息，或估算模型输入 token 达到 `model.input_context_tokens` 的 80% 时，Colibri 会把当前消息缓冲压缩进滚动摘要，并保留最近 `recent_message_limit` 条消息。如果运行时没有 tokenizer，则按 UTF-8 字节数除以 4 估算 token。它不会再额外通过裁剪旧消息来控制输入大小。

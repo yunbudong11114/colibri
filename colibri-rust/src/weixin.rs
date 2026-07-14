@@ -39,17 +39,16 @@ pub struct InboundWeixinMessage {
     pub text: String,
     pub context_token: String,
     pub message_id: String,
+    /// Resolved local media parts. Empty after light poll; filled by `resolve_inbound_media`.
     pub media: Vec<MediaPart>,
+    /// Raw Weixin media items deferred until the worker turn (keeps poll RSS/latency low).
+    pub pending_media_items: Vec<serde_json::Value>,
 }
 
-pub fn parse_weixin_updates<F>(
+pub fn parse_weixin_updates(
     config: &AgentConfig,
     body: &str,
-    mut download_media: F,
-) -> Result<(String, Vec<InboundWeixinMessage>), String>
-where
-    F: FnMut(&serde_json::Value) -> Result<MediaPart, String>,
-{
+) -> Result<(String, Vec<InboundWeixinMessage>), String> {
     let data: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| format!("Weixin API response was not valid JSON: {}", error))?;
     let next = data
@@ -78,7 +77,7 @@ where
             continue;
         }
         let mut texts = Vec::new();
-        let mut media = Vec::new();
+        let mut pending_media_items = Vec::new();
         for item in raw
             .get("item_list")
             .and_then(serde_json::Value::as_array)
@@ -97,21 +96,21 @@ where
                         texts.push(text.to_string());
                     }
                 }
-                Some(item_type @ (2 | 4)) if media.is_empty() => {
-                    if let Ok(part) = download_media(item) {
+                Some(item_type @ (2 | 4)) if pending_media_items.is_empty() => {
+                    if let Ok((_media_type, filename, _media_ref)) = inbound_media_info(item) {
                         texts.push(if item_type == 2 {
-                            format!("[image: {}]", part.filename)
+                            format!("[image: {filename}]")
                         } else {
-                            format!("[file: {}]", part.filename)
+                            format!("[file: {filename}]")
                         });
-                        media.push(part);
+                        pending_media_items.push(item.clone());
                     }
                 }
                 _ => {}
             }
         }
         let text = texts.join("\n");
-        if text.trim().is_empty() && media.is_empty() {
+        if text.trim().is_empty() && pending_media_items.is_empty() {
             continue;
         }
         messages.push(InboundWeixinMessage {
@@ -131,10 +130,28 @@ where
                         .unwrap_or_else(|| value.to_string())
                 })
                 .unwrap_or_default(),
-            media,
+            media: Vec::new(),
+            pending_media_items,
         });
     }
     Ok((next, messages))
+}
+
+pub fn resolve_inbound_media(
+    config: &AgentConfig,
+    message: &mut InboundWeixinMessage,
+) -> Result<(), String> {
+    if message.pending_media_items.is_empty() {
+        return Ok(());
+    }
+    let items = std::mem::take(&mut message.pending_media_items);
+    for item in items {
+        match download_inbound_media(config, &item) {
+            Ok(part) => message.media.push(part),
+            Err(_) => continue,
+        }
+    }
+    Ok(())
 }
 
 pub fn encrypt_aes_ecb(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
@@ -207,15 +224,6 @@ pub fn cleanup_media_directory(root: &Path, retention_seconds: u64, max_total_by
         if total <= max_total_bytes {
             break;
         }
-    }
-}
-
-pub fn permission_choice(reply: &str) -> String {
-    let first = reply.split_whitespace().next().unwrap_or("0");
-    if matches!(first, "0" | "1" | "2" | "3" | "4" | "5") {
-        first.to_string()
-    } else {
-        "0".to_string()
     }
 }
 
@@ -318,9 +326,7 @@ pub fn poll_weixin_once(
         config.channels_weixin.poll_timeout_seconds + 5,
     )?;
     fail_on_http("Weixin getupdates", &response)?;
-    let (parsed_buf, messages) = parse_weixin_updates(config, &response.body, |item| {
-        download_inbound_media(config, item)
-    })?;
+    let (parsed_buf, messages) = parse_weixin_updates(config, &response.body)?;
     let next_buf = if parsed_buf.is_empty() {
         get_updates_buf.to_string()
     } else {

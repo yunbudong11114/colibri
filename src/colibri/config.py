@@ -91,7 +91,15 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
             "timeout_seconds",
         }
     ),
-    "gateway": frozenset({"enabled_channels", "max_sessions", "session_idle_seconds"}),
+    "gateway": frozenset(
+        {
+            "enabled_channels",
+            "max_sessions",
+            "session_idle_seconds",
+            "max_pending_inbound",
+            "max_concurrent_turns",
+        }
+    ),
 }
 
 _ALLOWED_CHANNELS_WEIXIN = frozenset(
@@ -252,6 +260,10 @@ class GatewayConfig:
     max_sessions: int = 4
     # channel session 空闲驱逐时间，单位秒。
     session_idle_seconds: int = 600
+    # 入站待处理信封全局上限（所有 session 队列合计）。
+    max_pending_inbound: int = 8
+    # 同时执行的 agent submit 上限；CM0 默认 1。
+    max_concurrent_turns: int = 1
 
 
 @dataclass(frozen=True)

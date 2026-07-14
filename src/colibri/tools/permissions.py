@@ -117,7 +117,7 @@ class PermissionPolicy:
             read_only=tool.spec.read_only,
             subject=subject,
         )
-        choice = _permission_choice(self._prompter().confirm(request))
+        choice = parse_permission_choice(self._prompter().confirm(request))
         return self._apply_choice(choice, subject, user_grants)
 
     def _granted(
@@ -273,7 +273,7 @@ def permission_subject_for(
     return PermissionSubject(kind="tool", tool_name=tool.spec.name, read_only=tool.spec.read_only)
 
 
-def _permission_choice(reply: str) -> str:
+def parse_permission_choice(reply: str) -> str:
     first = reply.strip().split(maxsplit=1)[0] if reply.strip() else "0"
     return first if first in {"0", "1", "2", "3", "4", "5"} else "0"
 

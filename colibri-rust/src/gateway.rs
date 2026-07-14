@@ -1,10 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::channel::{
+    deliver_text_waiter, ChannelTextPermissionPrompter, InboundEnvelope, OutboundSink,
+};
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
 use crate::model::{build_model, ModelClient};
@@ -12,6 +17,10 @@ use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::steering::SteerHandle;
 use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
+use crate::weixin::{
+    poll_weixin_once, resolve_inbound_media, send_weixin_media, send_weixin_text,
+    InboundWeixinMessage,
+};
 
 #[derive(Clone, Debug)]
 pub struct GatewayStatus {
@@ -495,4 +504,405 @@ fn pid_command(pid: u32) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// Per-session inbound queues with a global pending bound and fair RR acquire.
+pub struct InboundRouter<T> {
+    inner: Mutex<InboundRouterInner<T>>,
+    cv: Condvar,
+}
+
+struct InboundRouterInner<T> {
+    max_pending: usize,
+    queues: BTreeMap<String, VecDeque<T>>,
+    rr: VecDeque<String>,
+    total: usize,
+    active: HashSet<String>,
+    closed: bool,
+}
+
+impl<T> InboundRouter<T> {
+    pub fn new(max_pending: usize) -> Self {
+        Self {
+            inner: Mutex::new(InboundRouterInner {
+                max_pending: max_pending.max(1),
+                queues: BTreeMap::new(),
+                rr: VecDeque::new(),
+                total: 0,
+                active: HashSet::new(),
+                closed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    /// Enqueue or return the item if the global bound is hit (fail-fast).
+    pub fn try_enqueue(&self, key: String, item: T) -> Result<(), T> {
+        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if guard.closed || guard.total >= guard.max_pending {
+            return Err(item);
+        }
+        let queue = guard.queues.entry(key.clone()).or_default();
+        let was_empty = queue.is_empty();
+        queue.push_back(item);
+        guard.total += 1;
+        if was_empty && !guard.active.contains(&key) && !guard.rr.iter().any(|item| item == &key) {
+            guard.rr.push_back(key);
+        }
+        self.cv.notify_one();
+        Ok(())
+    }
+
+    /// Block until a session that is not already mid-turn has work, or the router closes.
+    pub fn acquire(&self) -> Option<(String, T)> {
+        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            if let Some(pair) = Self::try_acquire_locked(&mut guard) {
+                return Some(pair);
+            }
+            if guard.closed {
+                return None;
+            }
+            guard = self
+                .cv
+                .wait(guard)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    fn try_acquire_locked(guard: &mut InboundRouterInner<T>) -> Option<(String, T)> {
+        let n = guard.rr.len();
+        for _ in 0..n {
+            let key = guard.rr.pop_front()?;
+            if guard.active.contains(&key) {
+                guard.rr.push_back(key);
+                continue;
+            }
+            let Some(queue) = guard.queues.get_mut(&key) else {
+                continue;
+            };
+            let Some(item) = queue.pop_front() else {
+                continue;
+            };
+            guard.total = guard.total.saturating_sub(1);
+            guard.active.insert(key.clone());
+            if !queue.is_empty() {
+                guard.rr.push_back(key.clone());
+            }
+            return Some((key, item));
+        }
+        None
+    }
+
+    pub fn release(&self, key: &str) {
+        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        guard.active.remove(key);
+        let has_work = guard
+            .queues
+            .get(key)
+            .map(|queue| !queue.is_empty())
+            .unwrap_or(false);
+        if has_work && !guard.rr.iter().any(|item| item == key) {
+            guard.rr.push_back(key.to_string());
+        }
+        self.cv.notify_one();
+    }
+
+    pub fn close(&self) {
+        let mut guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        guard.closed = true;
+        self.cv.notify_all();
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .total
+    }
+}
+
+
+/// Serial outbound path for one Weixin recipient.
+struct WeixinOutboundSink {
+    config: Arc<AgentConfig>,
+    sender_id: String,
+    context_token: String,
+}
+
+impl OutboundSink for WeixinOutboundSink {
+    fn send_text(&self, text: &str) -> Result<(), String> {
+        send_weixin_text(&self.config, &self.sender_id, &self.context_token, text)
+    }
+
+    fn send_media(&self, media: &MediaPart) -> Result<(), String> {
+        send_weixin_media(
+            &self.config,
+            &self.sender_id,
+            &self.context_token,
+            media,
+        )
+    }
+}
+
+fn envelope_from_weixin(message: InboundWeixinMessage) -> InboundEnvelope {
+    let mut context = BTreeMap::new();
+    if !message.context_token.is_empty() {
+        context.insert("context_token".to_string(), message.context_token);
+    }
+    InboundEnvelope {
+        channel: "weixin".to_string(),
+        sender_id: message.sender_id,
+        text: message.text,
+        message_id: message.message_id,
+        media: message.media,
+        media_refs: message.pending_media_items,
+        context,
+    }
+}
+
+fn resolve_envelope_media(config: &AgentConfig, envelope: &mut InboundEnvelope) -> Result<(), String> {
+    match envelope.channel.as_str() {
+        "weixin" => {
+            let mut message = InboundWeixinMessage {
+                sender_id: envelope.sender_id.clone(),
+                text: envelope.text.clone(),
+                context_token: envelope.context_token().to_string(),
+                message_id: envelope.message_id.clone(),
+                media: std::mem::take(&mut envelope.media),
+                pending_media_items: std::mem::take(&mut envelope.media_refs),
+            };
+            resolve_inbound_media(config, &mut message)?;
+            envelope.media = message.media;
+            Ok(())
+        }
+        other => Err(format!("unknown channel for media resolve: {other}")),
+    }
+}
+
+fn outbound_for(
+    config: Arc<AgentConfig>,
+    envelope: &InboundEnvelope,
+) -> Result<Arc<dyn OutboundSink>, String> {
+    match envelope.channel.as_str() {
+        "weixin" => Ok(Arc::new(WeixinOutboundSink {
+            config,
+            sender_id: envelope.sender_id.clone(),
+            context_token: envelope.context_token().to_string(),
+        })),
+        other => Err(format!("unknown channel for outbound: {other}")),
+    }
+}
+
+fn channel_enabled(config: &AgentConfig, name: &str) -> bool {
+    config.gateway.enabled_channels.iter().any(|item| item == name)
+        && match name {
+            "weixin" => config.channels_weixin.enabled,
+            _ => false,
+        }
+}
+
+/// Foreground gateway: enabled channel pollers → inbound router → turn workers.
+pub fn run_gateway(config: AgentConfig) -> Result<i32, String> {
+    let enabled: Vec<&str> = ["weixin"]
+        .into_iter()
+        .filter(|name| channel_enabled(&config, name))
+        .collect();
+    if enabled.is_empty() {
+        return Err("No gateway channels are enabled".to_string());
+    }
+    let max_pending = config.gateway.max_pending_inbound.max(1);
+    let max_turns = config.gateway.max_concurrent_turns.max(1);
+    let router = Arc::new(InboundRouter::new(max_pending));
+    let (error_tx, error_rx) = mpsc::channel::<String>();
+    let waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config.clone())?));
+    let mut workers = Vec::with_capacity(max_turns);
+    for _ in 0..max_turns {
+        let worker_config = config.clone();
+        let worker_router = Arc::clone(&router);
+        let worker_waiters = Arc::clone(&waiters);
+        let worker_sessions = Arc::clone(&sessions);
+        let worker_error_tx = error_tx.clone();
+        workers.push(thread::spawn(move || {
+            if let Err(error) =
+                run_turn_worker(worker_config, worker_router, worker_waiters, worker_sessions)
+            {
+                let _ = worker_error_tx.send(error);
+            }
+        }));
+    }
+    // Channel poll loops. Add new adapters by spawning another poller that enqueues InboundEnvelope.
+    let mut pollers = Vec::new();
+    if enabled.contains(&"weixin") {
+        let poll_config = config.clone();
+        let poll_router = Arc::clone(&router);
+        let poll_waiters = Arc::clone(&waiters);
+        let poll_sessions = Arc::clone(&sessions);
+        let poll_error_tx = error_tx.clone();
+        pollers.push(thread::spawn(move || {
+            if let Err(error) =
+                run_weixin_poll_loop(poll_config, poll_router, poll_waiters, poll_sessions)
+            {
+                let _ = poll_error_tx.send(error);
+            }
+        }));
+    }
+    let result = (|| -> Result<i32, String> {
+        loop {
+            if let Ok(error) = error_rx.try_recv() {
+                return Err(error);
+            }
+            thread::sleep(Duration::from_millis(50));
+            if pollers.iter().all(|poller| poller.is_finished()) {
+                return Err("gateway channel poller stopped".to_string());
+            }
+        }
+    })();
+    router.close();
+    for worker in workers {
+        let _ = worker.join();
+    }
+    for poller in pollers {
+        let _ = poller.join();
+    }
+    if let Ok(mut cache) = sessions.lock() {
+        cache.close();
+    }
+    result
+}
+
+fn run_weixin_poll_loop(
+    config: AgentConfig,
+    router: Arc<InboundRouter<InboundEnvelope>>,
+    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    sessions: Arc<Mutex<GatewaySessionCache>>,
+) -> Result<(), String> {
+    let mut get_updates_buf = String::new();
+    loop {
+        let (next_buf, messages) = poll_weixin_once(&config, &get_updates_buf)?;
+        get_updates_buf = next_buf;
+        for message in messages {
+            let envelope = envelope_from_weixin(message);
+            if envelope.text_only()
+                && deliver_text_waiter(&waiters, &envelope.sender_id, &envelope.text)
+            {
+                continue;
+            }
+            if envelope.text_only() {
+                let key = envelope.session_key();
+                let steered = sessions
+                    .lock()
+                    .map_err(|_| "gateway session cache lock poisoned".to_string())?
+                    .try_steer(&key, &envelope.text);
+                if steered {
+                    continue;
+                }
+            }
+            let key = envelope.session_key();
+            if router.try_enqueue(key, envelope).is_err() {
+                eprintln!("[colibri] inbound queue full; dropping message");
+            }
+        }
+    }
+}
+
+fn run_turn_worker(
+    config: AgentConfig,
+    router: Arc<InboundRouter<InboundEnvelope>>,
+    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    sessions: Arc<Mutex<GatewaySessionCache>>,
+) -> Result<(), String> {
+    let config = Arc::new(config);
+    while let Some((key, mut envelope)) = router.acquire() {
+        let turn_result = (|| -> Result<(), String> {
+            resolve_envelope_media(&config, &mut envelope)?;
+            let outbound = outbound_for(Arc::clone(&config), &envelope)?;
+            let media_outbound = Arc::clone(&outbound);
+            let media_sender = Arc::new(move |media| media_outbound.send_media(&media));
+            let mut session = {
+                let mut guard = sessions
+                    .lock()
+                    .map_err(|_| "gateway session cache lock poisoned".to_string())?;
+                guard.take_or_create_with_metadata_and_media_sender(
+                    &key,
+                    BTreeMap::from([
+                        ("channel".to_string(), envelope.channel.clone()),
+                        ("sender_id".to_string(), envelope.sender_id.clone()),
+                        ("session_key".to_string(), key.clone()),
+                    ]),
+                    Some(media_sender),
+                )?
+            };
+            let ack_outbound = Arc::clone(&outbound);
+            session.set_steer_notifier(Some(Arc::new(move |ack| {
+                ack_outbound.send_ack(&ack);
+            })));
+            let mut prompter = ChannelTextPermissionPrompter::new(
+                Arc::clone(&outbound),
+                envelope.sender_id.clone(),
+                Arc::clone(&waiters),
+                300,
+            );
+            let response = session.submit_with_media_and_permission_prompter(
+                &envelope.text,
+                envelope.media,
+                Some(&mut prompter),
+            )?;
+            {
+                let mut guard = sessions
+                    .lock()
+                    .map_err(|_| "gateway session cache lock poisoned".to_string())?;
+                guard.put_back(&key, session);
+                guard.touch(&key);
+            }
+            if !response.text.trim().is_empty() {
+                outbound.send_text(&response.text)?;
+            }
+            Ok(())
+        })();
+        router.release(&key);
+        turn_result?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InboundRouter;
+
+    #[test]
+    fn inbound_router_global_bound_and_fair_acquire() {
+        let router = InboundRouter::new(2);
+        assert!(router.try_enqueue("a".into(), 1).is_ok());
+        assert!(router.try_enqueue("b".into(), 2).is_ok());
+        assert!(router.try_enqueue("a".into(), 3).is_err());
+        assert_eq!(router.pending_len(), 2);
+
+        let (key, value) = router.acquire().unwrap();
+        assert_eq!((key.as_str(), value), ("a", 1));
+        assert!(router.try_enqueue("a".into(), 3).is_ok());
+        router.release("a");
+
+        let mut got = vec![router.acquire().unwrap(), router.acquire().unwrap()];
+        got.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(got, vec![("a".into(), 3), ("b".into(), 2)]);
+        router.release("a");
+        router.release("b");
+    }
+
+    #[test]
+    fn inbound_router_same_session_serialized() {
+        let router = InboundRouter::new(4);
+        assert!(router.try_enqueue("a".into(), 1).is_ok());
+        assert!(router.try_enqueue("a".into(), 2).is_ok());
+        let (key, value) = router.acquire().unwrap();
+        assert_eq!((key.as_str(), value), ("a", 1));
+        assert_eq!(router.pending_len(), 1);
+        router.release("a");
+        let (key, value) = router.acquire().unwrap();
+        assert_eq!((key.as_str(), value), ("a", 2));
+        router.release("a");
+    }
 }

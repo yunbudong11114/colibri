@@ -94,6 +94,8 @@ pub struct GatewayConfig {
     pub enabled_channels: Vec<String>,
     pub max_sessions: usize,
     pub session_idle_seconds: u64,
+    pub max_pending_inbound: usize,
+    pub max_concurrent_turns: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +215,8 @@ impl Default for AgentConfig {
                 enabled_channels: vec!["weixin".to_string()],
                 max_sessions: 4,
                 session_idle_seconds: 600,
+                max_pending_inbound: 8,
+                max_concurrent_turns: 1,
             },
             channels_weixin: WeixinChannelConfig {
                 enabled: false,
@@ -471,6 +475,12 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         if let Some(value) = get_u64(table, "session_idle_seconds") {
             config.gateway.session_idle_seconds = value;
         }
+        if let Some(value) = get_usize(table, "max_pending_inbound") {
+            config.gateway.max_pending_inbound = value.max(1);
+        }
+        if let Some(value) = get_usize(table, "max_concurrent_turns") {
+            config.gateway.max_concurrent_turns = value.max(1);
+        }
     }
     if let Some(table) = value.get("channels").and_then(|value| value.get("weixin")) {
         if let Some(value) = get_bool(table, "enabled") {
@@ -599,7 +609,7 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
     validate_table(
         value,
         "gateway",
-        &["enabled_channels", "max_sessions", "session_idle_seconds"],
+        &["enabled_channels", "max_sessions", "session_idle_seconds", "max_pending_inbound", "max_concurrent_turns"],
         &[],
     )?;
     if let Some(channels) = value.get("channels") {

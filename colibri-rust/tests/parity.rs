@@ -107,6 +107,19 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
             status: "covered",
         },
         ParityEntry {
+            python_file: "test_inbound_router.py",
+            rust_tests: &[
+                "inbound_router_global_bound_and_orders_sessions_like_python",
+                "inbound_router_same_session_not_concurrent_like_python",
+            ],
+            status: "covered",
+        },
+        ParityEntry {
+            python_file: "test_channel_permission.py",
+            rust_tests: &["weixin_permission_numeric_choices_match_python"],
+            status: "partial",
+        },
+        ParityEntry {
             python_file: "test_memory.py",
             rust_tests: &[
                 "memory_context_bootstraps_and_loads_always_on_files",
@@ -366,9 +379,18 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_try_steer_returns_false_when_no_session",
             "test_try_steer_enqueues_when_turn_active",
             "test_get_existing_does_not_create_session",
+            "test_take_or_create_keeps_steer_available_while_session_outside_cache",
             "test_weixin_receive_skips_queue_when_try_steer_true",
             "test_worker_skips_send_on_empty_reply",
             "test_handle_message_steers_when_turn_active",
+        ],
+        "test_inbound_router.py" => &[
+            "test_inbound_router_bounds_global_pending_and_orders_per_session",
+            "test_inbound_router_same_session_not_concurrent",
+        ],
+        "test_channel_permission.py" => &[
+            "test_channel_text_permission_prompter_is_transport_agnostic",
+            "test_format_channel_permission_prompt_includes_choices",
         ],
         "test_memory.py" => &[
             "test_context_loads_memory_and_user_files",
@@ -576,6 +598,8 @@ fn python_test_coverage_map_covers_all_unit_files() {
         "test_diagnostics.py",
         "test_gateway_process.py",
         "test_gateway_steering.py",
+        "test_inbound_router.py",
+        "test_channel_permission.py",
         "test_memory.py",
         "test_model_factory.py",
         "test_openai_compatible_model.py",
