@@ -98,7 +98,7 @@ enabled = true
 root = "~/.colibri/memory"
 # memory.search 工具最多返回的搜索结果数。
 max_search_results = 5
-# MEMORY.md 和 USER.md 作为 always-on 记忆注入上下文前的最大字符数。
+# SOUL.md、USER.md 和 MEMORY.md 作为 always-on 记忆注入上下文前的总字符数。
 max_recall_chars = 6000
 
 [web_search]

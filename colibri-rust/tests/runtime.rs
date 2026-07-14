@@ -1699,7 +1699,12 @@ fn memory_context_bootstraps_and_loads_always_on_files() {
     let result = MemoryContext::new(config).load().unwrap();
 
     assert!(result.text.contains("Always-on memory:"));
+    assert!(result.text.contains("[SOUL.md]"));
+    assert!(result.text.contains("[USER.md]"));
     assert!(result.text.contains("[MEMORY.md]"));
+    assert_eq!(result.files, vec!["SOUL.md", "USER.md", "MEMORY.md"]);
+    assert!(temp.join("memory/SOUL.md").is_file());
+    assert!(temp.join("memory/USER.md").is_file());
     assert!(temp.join("memory/MEMORY.md").is_file());
     assert!(temp.join("memory/topics/sample.md").is_file());
 }
@@ -2329,6 +2334,29 @@ fn memory_write_supports_topic_and_python_result_text() {
 }
 
 #[test]
+fn memory_list_uses_python_builtin_order_and_sorted_topics() {
+    let temp = temp_dir("memory-list-order");
+    let mut config = AgentConfig::default();
+    config.memory.root = temp.join("memory");
+    fs::create_dir_all(config.memory.root.join("topics")).unwrap();
+    fs::write(config.memory.root.join("SOUL.md"), "soul").unwrap();
+    fs::write(config.memory.root.join("USER.md"), "user").unwrap();
+    fs::write(config.memory.root.join("MEMORY.md"), "memory").unwrap();
+    fs::write(config.memory.root.join("INDEX.md"), "index").unwrap();
+    fs::write(config.memory.root.join("topics/preferences.md"), "prefs").unwrap();
+    fs::write(config.memory.root.join("topics/devices.md"), "devices").unwrap();
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool("memory.list", "{}", &context).unwrap();
+
+    assert!(result.ok);
+    assert_eq!(
+        result.text,
+        "SOUL.md\nUSER.md\nMEMORY.md\nINDEX.md\ntopics/devices.md\ntopics/preferences.md"
+    );
+}
+
+#[test]
 fn shell_timeout_terminates_without_waiting_for_natural_exit_like_python() {
     let temp = temp_dir("shell-real-timeout");
     let mut config = AgentConfig::default();
@@ -2451,6 +2479,13 @@ fn tool_schemas_match_python_property_types_and_required_fields() {
         memory_write["function"]["parameters"]["required"],
         serde_json::json!(["content"])
     );
+    let description = memory_write["function"]["description"].as_str().unwrap();
+    assert!(description.contains("SOUL.md"));
+    assert!(description.contains("400 characters"));
+    assert!(description.contains("USER.md"));
+    assert!(description.contains("MEMORY.md"));
+    assert!(description.contains("1200 characters"));
+    assert!(description.contains("type: soul|user|feedback|project|reference|system"));
 }
 
 #[test]
@@ -2518,29 +2553,49 @@ fn memory_bootstrap_content_and_per_file_limits_match_python() {
     config.memory.max_recall_chars = 10_000;
     let first = MemoryContext::new(config.clone()).load().unwrap();
 
+    let soul_template = fs::read_to_string(config.memory.root.join("SOUL.md")).unwrap();
+    assert!(soul_template
+        .contains("description: Colibri 人格、原则和表达风格；首次真实写入时直接覆盖样例文本"));
+    assert!(soul_template.contains("updated: 2026-07-14"));
     let memory_template = fs::read_to_string(config.memory.root.join("MEMORY.md")).unwrap();
     assert!(memory_template
         .contains("description: Colibri 长期事实和项目上下文；首次真实写入时直接覆盖样例文本"));
-    assert!(memory_template.contains("updated: 2026-07-09"));
+    assert!(memory_template.contains("updated: 2026-07-14"));
     assert!(memory_template.contains("修改规则"));
-    assert!(first.text.contains("Always-on memory:\n\n[MEMORY.md]"));
+    assert!(first.text.contains("Always-on memory:\n\n[SOUL.md]"));
+    assert_eq!(first.files, vec!["SOUL.md", "USER.md", "MEMORY.md"]);
 
-    fs::write(config.memory.root.join("MEMORY.md"), "M".repeat(2_000)).unwrap();
-    fs::write(config.memory.root.join("USER.md"), "U".repeat(800)).unwrap();
+    fs::write(config.memory.root.join("SOUL.md"), "S".repeat(500)).unwrap();
+    fs::write(config.memory.root.join("USER.md"), "U".repeat(500)).unwrap();
+    fs::write(config.memory.root.join("MEMORY.md"), "M".repeat(1_400)).unwrap();
     let bounded = MemoryContext::new(config).load().unwrap();
-    let memory_block = bounded
+    let soul_block = bounded
         .text
-        .split("[MEMORY.md]\n")
+        .split("[SOUL.md]\n")
         .nth(1)
         .unwrap()
         .split("\n\n[USER.md]")
         .next()
         .unwrap();
-    let user_block = bounded.text.split("[USER.md]\n").nth(1).unwrap();
-    assert_eq!(memory_block.chars().count(), 1_800);
-    assert_eq!(user_block.chars().count(), 600);
-    assert!(memory_block.ends_with("\n...[truncated]"));
+    let user_block = bounded
+        .text
+        .split("[USER.md]\n")
+        .nth(1)
+        .unwrap()
+        .split("\n\n[MEMORY.md]")
+        .next()
+        .unwrap();
+    let memory_block = bounded
+        .text
+        .split("[MEMORY.md]\n")
+        .nth(1)
+        .unwrap();
+    assert_eq!(soul_block.chars().count(), 400);
+    assert_eq!(user_block.chars().count(), 400);
+    assert_eq!(memory_block.chars().count(), 1_200);
+    assert!(soul_block.ends_with("\n...[truncated]"));
     assert!(user_block.ends_with("\n...[truncated]"));
+    assert!(memory_block.ends_with("\n...[truncated]"));
     assert!(bounded.truncated);
 }
 

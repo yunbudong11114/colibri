@@ -352,6 +352,8 @@ def test_memory_list_returns_builtin_files_and_sorted_topic_names(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
+    (memory_root / "SOUL.md").write_text("soul", encoding="utf-8")
+    (memory_root / "USER.md").write_text("user", encoding="utf-8")
     (memory_root / "MEMORY.md").write_text("memory", encoding="utf-8")
     (memory_root / "INDEX.md").write_text("index", encoding="utf-8")
     (memory_topics / "devices.md").write_text("devices", encoding="utf-8")
@@ -363,25 +365,33 @@ def test_memory_list_returns_builtin_files_and_sorted_topic_names(tmp_path):
     result = registry.run(ToolCall(id="1", name="memory.list", arguments={}), context)
 
     assert result.ok
-    assert result.text.splitlines() == ["MEMORY.md", "INDEX.md", "topics/devices.md", "topics/preferences.md"]
+    assert result.text.splitlines() == [
+        "SOUL.md",
+        "USER.md",
+        "MEMORY.md",
+        "INDEX.md",
+        "topics/devices.md",
+        "topics/preferences.md",
+    ]
 
 
 def test_memory_read_reads_builtin_file_topic_shorthand_and_rejects_traversal(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
+    (memory_root / "SOUL.md").write_text("soul principles", encoding="utf-8")
     (memory_root / "USER.md").write_text("user preferences", encoding="utf-8")
     (memory_topics / "devices.md").write_text("router notes", encoding="utf-8")
     config = make_config(tmp_path)
     registry = ToolRegistry.from_config(config, cwd=tmp_path)
     context = ToolContext(config=config, cwd=tmp_path)
 
-    file_result = registry.run(ToolCall(id="1", name="memory.read", arguments={"file": "USER.md"}), context)
+    file_result = registry.run(ToolCall(id="1", name="memory.read", arguments={"file": "SOUL.md"}), context)
     topic_result = registry.run(ToolCall(id="2", name="memory.read", arguments={"topic": "devices"}), context)
     invalid_result = registry.run(ToolCall(id="3", name="memory.read", arguments={"file": "../secrets.md"}), context)
 
     assert file_result.ok
-    assert file_result.text == "user preferences"
+    assert file_result.text == "soul principles"
     assert topic_result.ok
     assert topic_result.text == "router notes"
     assert not invalid_result.ok
@@ -467,13 +477,14 @@ def test_memory_write_appends_and_replaces_files(tmp_path):
 def test_memory_write_description_contains_format_routing_and_limit_guidance():
     description = ToolRegistry.from_config(AgentConfig.default()).get("memory.write").spec.description
 
+    assert "SOUL.md" in description
+    assert "400 characters" in description
     assert "USER.md" in description
-    assert "600 characters" in description
     assert "MEMORY.md" in description
-    assert "1800 characters" in description
+    assert "1200 characters" in description
     assert "INDEX.md" in description
     assert "topics/<name>.md" in description
-    assert "type: user|feedback|project|reference|system" in description
+    assert "type: soul|user|feedback|project|reference|system" in description
     assert "updated: YYYY-MM-DD" in description
 
 
@@ -483,12 +494,12 @@ def test_memory_write_warns_when_short_memory_file_exceeds_limit(tmp_path):
     context = ToolContext(config=config, cwd=tmp_path)
 
     result = registry.run(
-        ToolCall(id="1", name="memory.write", arguments={"file": "USER.md", "content": "U" * 601}),
+        ToolCall(id="1", name="memory.write", arguments={"file": "SOUL.md", "content": "S" * 401}),
         context,
     )
 
     assert result.ok
-    assert "USER.md exceeds 600 characters" in result.text
+    assert "SOUL.md exceeds 400 characters" in result.text
     assert 'mode="replace"' in result.text
 
 

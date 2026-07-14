@@ -848,8 +848,9 @@ def test_session_injects_always_on_memory_without_persisting_it(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
+    (memory_root / "SOUL.md").write_text("- Be concise and practical.\n", encoding="utf-8")
     (memory_root / "USER.md").write_text("- User prefers concise Chinese answers.\n", encoding="utf-8")
+    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
     (memory_root / "INDEX.md").write_text("- [devices](topics/devices.md): Router notes.\n", encoding="utf-8")
     (memory_topics / "devices.md").write_text("- Router is upstairs.\n", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
@@ -861,8 +862,9 @@ def test_session_injects_always_on_memory_without_persisting_it(tmp_path):
     assert response.text == "memory used"
     assert model.first_messages[0].role == "system"
     assert "Always-on memory:" in model.first_messages[0].content
-    assert "[MEMORY.md]" in model.first_messages[0].content
+    assert "[SOUL.md]" in model.first_messages[0].content
     assert "[USER.md]" in model.first_messages[0].content
+    assert "[MEMORY.md]" in model.first_messages[0].content
     assert "Router is upstairs" not in model.first_messages[0].content
     assert [message.role for message in session.messages] == ["user", "assistant"]
     assert all("Always-on memory:" not in message.content for message in session.messages)
@@ -872,15 +874,16 @@ def test_session_logs_memory_context_event(tmp_path):
     memory_root = tmp_path / "memory"
     memory_topics = memory_root / "topics"
     memory_topics.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
+    (memory_root / "SOUL.md").write_text("- Be concise and practical.\n", encoding="utf-8")
     (memory_root / "USER.md").write_text("- User prefers concise Chinese answers.\n", encoding="utf-8")
+    (memory_root / "MEMORY.md").write_text("- Colibri runs on CardputerZero.\n", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"memory": {"root": str(memory_root)}})
     transcript = MemoryTranscript()
     session = AgentSession(config=config, model=MemoryAwareModel(), transcript=transcript)
 
     session.submit("where is the router?")
 
-    assert transcript.events[1] == ("memory_context", {"files": ["MEMORY.md", "USER.md"], "truncated": False})
+    assert transcript.events[1] == ("memory_context", {"files": ["SOUL.md", "USER.md", "MEMORY.md"], "truncated": False})
 
 
 def test_session_injects_skill_catalog_without_persisting_it(tmp_path):

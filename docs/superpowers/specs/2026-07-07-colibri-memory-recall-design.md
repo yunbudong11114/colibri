@@ -1,7 +1,7 @@
 # Colibri Model-Driven File Memory Design
 
 Date: 2026-07-07
-Updated: 2026-07-09
+Updated: 2026-07-14
 Status: Approved by user
 Milestone: 5
 Scope: File-backed long-term memory, model-driven memory lookup, and bounded context injection
@@ -12,7 +12,7 @@ Milestone 5 gives Colibri a Claude Code inspired but CardputerZero-friendly memo
 
 After this milestone, Colibri should:
 
-- keep always-on short memory in `MEMORY.md` and `USER.md`,
+- keep always-on short memory in `SOUL.md`, `USER.md`, and `MEMORY.md`,
 - keep detailed searchable memories in `topics/*.md`,
 - keep topic discovery metadata in `INDEX.md`,
 - inject only bounded always-on memory automatically,
@@ -28,8 +28,9 @@ Default memory root:
 
 ```text
 ~/.colibri/memory/
-  MEMORY.md
+  SOUL.md
   USER.md
+  MEMORY.md
   INDEX.md
   topics/
     system-info.md
@@ -40,18 +41,20 @@ File roles:
 
 | File | Role | Loaded automatically |
 | --- | --- | --- |
-| `MEMORY.md` | Stable long-term facts and project-level context, max 1800 chars | yes |
-| `USER.md` | User profile, preferences, collaboration style, max 600 chars | yes |
+| `SOUL.md` | Colibri persona, principles, expression style, and self-constraints, max 400 chars | yes |
+| `USER.md` | User profile, preferences, collaboration style, max 400 chars | yes |
+| `MEMORY.md` | Stable long-term facts and project-level context, max 1200 chars | yes |
 | `INDEX.md` | Short manifest of topic files | no, read through tools |
 | `topics/*.md` | Detailed topic memories | no, read through tools |
 
-`MEMORY.md` and `USER.md` must stay short. `INDEX.md` should stay a manifest, not a content dump.
+`SOUL.md`, `USER.md`, and `MEMORY.md` must stay short. `INDEX.md` should stay a manifest, not a content dump.
 
 When Colibri runs with memory enabled and the memory root does not exist, or the memory root exists but contains no files, Colibri should bootstrap a sample layout:
 
 ```text
 ~/.colibri/memory/
   MEMORY.md
+  SOUL.md
   USER.md
   INDEX.md
   topics/
@@ -71,7 +74,7 @@ The sample `INDEX.md` entry should be shaped for `memory.search`, which performs
 - [sample](topics/sample.md): sample 示例 topic 详细记忆 写法 维护 memory search index
 ```
 
-This bootstrap is allowed to happen during memory context loading, before reading `MEMORY.md` and `USER.md`.
+This bootstrap is allowed to happen during memory context loading, before reading `SOUL.md`, `USER.md`, and `MEMORY.md`.
 
 ## 3. Headless Requirement
 
@@ -184,12 +187,17 @@ When available, memory is injected as a temporary system-style message before re
 ```text
 Always-on memory:
 
-[MEMORY.md]
+[SOUL.md]
 ...
 
 [USER.md]
 ...
+
+[MEMORY.md]
+...
 ```
+
+The implementation injects the files in `SOUL.md`, `USER.md`, `MEMORY.md` order.
 
 This message must not be appended to `AgentSession.messages`; it is only part of the model input for that submit call.
 
@@ -205,7 +213,7 @@ Colibri no longer performs deterministic topic selection. Instead:
 - `AgentSession` uses the core `SYSTEM_PROMPT` directly and does not build feature-specific prompt variants,
 - the `memory.write` tool description tells the model that detailed memory lives under `INDEX.md` and `topics/*.md`,
 - `memory.search` searches inside `INDEX.md` only; the model reads matching topic files explicitly with `memory.read`,
-- `memory.read` reads one of `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file,
+- `memory.read` reads one of `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or a topic file,
 - `memory.write` writes one of the same file roles using model-supplied content.
 
 Memory usage guidance must not be hard-coded directly into the core `SYSTEM_PROMPT` constant. Keep ownership split:
@@ -274,27 +282,28 @@ Write tool. Accepts:
 The `memory.write` tool description must include:
 
 - supported memory file roles:
-  - `USER.md`: user profile, preferences, collaboration style, max 600 characters,
-  - `MEMORY.md`: stable general, project, or system facts, max 1800 characters,
+  - `SOUL.md`: Colibri persona, principles, expression style, and self-constraints, max 400 characters,
+  - `USER.md`: user profile, preferences, collaboration style, max 400 characters,
+  - `MEMORY.md`: stable general, project, or system facts, max 1200 characters,
   - `INDEX.md`: searchable topic manifest used by `memory.search`,
   - `topics/<name>.md`: detailed topic notes;
 - frontmatter format:
 
 ```markdown
 ---
-type: user|feedback|project|reference|system
+type: soul|user|feedback|project|reference|system
 description: one-line description
 updated: YYYY-MM-DD
 ---
 ```
 
-- routing guidance: choose `USER.md` for user preferences, `MEMORY.md` for short stable facts, and a topic file for longer details;
+- routing guidance: choose `SOUL.md` for persona and durable behavior constraints, `USER.md` for user preferences, `MEMORY.md` for short stable facts, and a topic file for longer details;
 - topic maintenance guidance: whenever a topic file is created or materially changed, also update `INDEX.md` with a searchable one-line pointer;
-- concise-memory guidance: consolidate or replace `USER.md`/`MEMORY.md` instead of appending forever.
+- concise-memory guidance: consolidate or replace `SOUL.md`/`USER.md`/`MEMORY.md` instead of appending forever.
 
 When writing `topics/<name>.md`, the model must also update `INDEX.md` so future searches can discover the topic. The tool should remind the model about this in the result text for topic writes, but the model owns the actual index entry wording.
 
-When `memory.write` detects that a write leaves `USER.md` over 600 characters or `MEMORY.md` over 1800 characters, the tool should still complete the write, but return an additional maintenance prompt telling the model to summarize/consolidate the file and call `memory.write` again with `mode="replace"`.
+When `memory.write` detects that a write leaves `SOUL.md` over 400 characters, `USER.md` over 400 characters, or `MEMORY.md` over 1200 characters, the tool should still complete the write, but return an additional maintenance prompt telling the model to summarize/consolidate the file and call `memory.write` again with `mode="replace"`.
 
 Writes are permission-gated by the existing dynamic permission system.
 
@@ -304,9 +313,10 @@ Automatic memory injection must obey `memory.max_recall_chars`.
 
 Suggested per-file split:
 
-- `MEMORY.md`: half of the budget after headers,
-- `USER.md`: remaining budget,
-- if one file is missing or short, the other file can use the remaining space.
+- `SOUL.md`: max 400 characters,
+- `USER.md`: max 400 characters,
+- `MEMORY.md`: max 1200 characters,
+- if one file is missing or short, the total message still obeys `memory.max_recall_chars`.
 
 Topic files are never injected automatically. Tool results already obey `tools.max_result_chars`.
 
@@ -322,7 +332,7 @@ When always-on memory is injected, `AgentSession` writes a `memory_context` tran
 
 ```json
 {
-  "files": ["MEMORY.md", "USER.md"],
+  "files": ["SOUL.md", "USER.md", "MEMORY.md"],
   "truncated": false
 }
 ```

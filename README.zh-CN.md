@@ -195,7 +195,7 @@ weixin:<sender_id>
 - `shell.run`：经权限确认后执行 shell 命令。
 - `web.search`：通过配置的搜索引擎搜索网页。
 - `memory.list`：列出 always-on 记忆文件和 topic 文件。
-- `memory.read`：读取 `MEMORY.md`、`USER.md`、`INDEX.md` 或 topic 文件。
+- `memory.read`：读取 `SOUL.md`、`USER.md`、`MEMORY.md`、`INDEX.md` 或 topic 文件。
 - `memory.search`：搜索 `INDEX.md` 目录行；详细 topic 需要再单独读取。
 - `memory.write`：经权限确认后追加或替换记忆文件。
 - `skill.read`：按 catalog 中的 name 读取完整 `SKILL.md`。
@@ -236,19 +236,20 @@ default_permission = "allow_read_confirm_write"
 
 ```text
 ~/.colibri/memory/
-  MEMORY.md
+  SOUL.md
   USER.md
+  MEMORY.md
   INDEX.md
   topics/
     system-info.md
     colibri-design.md
 ```
 
-当 `memory.enabled = true` 时，Colibri 会把 `MEMORY.md` 和 `USER.md` 作为有界 always-on 上下文注入模型。详细记忆检索交给模型判断：模型先用 `memory.search` 搜索 `INDEX.md`，再用 `memory.read` 读取关联的 `topics/*.md` 文件。自动注入受 `memory.max_recall_chars` 限制。
+当 `memory.enabled = true` 时，Colibri 会把 `SOUL.md`、`USER.md` 和 `MEMORY.md` 作为有界 always-on 上下文注入模型。详细记忆检索交给模型判断：模型先用 `memory.search` 搜索 `INDEX.md`，再用 `memory.read` 读取关联的 `topics/*.md` 文件。自动注入受 `memory.max_recall_chars` 限制。
 
-如果 memory 目录不存在，或目录中没有任何文件，Colibri 会在首次加载 memory 时创建样例 `MEMORY.md`、`USER.md`、`INDEX.md` 和 `topics/sample.md`。已有 memory 文件不会被覆盖。
+如果 memory 目录不存在，或目录中没有任何文件，Colibri 会在首次加载 memory 时创建样例 `SOUL.md`、`USER.md`、`MEMORY.md`、`INDEX.md` 和 `topics/sample.md`。已有 memory 文件不会被覆盖。
 
-`USER.md` 应控制在 600 字符以内，`MEMORY.md` 应控制在 1800 字符以内。如果某次 `memory.write` 写入后导致文件超限，工具结果会提醒模型合并整理，并用 `mode="replace"` 重写。
+`SOUL.md` 应控制在 400 字符以内，`USER.md` 应控制在 400 字符以内，`MEMORY.md` 应控制在 1200 字符以内。如果某次 `memory.write` 写入后导致文件超限，工具结果会提醒模型合并整理，并用 `mode="replace"` 重写。
 
 ## 本地 Skills
 

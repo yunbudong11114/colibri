@@ -201,7 +201,7 @@ When the model returns tool calls, Colibri can execute:
 - `shell.run`: run commands after permission approval; do not use it to create or edit files.
 - `web.search`: search the web through the configured provider.
 - `memory.list`: list always-on memory files and topic files.
-- `memory.read`: read `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file.
+- `memory.read`: read `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or a topic file.
 - `memory.search`: search `INDEX.md` manifest lines; read matching topic files separately.
 - `memory.write`: append to or replace a memory file after permission approval.
 - `skill.read`: read full `SKILL.md` instructions for a catalog skill by name.
@@ -242,19 +242,20 @@ Persistent memory is Markdown-backed:
 
 ```text
 ~/.colibri/memory/
-  MEMORY.md
+  SOUL.md
   USER.md
+  MEMORY.md
   INDEX.md
   topics/
     system-info.md
     colibri-design.md
 ```
 
-When `memory.enabled = true`, Colibri injects bounded always-on context from `MEMORY.md` and `USER.md`. Detailed memory lookup is model-driven: the model uses `memory.search` to search `INDEX.md`, then `memory.read` to inspect linked `topics/*.md` files when prior context is needed. Automatic injection is bounded by `memory.max_recall_chars`.
+When `memory.enabled = true`, Colibri injects bounded always-on context from `SOUL.md`, `USER.md`, and `MEMORY.md`. Detailed memory lookup is model-driven: the model uses `memory.search` to search `INDEX.md`, then `memory.read` to inspect linked `topics/*.md` files when prior context is needed. Automatic injection is bounded by `memory.max_recall_chars`.
 
-If the memory directory is missing or contains no files, Colibri bootstraps sample `MEMORY.md`, `USER.md`, `INDEX.md`, and `topics/sample.md` files on first memory load. Existing memory files are never overwritten.
+If the memory directory is missing or contains no files, Colibri bootstraps sample `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, and `topics/sample.md` files on first memory load. Existing memory files are never overwritten.
 
-Keep `USER.md` under 600 characters and `MEMORY.md` under 1800 characters. If a `memory.write` call leaves either file over its limit, the tool result asks the model to consolidate it and replace the file.
+Keep `SOUL.md` under 400 characters, `USER.md` under 400 characters, and `MEMORY.md` under 1200 characters. If a `memory.write` call leaves any of them over its limit, the tool result asks the model to consolidate it and replace the file.
 
 ## Local Skills
 

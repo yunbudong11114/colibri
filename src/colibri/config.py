@@ -226,7 +226,7 @@ class MemoryConfig:
     max_search_results: int = 5
     # 是否启用长期记忆。
     enabled: bool = True
-    # MEMORY.md 和 USER.md 作为 always-on 记忆注入上下文前的最大字符数。
+    # SOUL.md、USER.md 和 MEMORY.md 作为 always-on 记忆注入上下文前的总字符数。
     max_recall_chars: int = 6000
 
 

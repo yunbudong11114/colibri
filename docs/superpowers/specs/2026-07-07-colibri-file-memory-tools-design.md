@@ -2,6 +2,7 @@
 
 Date: 2026-07-07
 Status: Approved by user direction
+Updated: 2026-07-14
 Milestone: 4
 Scope: File-based memory tools
 
@@ -37,6 +38,7 @@ Use `~/.colibri/memory` by default:
 ```text
 memory/
   MEMORY.md
+  SOUL.md
   USER.md
   INDEX.md
   topics/
@@ -44,7 +46,7 @@ memory/
     colibri-design.md
 ```
 
-`MEMORY.md` and `USER.md` are short always-on files. `INDEX.md` is the topic manifest. Topic files live under `topics/`.
+`SOUL.md`, `USER.md`, and `MEMORY.md` are short always-on files. `INDEX.md` is the topic manifest. Topic files live under `topics/`.
 
 The current `SkillsConfig` and `FilesConfig` stay unchanged. Add:
 
@@ -80,7 +82,7 @@ The topic `system-info` maps to:
 <memory.root>/topics/system-info.md
 ```
 
-Tools accept either `file` (`MEMORY.md`, `USER.md`, `INDEX.md`, or `topics/<topic>.md`) or a compatibility `topic` shorthand. Invalid names return `invalid_arguments`.
+Tools accept either `file` (`SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or `topics/<topic>.md`) or a compatibility `topic` shorthand. Invalid names return `invalid_arguments`.
 
 ## 5. Tools
 
@@ -93,6 +95,7 @@ Read-only. Lists existing built-in memory files and topics discovered from `topi
 Result format:
 
 ```text
+SOUL.md
 MEMORY.md
 USER.md
 INDEX.md
@@ -103,7 +106,7 @@ If the memory directory does not exist, return an empty successful result.
 
 ### `memory.read`
 
-Read-only. Reads `MEMORY.md`, `USER.md`, `INDEX.md`, or a topic file.
+Read-only. Reads `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or a topic file.
 
 Arguments:
 
@@ -153,13 +156,14 @@ Behavior:
 - Reject empty content with `invalid_arguments`.
 - Cap output with `tools.max_result_chars`.
 - The tool description includes the memory file format, write-routing guidance, and concise-memory limits:
-  - `USER.md` is for user profile/preferences and should stay under 600 characters.
-  - `MEMORY.md` is for short stable facts and should stay under 1800 characters.
+  - `SOUL.md` is for Colibri persona, principles, expression style, and durable self-constraints; keep it under 400 characters.
+  - `USER.md` is for user profile/preferences and should stay under 400 characters.
+  - `MEMORY.md` is for short stable facts and should stay under 1200 characters.
   - `INDEX.md` is the searchable manifest used by `memory.search`.
   - `topics/<name>.md` stores detailed topic notes.
   - memory files use frontmatter with `type`, `description`, and `updated`.
 - If a topic file is written, the tool result reminds the model to update `INDEX.md`.
-- If `USER.md` or `MEMORY.md` exceeds its limit after a write, the tool result reminds the model to summarize/consolidate it and call `memory.write` again with `mode="replace"`.
+- If `SOUL.md`, `USER.md`, or `MEMORY.md` exceeds its limit after a write, the tool result reminds the model to summarize/consolidate it and call `memory.write` again with `mode="replace"`.
 
 Because `memory.write` is not read-only, the existing permission policy confirms it under `allow_read_confirm_write`.
 
@@ -190,7 +194,7 @@ Required tests:
 - `memory.search` finds `INDEX.md` lines and respects result limits,
 - `memory.write` appends or replaces files and creates missing directories,
 - `memory.write` exposes format/routing guidance in its description,
-- `memory.write` warns about oversized `USER.md` and `MEMORY.md`,
+- `memory.write` warns about oversized `SOUL.md`, `USER.md`, and `MEMORY.md`,
 - `memory.write` reminds topic writers to update `INDEX.md`,
 - `memory.write` is marked `read_only=False`,
 - `AgentSession` requires confirmation for `memory.write` under the default permission policy,

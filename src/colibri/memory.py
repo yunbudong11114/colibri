@@ -7,32 +7,41 @@ from colibri.config import AgentConfig
 from colibri.textutil import bound_text
 
 
-ALWAYS_ON_MEMORY_FILES = ("MEMORY.md", "USER.md")
-ALWAYS_ON_MEMORY_FILE_LIMITS = {"MEMORY.md": 1800, "USER.md": 600}
-_BOOTSTRAP_SENTINELS = ("MEMORY.md", "USER.md", "INDEX.md")
+ALWAYS_ON_MEMORY_FILES = ("SOUL.md", "USER.md", "MEMORY.md")
+ALWAYS_ON_MEMORY_FILE_LIMITS = {"SOUL.md": 400, "USER.md": 400, "MEMORY.md": 1200}
+_BOOTSTRAP_SENTINELS = ("SOUL.md", "USER.md", "MEMORY.md", "INDEX.md")
 _SAMPLE_MEMORY_FILES = {
-    "MEMORY.md": """---
-type: system
-description: Colibri 长期事实和项目上下文；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+    "SOUL.md": """---
+type: soul
+description: Colibri 人格、原则和表达风格；首次真实写入时直接覆盖样例文本
+updated: 2026-07-14
 ---
 
-- 用途：记录稳定事实、项目决策、运行环境和未来对话需要长期记住的上下文。
-- 修改规则：用户或大模型需要修改 memory 时，请先去重和合并，再用 `memory.write` 重写本文件；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+- 用途：记录 Colibri 长期稳定的人格定位、协作原则、表达风格和自我约束。
+- 修改规则：只保留真正长期有效的行为准则，保持 400 字符以内；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
 """,
     "USER.md": """---
 type: user
 description: 用户偏好和协作方式；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 - 用途：记录用户画像、偏好、称呼、语言风格和协作习惯。
 - 修改规则：用户或大模型需要修改用户记忆时，请合并同类偏好并重写本文件，保持简短；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
 """,
+    "MEMORY.md": """---
+type: system
+description: Colibri 长期事实和项目上下文；首次真实写入时直接覆盖样例文本
+updated: 2026-07-14
+---
+
+- 用途：记录稳定事实、项目决策、运行环境和未来对话需要长期记住的上下文。
+- 修改规则：用户或大模型需要修改 memory 时，请先去重和合并，再用 `memory.write` 重写本文件；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+""",
     "INDEX.md": """---
 type: reference
 description: memory topic 索引；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 # Memory Index
@@ -44,7 +53,7 @@ updated: 2026-07-09
     "topics/sample.md": """---
 type: reference
 description: 样例详细记忆 topic；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 # Sample Topic
@@ -116,8 +125,9 @@ def _memory_cache_key(root: Path, max_recall_chars: int) -> tuple:
     return (
         str(root),
         max_recall_chars,
-        _file_mtime(root / "MEMORY.md"),
+        _file_mtime(root / "SOUL.md"),
         _file_mtime(root / "USER.md"),
+        _file_mtime(root / "MEMORY.md"),
     )
 
 

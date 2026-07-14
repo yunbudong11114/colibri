@@ -202,7 +202,7 @@ fn memory_tool_specs() -> Vec<serde_json::Value> {
         openai_tool("memory.list", "List available memory files.", serde_json::json!({"type":"object","properties":{}})),
         openai_tool(
             "memory.read",
-            "Read MEMORY.md, USER.md, INDEX.md, or a topic memory file.",
+            "Read SOUL.md, USER.md, MEMORY.md, INDEX.md, or a topic memory file.",
             serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"}}}),
         ),
         openai_tool(
@@ -212,7 +212,7 @@ fn memory_tool_specs() -> Vec<serde_json::Value> {
         ),
         openai_tool(
             "memory.write",
-            "Append to or replace a memory file. Memory files must use frontmatter:\n---\ntype: user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---\nChoose USER.md for user profile, preferences, and collaboration style; keep it under 600 characters. Choose MEMORY.md for short stable general, project, or system facts; keep it under 1800 characters. Choose INDEX.md for the searchable topic manifest used by memory.search. Choose topics/<name>.md for detailed topic notes. When creating or materially changing a topic file, also update INDEX.md with a searchable one-line pointer. Consolidate or replace USER.md and MEMORY.md instead of appending forever.",
+            "Append to or replace a memory file. Memory files must use frontmatter:\n---\ntype: soul|user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---\nChoose SOUL.md for Colibri persona, principles, expression style, and durable self-constraints; keep it under 400 characters. Choose USER.md for user profile, preferences, and collaboration style; keep it under 400 characters. Choose MEMORY.md for short stable general, project, or system facts; keep it under 1200 characters. Choose INDEX.md for the searchable topic manifest used by memory.search. Choose topics/<name>.md for detailed topic notes. When creating or materially changing a topic file, also update INDEX.md with a searchable one-line pointer. Consolidate or replace SOUL.md, USER.md, and MEMORY.md instead of appending forever.",
             serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"},"content":{"type":"string"},"mode":{"type":"string","enum":["append","replace"]}},"required":["content"]}),
         ),
     ]
@@ -537,22 +537,24 @@ fn join_output_reader(
 
 fn memory_list(context: &ToolContext) -> ToolResult {
     let mut names = Vec::new();
-    for name in ["MEMORY.md", "USER.md", "INDEX.md"] {
+    for name in ["SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"] {
         if context.config.memory.root.join(name).is_file() {
             names.push(name.to_string());
         }
     }
     let topics = context.config.memory.root.join("topics");
     if let Ok(entries) = fs::read_dir(topics) {
+        let mut topic_names = Vec::new();
         for entry in entries.flatten() {
             if entry.path().is_file()
                 && entry.path().extension().and_then(|value| value.to_str()) == Some("md")
             {
-                names.push(format!("topics/{}", entry.file_name().to_string_lossy()));
+                topic_names.push(format!("topics/{}", entry.file_name().to_string_lossy()));
             }
         }
+        topic_names.sort();
+        names.extend(topic_names);
     }
-    names.sort();
     let (text, truncated) = truncate(names.join("\n"), context.config.tools.max_result_chars);
     let mut result = ToolResult::ok(text);
     result.truncated = truncated;
@@ -658,8 +660,9 @@ fn memory_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolR
                 );
             }
             let limit = match label.as_str() {
-                "MEMORY.md" => Some(1800usize),
-                "USER.md" => Some(600usize),
+                "SOUL.md" => Some(400usize),
+                "USER.md" => Some(400usize),
+                "MEMORY.md" => Some(1200usize),
                 _ => None,
             };
             if let Some(limit) = limit {
@@ -693,7 +696,7 @@ fn memory_target(
         }
     }
     let file = args.get("file")?.trim();
-    if matches!(file, "MEMORY.md" | "USER.md" | "INDEX.md") {
+    if matches!(file, "SOUL.md" | "USER.md" | "MEMORY.md" | "INDEX.md") {
         return Some((context.config.memory.root.join(file), file.to_string()));
     }
     let topic = file.strip_prefix("topics/")?.strip_suffix(".md")?;

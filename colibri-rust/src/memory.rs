@@ -7,14 +7,25 @@ use std::time::UNIX_EPOCH;
 use crate::config::AgentConfig;
 
 const TRUNCATED_SUFFIX: &str = "\n...[truncated]";
-const MEMORY_LIMIT: usize = 1800;
-const USER_LIMIT: usize = 600;
-const BOOTSTRAP_SENTINELS: &[&str] = &["MEMORY.md", "USER.md", "INDEX.md"];
+const SOUL_LIMIT: usize = 400;
+const USER_LIMIT: usize = 400;
+const MEMORY_LIMIT: usize = 1200;
+const BOOTSTRAP_SENTINELS: &[&str] = &["SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"];
+
+const SOUL_TEMPLATE: &str = r#"---
+type: soul
+description: Colibri 人格、原则和表达风格；首次真实写入时直接覆盖样例文本
+updated: 2026-07-14
+---
+
+- 用途：记录 Colibri 长期稳定的人格定位、协作原则、表达风格和自我约束。
+- 修改规则：只保留真正长期有效的行为准则，保持 400 字符以内；首次真实写入时直接覆盖样例，不要保留原本的示例文本。
+"#;
 
 const MEMORY_TEMPLATE: &str = r#"---
 type: system
 description: Colibri 长期事实和项目上下文；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 - 用途：记录稳定事实、项目决策、运行环境和未来对话需要长期记住的上下文。
@@ -24,7 +35,7 @@ updated: 2026-07-09
 const USER_TEMPLATE: &str = r#"---
 type: user
 description: 用户偏好和协作方式；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 - 用途：记录用户画像、偏好、称呼、语言风格和协作习惯。
@@ -34,7 +45,7 @@ updated: 2026-07-09
 const INDEX_TEMPLATE: &str = r#"---
 type: reference
 description: memory topic 索引；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 # Memory Index
@@ -47,7 +58,7 @@ updated: 2026-07-09
 const TOPIC_TEMPLATE: &str = r#"---
 type: reference
 description: 样例详细记忆 topic；首次真实写入时直接覆盖样例文本
-updated: 2026-07-09
+updated: 2026-07-14
 ---
 
 # Sample Topic
@@ -67,8 +78,9 @@ fn memory_load_cache() -> &'static Mutex<HashMap<MemoryCacheKey, MemoryLoadResul
 struct MemoryCacheKey {
     root: String,
     max_recall_chars: usize,
-    memory_mtime: Option<u128>,
+    soul_mtime: Option<u128>,
     user_mtime: Option<u128>,
+    memory_mtime: Option<u128>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +123,11 @@ impl MemoryContext {
         let mut files = Vec::new();
         let mut blocks = vec!["Always-on memory:".to_string()];
         let mut any_file_truncated = false;
-        for (name, limit) in [("MEMORY.md", MEMORY_LIMIT), ("USER.md", USER_LIMIT)] {
+        for (name, limit) in [
+            ("SOUL.md", SOUL_LIMIT),
+            ("USER.md", USER_LIMIT),
+            ("MEMORY.md", MEMORY_LIMIT),
+        ] {
             let path = self.config.memory.root.join(name);
             let Some(text) = read_text_lossy(&path) else {
                 continue;
@@ -156,8 +172,9 @@ pub fn bootstrap(config: &AgentConfig) -> Result<(), String> {
         return Ok(());
     }
     for (relative, content) in [
-        ("MEMORY.md", MEMORY_TEMPLATE),
+        ("SOUL.md", SOUL_TEMPLATE),
         ("USER.md", USER_TEMPLATE),
+        ("MEMORY.md", MEMORY_TEMPLATE),
         ("INDEX.md", INDEX_TEMPLATE),
         ("topics/sample.md", TOPIC_TEMPLATE),
     ] {
@@ -183,8 +200,9 @@ fn memory_cache_key(root: &Path, max_recall_chars: usize) -> MemoryCacheKey {
     MemoryCacheKey {
         root: root.to_string_lossy().into_owned(),
         max_recall_chars,
-        memory_mtime: file_mtime(&root.join("MEMORY.md")),
+        soul_mtime: file_mtime(&root.join("SOUL.md")),
         user_mtime: file_mtime(&root.join("USER.md")),
+        memory_mtime: file_mtime(&root.join("MEMORY.md")),
     }
 }
 
