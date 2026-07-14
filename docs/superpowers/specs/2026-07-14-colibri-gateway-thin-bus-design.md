@@ -1,7 +1,7 @@
 # Colibri Gateway Thin Bus Design
 
 Date: 2026-07-14
-Status: Revision 2 implemented; release verification pending
+Status: Revision 2 implemented and verified
 Scope: Channel/gateway inbound-outbound shape, channel registration, permissions, concurrency, media pipeline
 Non-goals: cron, heartbeat, new chat channels, MCP, web dashboard
 

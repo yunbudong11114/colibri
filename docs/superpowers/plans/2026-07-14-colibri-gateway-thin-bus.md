@@ -92,7 +92,7 @@
 **Files:**
 - No production changes unless verification exposes a defect.
 
-- [ ] Run `uv run python -m pytest -q` and record the pass count.
-- [ ] Run `cargo test --manifest-path colibri-rust/Cargo.toml` and record the pass count.
-- [ ] Run `cargo build --release --manifest-path colibri-rust/Cargo.toml`.
-- [ ] Confirm the release binary timestamp and current commit.
+- [x] Run `uv run python -m pytest -q` (`267 passed`).
+- [x] Run `cargo test --manifest-path colibri-rust/Cargo.toml` (`5` lib, `4` parity, `128` runtime passed).
+- [x] Run `cargo build --release --manifest-path colibri-rust/Cargo.toml`.
+- [x] Confirm the release binary timestamp and current commit.
