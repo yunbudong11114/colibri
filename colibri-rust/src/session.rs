@@ -8,9 +8,7 @@ use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, 
 use crate::model::ModelClient;
 use crate::permissions::{PermissionPolicy, PermissionPrompter};
 use crate::skills::skill_catalog;
-use crate::steering::{
-    format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
-};
+use crate::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
 use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
 use crate::transcript::TranscriptWriter;
 use crate::vision::analyze_image;
@@ -94,17 +92,11 @@ impl AgentSession {
         self
     }
 
-    pub fn set_steer_notifier(
-        &mut self,
-        notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) {
+    pub fn set_steer_notifier(&mut self, notifier: Option<Arc<dyn Fn(String) + Send + Sync>>) {
         self.steer_notifier = notifier;
     }
 
-    pub fn with_steer_notifier(
-        mut self,
-        notifier: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Self {
+    pub fn with_steer_notifier(mut self, notifier: Arc<dyn Fn(String) + Send + Sync>) -> Self {
         self.steer_notifier = Some(notifier);
         self
     }
@@ -200,8 +192,7 @@ impl AgentSession {
         if let Some(sender) = &self.media_sender {
             context = context.with_media_sender(Arc::clone(sender));
         }
-        let mut policy =
-            PermissionPolicy::from_config(&self.config, context.cwd.clone(), prompter);
+        let mut policy = PermissionPolicy::from_config(&self.config, context.cwd.clone(), prompter);
         let memory = MemoryContext::new(Arc::clone(&self.config)).load()?;
         if !memory.text.is_empty() {
             self.write_transcript(
@@ -377,8 +368,7 @@ impl AgentSession {
             }),
         );
         let content = format!("steered_skip: {SKIPPED_TOOL_RESULT}");
-        self.messages
-            .push(Message::tool(content, call.id.clone()));
+        self.messages.push(Message::tool(content, call.id.clone()));
     }
 
     fn apply_steering(&mut self, text: &str, skipped: usize) {

@@ -164,14 +164,14 @@ Behavior:
 
 - Historical milestone behavior: only run commands whose first token or full command appears in `config.shell.allow`.
 - Reject commands whose first token appears in `config.shell.deny`.
-- Run with `shell=False` using `shlex.split()`.
+- Historical milestone behavior ran with `shell=False` using `shlex.split()`.
 - Use `config.tools.max_shell_seconds` as timeout.
 - Combine stdout and stderr in the result text.
 - Cap output to `config.tools.max_result_chars`.
 
 For this milestone, `shell.run` is still conservative and intended for read-like commands such as `ls`, `cat`, `sed`, `rg`, and `git status`.
 
-Current Colibri behavior is defined by the later dynamic permissions milestone: `shell.allow` has been removed, ungranted shell commands prompt for approval, and `shell.deny` remains the hard-deny list.
+Current Colibri behavior is defined by later milestones: `shell.allow` has been removed, ungranted shell commands prompt for approval, `shell.deny` remains the hard-deny list, and execution uses the platform shell after checking each unquoted compound command segment.
 
 ## 8. Session Loop
 

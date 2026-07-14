@@ -22,7 +22,7 @@ The Rust version targets behavior parity with the Python runtime. It may use sma
 - Terminal QR rendering must match Python's terminal-block QR behavior for Weixin auth payloads, including returning no QR art for oversized payloads.
 - Config loading reads `--config <path>`, otherwise `~/.colibri/config.toml`, and falls back to built-in defaults.
 - Config schema, default values, table names, nested sections, and override behavior must match Python's current `AgentConfig`: `[model]`, `[vision]`, `[session]`, `[tools]`, `[shell]`, `[files]`, `[skills]`, `[console]`, `[memory]`, `[web_search]`, `[gateway]`, and `[channels.weixin]`. Removed Python fields such as top-level `mcp`, `memory.max_recall_topics`, `shell.allow`, and `files.confirm_write` must not exist in Rust defaults or user-facing diagnostics.
-- Local tools include `files.list`, `files.read`, `files.write`, `files.send`, `shell.run`, `memory.list`, `memory.read`, `memory.search`, `memory.write`, `skill.run`, `web.search`, and `image.understand`. `shell.run` parses commands with shell-like quoting and executes the resulting argv directly, matching Python's `shlex.split` plus `subprocess.run(..., shell=False)` behavior.
+- Local tools include `files.list`, `files.read`, `files.write`, `files.send`, `shell.run`, `memory.list`, `memory.read`, `memory.search`, `memory.write`, `skill.run`, `web.search`, and `image.understand`. `shell.run` matches Python by validating shell quoting, checking each unquoted compound command segment against `shell.deny`, and then executing the original command through the platform shell so pipes, redirection, and shell operators keep their normal semantics.
 - `files.send` mirrors Python media behavior: it is a non-read-only file-path tool, requires an active channel media sender, resolves and validates allowed file paths, infers MIME type and `MediaPart.type`, preserves captions, returns `media_unavailable`/`not_file`/`permission_denied` with the same semantics, and writes `Sent file to channel: <filename>` into the tool result passed back to the model.
 - `image.understand` mirrors Python vision behavior: it is enabled by default through the `image` tool category, uses the current workspace/configured file roots/dynamic file-root grants, rejects non-image files before model calls, enforces `vision.max_image_bytes`, builds `data:<mime>;base64,...` image URLs, calls the configured vision model or falls back to the main model when `[vision]` is empty, and serializes OpenAI-compatible multimodal requests.
 - Permission handling mirrors Python's `PermissionPolicy`: read-only defaults, confirm mode, allow/deny defaults, hard-denied shell executables, session grants, executable-session shell grants, project grants in `.colibri/permissions.toml`, file-root grants for file-path subjects, `~` path expansion, and simple `shell.run` write-target classification for redirection or `tee` commands.
@@ -145,9 +145,10 @@ intentional Rust differences:
   and replace newline behavior, emit the same topic/index and short-file size
   guidance, and return matching error types and text.
 - `shell.run` and skill commands must enforce `tools.max_shell_seconds` while
-  the process is running. A timed-out child must be terminated and reaped; a
-  duration check after a blocking wait is not acceptable. Non-zero process
-  exits use Python's `nonzero_exit` result.
+  the process is running. A timed-out child must be terminated and reaped; for
+  shell execution Rust must terminate the process group so shell-spawned
+  children do not survive timeout. A duration check after a blocking wait is
+  not acceptable. Non-zero process exits use Python's `nonzero_exit` result.
 - Transcript events must preserve JSON value types and the full Python payload
   schema. The writer uses the same daily filename, flush behavior, scoped
   metadata merge, retention-day cleanup, and total-byte cleanup. Parsed

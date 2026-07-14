@@ -6,10 +6,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use crate::config::{expand_user_path, AgentConfig};
 use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
+use crate::shell_policy::denied_shell_executable;
 use crate::skills::run_skill_command;
 
 static TOOL_SPECS_CACHE: Mutex<Option<(Vec<String>, Vec<serde_json::Value>)>> = Mutex::new(None);
@@ -329,7 +333,9 @@ fn files_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     }
 }
 
-fn read_range_args(args: &BTreeMap<String, String>) -> Option<(Option<usize>, Option<usize>, Option<usize>)> {
+fn read_range_args(
+    args: &BTreeMap<String, String>,
+) -> Option<(Option<usize>, Option<usize>, Option<usize>)> {
     Some((
         positive_usize_arg(args, "start_line")?,
         positive_usize_arg(args, "end_line")?,
@@ -431,28 +437,20 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
     if command.trim().is_empty() {
         return ToolResult::error("invalid_arguments", "Missing command");
     }
-    let argv = match shell_words::split(&command) {
+    match shell_words::split(&command) {
         Ok(argv) if !argv.is_empty() => argv,
         Ok(_) => return ToolResult::error("invalid_arguments", "Missing command"),
         Err(error) => return ToolResult::error("invalid_arguments", error.to_string()),
     };
-    let executable = &argv[0];
-    if context
-        .config
-        .shell
-        .deny
-        .iter()
-        .any(|denied| denied == executable)
-    {
+    if denied_shell_executable(&command, &context.config.shell.deny).is_some() {
         return ToolResult::error("permission_denied", "Command is denied");
     }
-    let mut command = Command::new(executable);
-    command
-        .args(&argv[1..])
+    let mut process = platform_shell_command(&command);
+    process
         .current_dir(&context.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    match run_command_with_timeout(command, context.config.tools.max_shell_seconds) {
+    match run_command_with_timeout(process, context.config.tools.max_shell_seconds) {
         Err(CommandRunError::Timeout) => ToolResult::error("timeout", "Command timed out"),
         Err(CommandRunError::Io(error)) => ToolResult::error("execution_error", error),
         Ok(output) => {
@@ -468,6 +466,22 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
             result.truncated = truncated;
             result
         }
+    }
+}
+
+fn platform_shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut process = Command::new("cmd");
+        process.arg("/C").arg(command);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        process.process_group(0);
+        process
     }
 }
 
@@ -501,7 +515,7 @@ fn run_command_with_timeout(
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                kill_shell_process_tree(&mut child);
                 let _ = child.wait();
                 join_output_reader(stdout_reader)?;
                 join_output_reader(stderr_reader)?;
@@ -521,6 +535,19 @@ fn run_command_with_timeout(
         stdout,
         stderr,
     })
+}
+
+#[cfg(unix)]
+fn kill_shell_process_tree(child: &mut std::process::Child) {
+    let pgid = child.id() as i32;
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_shell_process_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 fn join_output_reader(

@@ -199,6 +199,8 @@ Always-on memory:
 
 The implementation injects the files in `SOUL.md`, `USER.md`, `MEMORY.md` order.
 
+Bootstrap templates live as packaged Markdown files under `src/colibri/memory_templates/`. Python reads those resources at runtime, and Rust includes the same files at compile time. The template text must not be duplicated in Python and Rust source files.
+
 This message must not be appended to `AgentSession.messages`; it is only part of the model input for that submit call.
 
 If no always-on memory exists, do not inject a memory message.

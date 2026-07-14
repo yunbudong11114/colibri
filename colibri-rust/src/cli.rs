@@ -276,7 +276,8 @@ fn run_gateway_foreground(config: AgentConfig) -> Result<i32, String> {
     let worker_sessions = Arc::clone(&sessions);
     let worker_error_tx = error_tx.clone();
     let worker = std::thread::spawn(move || {
-        if let Err(error) = run_weixin_worker(worker_config, work_rx, worker_waiters, worker_sessions)
+        if let Err(error) =
+            run_weixin_worker(worker_config, work_rx, worker_waiters, worker_sessions)
         {
             let _ = worker_error_tx.send(error);
         }

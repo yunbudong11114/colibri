@@ -22,7 +22,9 @@ use colibri_rust::repl_input::{
 use colibri_rust::session::AgentSession;
 use colibri_rust::session_history::TranscriptHistoryLoader;
 use colibri_rust::skills::{skill_catalog, SkillIndex};
-use colibri_rust::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
+use colibri_rust::steering::{
+    format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
+};
 use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
@@ -279,7 +281,10 @@ fn console_plain_answer_and_status_events_match_python() {
         "tool_result",
         &serde_json::json!({"name":"files.read","ok":true,"text":"abcd"}),
     );
-    assert_eq!(line.as_deref(), Some("[colibri] tool files.read ok chars=4"));
+    assert_eq!(
+        line.as_deref(),
+        Some("[colibri] tool files.read ok chars=4")
+    );
 
     let steered = colibri_rust::console::status_line_for_event(
         "steered",
@@ -293,10 +298,7 @@ fn console_plain_answer_and_status_events_match_python() {
 
 #[test]
 fn steering_skip_result_constant_matches_python() {
-    assert_eq!(
-        SKIPPED_TOOL_RESULT,
-        "Skipped due to queued user message."
-    );
+    assert_eq!(SKIPPED_TOOL_RESULT, "Skipped due to queued user message.");
 }
 
 #[test]
@@ -305,15 +307,17 @@ fn format_steering_ack_matches_python() {
         format_steering_ack(2, "别用 rm"),
         "已改方向，跳过剩余 2 个工具\n改：别用 rm"
     );
-    assert_eq!(
-        format_steering_ack(0, "  "),
-        "已改方向，跳过剩余 0 个工具"
-    );
+    assert_eq!(format_steering_ack(0, "  "), "已改方向，跳过剩余 0 个工具");
 
     let text = "一二三四五六七八九十一二三四五六七八九十多余";
     let ack = format_steering_ack(1, text);
     assert!(ack.starts_with("已改方向，跳过剩余 1 个工具\n改："));
-    let preview = ack.split_once('\n').unwrap().1.strip_prefix("改：").unwrap();
+    let preview = ack
+        .split_once('\n')
+        .unwrap()
+        .1
+        .strip_prefix("改：")
+        .unwrap();
     assert!(preview.ends_with('…'));
     assert_eq!(preview.trim_end_matches('…').chars().count(), 20);
 }
@@ -363,7 +367,9 @@ fn steer_skips_remaining_tools_and_injects_user_message() {
     session = session.with_status_callback(
         true,
         Arc::new(move |line| {
-            if line.contains("tool files.list") && line.contains(" ok ") && !steered_flag.swap(true, Ordering::SeqCst)
+            if line.contains("tool files.list")
+                && line.contains(" ok ")
+                && !steered_flag.swap(true, Ordering::SeqCst)
             {
                 assert!(handle.steer("change plan"));
             }
@@ -403,11 +409,10 @@ fn steer_during_text_only_complete_is_applied() {
         handle_slot: Arc::clone(&handle_slot),
         calls: 0,
     };
-    let mut session = AgentSession::new(config, Box::new(model)).with_steer_notifier(Arc::new(
-        move |text| {
+    let mut session =
+        AgentSession::new(config, Box::new(model)).with_steer_notifier(Arc::new(move |text| {
             acks_for_notifier.lock().unwrap().push(text);
-        },
-    ));
+        }));
     *handle_slot.lock().unwrap() = Some(session.steer_handle());
 
     let response = session.submit("do work").unwrap();
@@ -465,10 +470,7 @@ fn gateway_try_steer_enqueues_when_turn_active() {
     handle.set_turn_active_for_test(true);
 
     assert!(cache.try_steer("weixin:user-1", "change plan"));
-    assert_eq!(
-        handle.drain_one_for_test().as_deref(),
-        Some("change plan")
-    );
+    assert_eq!(handle.drain_one_for_test().as_deref(), Some("change plan"));
 }
 
 #[test]
@@ -490,10 +492,7 @@ fn gateway_try_steer_works_while_session_taken_for_submit() {
     // Receive can steer without holding the session or blocking on submit.
     assert!(cache.try_steer("weixin:user-1", "change plan"));
     assert!(!cache.contains_key("weixin:user-1"));
-    assert_eq!(
-        handle.drain_one_for_test().as_deref(),
-        Some("change plan")
-    );
+    assert_eq!(handle.drain_one_for_test().as_deref(), Some("change plan"));
 
     cache.put_back("weixin:user-1", session);
     assert!(cache.contains_key("weixin:user-1"));
@@ -525,10 +524,7 @@ fn steering_pump_forwards_line_to_steer() {
         |_| {},
     );
 
-    assert_eq!(
-        handle.drain_one_for_test().as_deref(),
-        Some("change plan")
-    );
+    assert_eq!(handle.drain_one_for_test().as_deref(), Some("change plan"));
 }
 
 #[test]
@@ -798,13 +794,7 @@ fn session_compacts_at_model_boundary_not_after_assistant_like_python() {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fake: two",
-            "three",
-            "fake: three",
-            "four",
-            "fake: four",
-        ]
+        vec!["fake: two", "three", "fake: three", "four", "fake: four",]
     );
     assert!(session.summary.contains("user: one"));
 }
@@ -820,7 +810,9 @@ fn session_close_closes_owned_transcript() {
     config.memory.enabled = false;
     let mut session = AgentSession::from_shared(
         Arc::new(config),
-        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Arc::new(Mutex::new(
+            Box::new(FakeModel::new()) as Box<dyn ModelClient>
+        )),
         Some(Arc::clone(&transcript)),
         BTreeMap::new(),
     );
@@ -974,17 +966,16 @@ fn session_compacts_when_model_input_tokens_reach_threshold_like_python() {
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(BudgetInspectModel));
-    session
-        .messages
-        .push(Message::new("user", &format!("old user {}", "x".repeat(50))));
+    session.messages.push(Message::new(
+        "user",
+        &format!("old user {}", "x".repeat(50)),
+    ));
     session.messages.push(Message::new(
         "assistant",
         &format!("old assistant {}", "y".repeat(50)),
     ));
 
-    let response = session
-        .submit("latest message")
-        .unwrap();
+    let response = session.submit("latest message").unwrap();
 
     assert_eq!(response.text, "budget ok");
     assert!(!session.summary.is_empty());
@@ -1025,7 +1016,11 @@ fn retain_recent_message_groups_keeps_tool_pairs_intact_like_python() {
             .iter()
             .map(|message| (message.role.as_str(), message.tool_call_id.as_deref()))
             .collect::<Vec<_>>(),
-        vec![("user", None), ("assistant", None), ("tool", Some("call_1"))]
+        vec![
+            ("user", None),
+            ("assistant", None),
+            ("tool", Some("call_1"))
+        ]
     );
 }
 
@@ -1043,7 +1038,9 @@ fn session_does_not_log_context_budget_for_token_triggered_compaction_like_pytho
     let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
     let mut session = AgentSession::from_shared(
         Arc::new(config),
-        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Arc::new(Mutex::new(
+            Box::new(FakeModel::new()) as Box<dyn ModelClient>
+        )),
         Some(Arc::new(Mutex::new(writer))),
         BTreeMap::new(),
     );
@@ -1076,7 +1073,9 @@ fn session_keeps_large_tool_result_text_for_model_context_like_python() {
     let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
     let mut session = AgentSession::from_shared(
         Arc::new(config),
-        Arc::new(Mutex::new(Box::new(FakeModel::new()) as Box<dyn ModelClient>)),
+        Arc::new(Mutex::new(
+            Box::new(FakeModel::new()) as Box<dyn ModelClient>
+        )),
         Some(Arc::new(Mutex::new(writer))),
         BTreeMap::new(),
     );
@@ -1109,13 +1108,16 @@ fn context_pressure_warning_is_not_injected_for_large_model_input_like_python() 
     session
         .messages
         .push(Message::new("user", &format!("old {}", "x".repeat(160))));
-    session
-        .messages
-        .push(Message::new("assistant", &format!("old {}", "y".repeat(160))));
+    session.messages.push(Message::new(
+        "assistant",
+        &format!("old {}", "y".repeat(160)),
+    ));
 
     let response = session.submit("start").unwrap();
 
-    assert!(response.text.contains("Tool round limit reached after 4 rounds."));
+    assert!(response
+        .text
+        .contains("Tool round limit reached after 4 rounds."));
     assert!(!session
         .messages
         .iter()
@@ -1527,6 +1529,44 @@ fn shell_tool_rejects_denied_executable() {
 }
 
 #[test]
+fn shell_tool_rejects_denied_executable_in_compound_command() {
+    let temp = temp_dir("shell-compound-deny");
+    fs::write(temp.join("file"), "keep").unwrap();
+    let config = AgentConfig::default();
+    let context = ToolContext::new(config, temp.clone());
+
+    let result = run_tool(
+        "shell.run",
+        r#"{"command":"printf ok && rm file"}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert!(!result.ok);
+    assert_eq!(result.error_type.as_deref(), Some("permission_denied"));
+    assert_eq!(fs::read_to_string(temp.join("file")).unwrap(), "keep");
+}
+
+#[test]
+fn shell_tool_rejects_denied_executable_after_background_operator() {
+    let temp = temp_dir("shell-background-deny");
+    fs::write(temp.join("file"), "keep").unwrap();
+    let config = AgentConfig::default();
+    let context = ToolContext::new(config, temp.clone());
+
+    let result = run_tool(
+        "shell.run",
+        r#"{"command":"printf ok & rm file"}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert!(!result.ok);
+    assert_eq!(result.error_type.as_deref(), Some("permission_denied"));
+    assert_eq!(fs::read_to_string(temp.join("file")).unwrap(), "keep");
+}
+
+#[test]
 fn shell_tool_reports_invalid_quoted_command_like_python() {
     let temp = temp_dir("shell-invalid-quote");
     let config = AgentConfig::default();
@@ -1544,21 +1584,20 @@ fn shell_tool_reports_invalid_quoted_command_like_python() {
 }
 
 #[test]
-fn shell_tool_executes_argv_directly_without_shell_redirection() {
-    let temp = temp_dir("shell-direct-argv");
+fn shell_tool_executes_compound_command_with_real_shell() {
+    let temp = temp_dir("shell-real-shell");
     let config = AgentConfig::default();
     let context = ToolContext::new(config, temp.clone());
 
     let result = run_tool(
         "shell.run",
-        r#"{"command":"echo hello > out.txt"}"#,
+        r#"{"command":"printf 'alpha\nbeta\n' | wc -l"}"#,
         &context,
     )
     .unwrap();
 
     assert!(result.ok);
-    assert_eq!(result.text, "hello > out.txt\n");
-    assert!(!temp.join("out.txt").exists());
+    assert_eq!(result.text.trim(), "2");
 }
 
 #[test]
@@ -1567,8 +1606,7 @@ fn permission_policy_matches_python_session_and_project_grants() {
     let config = AgentConfig::default();
     let context = ToolContext::new(config.clone(), temp.clone());
     let mut prompter = FakePermissionPrompter::new(vec!["s"]);
-    let mut policy =
-        PermissionPolicy::from_config(&config, temp.clone(), Some(&mut prompter));
+    let mut policy = PermissionPolicy::from_config(&config, temp.clone(), Some(&mut prompter));
     let shell = ToolInfo::new("shell.run", false);
     let mut args = BTreeMap::new();
     args.insert("command".to_string(), "pwd".to_string());
@@ -1586,6 +1624,7 @@ fn permission_policy_matches_python_session_and_project_grants() {
     store
         .save(&ProjectGrants {
             shell_commands: vec!["git status".to_string()],
+            shell_prefixes: vec![],
             tool_names: vec![],
             file_roots: vec![],
         })
@@ -1598,6 +1637,84 @@ fn permission_policy_matches_python_session_and_project_grants() {
     let granted = project_policy.decide(&shell, &git_args, &context);
     assert!(granted.allowed);
     assert_eq!(granted.scope, "project");
+
+    store
+        .save(&ProjectGrants {
+            shell_commands: vec![],
+            shell_prefixes: vec!["cargo test".to_string(), "git status".to_string()],
+            tool_names: vec![],
+            file_roots: vec![],
+        })
+        .unwrap();
+    let mut prefix_prompter = FakePermissionPrompter::new(vec!["n", "n", "n", "n"]);
+    let mut prefix_policy =
+        PermissionPolicy::from_config(&config, temp.clone(), Some(&mut prefix_prompter));
+    let mut prefix_args = BTreeMap::new();
+    prefix_args.insert("command".to_string(), "git status --short".to_string());
+    let prefix_granted = prefix_policy.decide(&shell, &prefix_args, &context);
+    assert!(prefix_granted.allowed);
+    assert_eq!(prefix_granted.scope, "project_prefix");
+
+    let mut compound_args = BTreeMap::new();
+    compound_args.insert(
+        "command".to_string(),
+        "git status --short && cargo test".to_string(),
+    );
+    let compound_granted = prefix_policy.decide(&shell, &compound_args, &context);
+    assert!(compound_granted.allowed);
+    assert_eq!(compound_granted.scope, "project_prefix");
+
+    let mut background_args = BTreeMap::new();
+    background_args.insert(
+        "command".to_string(),
+        "git status --short & cargo test".to_string(),
+    );
+    let background_granted = prefix_policy.decide(&shell, &background_args, &context);
+    assert!(background_granted.allowed);
+    assert_eq!(background_granted.scope, "project_prefix");
+
+    let mut nonmatch_args = BTreeMap::new();
+    nonmatch_args.insert("command".to_string(), "git statusx".to_string());
+    let nonmatch = prefix_policy.decide(&shell, &nonmatch_args, &context);
+    assert!(!nonmatch.allowed);
+
+    let mut nonmatch_compound_args = BTreeMap::new();
+    nonmatch_compound_args.insert(
+        "command".to_string(),
+        "git status --short && python -V".to_string(),
+    );
+    let nonmatch_compound = prefix_policy.decide(&shell, &nonmatch_compound_args, &context);
+    assert!(!nonmatch_compound.allowed);
+
+    let mut nonmatch_background_args = BTreeMap::new();
+    nonmatch_background_args.insert(
+        "command".to_string(),
+        "git status --short & python -V".to_string(),
+    );
+    let nonmatch_background = prefix_policy.decide(&shell, &nonmatch_background_args, &context);
+    assert!(!nonmatch_background.allowed);
+
+    let mut substitution_args = BTreeMap::new();
+    substitution_args.insert("command".to_string(), "git status $(echo ok)".to_string());
+    let substitution = prefix_policy.decide(&shell, &substitution_args, &context);
+    assert!(!substitution.allowed);
+    drop(prefix_policy);
+    assert_eq!(
+        prefix_prompter.requests[1].shell_command.as_deref(),
+        Some("git status --short && python -V")
+    );
+    assert_eq!(
+        prefix_prompter.requests[0].shell_command.as_deref(),
+        Some("git statusx")
+    );
+    assert_eq!(
+        prefix_prompter.requests[2].shell_command.as_deref(),
+        Some("git status --short & python -V")
+    );
+    assert_eq!(
+        prefix_prompter.requests[3].shell_command.as_deref(),
+        Some("git status $(echo ok)")
+    );
 }
 
 #[test]
@@ -1674,6 +1791,11 @@ fn project_permission_store_saves_and_loads_deduplicated_toml() {
     store
         .save(&ProjectGrants {
             shell_commands: vec!["git status".to_string(), "git status".to_string()],
+            shell_prefixes: vec![
+                "cargo test".to_string(),
+                "git status".to_string(),
+                "cargo test".to_string(),
+            ],
             tool_names: vec!["files.read".to_string(), "files.list".to_string()],
             file_roots: vec![temp.display().to_string(), temp.display().to_string()],
         })
@@ -1682,6 +1804,10 @@ fn project_permission_store_saves_and_loads_deduplicated_toml() {
     let loaded = store.load();
     assert_eq!(loaded.shell_commands, vec!["git status".to_string()]);
     assert_eq!(
+        loaded.shell_prefixes,
+        vec!["cargo test".to_string(), "git status".to_string()]
+    );
+    assert_eq!(
         loaded.tool_names,
         vec!["files.list".to_string(), "files.read".to_string()]
     );
@@ -1689,6 +1815,7 @@ fn project_permission_store_saves_and_loads_deduplicated_toml() {
     let text = fs::read_to_string(temp.join(".colibri/permissions.toml")).unwrap();
     assert!(text.contains("[shell]"));
     assert!(text.contains("commands = [\"git status\"]"));
+    assert!(text.contains("prefixes = [\"cargo test\", \"git status\"]"));
 }
 
 #[test]
@@ -2377,6 +2504,26 @@ fn shell_timeout_terminates_without_waiting_for_natural_exit_like_python() {
 }
 
 #[test]
+fn shell_timeout_kills_background_process_group_like_python() {
+    let temp = temp_dir("shell-timeout-process-group");
+    let mut config = AgentConfig::default();
+    config.tools.max_shell_seconds = 0.05;
+    let context = ToolContext::new(config, temp.clone());
+
+    let result = run_tool(
+        "shell.run",
+        r#"{"command":"sh -c 'sleep 0.2; printf leaked > leaked.txt' & wait"}"#,
+        &context,
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(350));
+
+    assert!(!result.ok);
+    assert_eq!(result.error_type.as_deref(), Some("timeout"));
+    assert!(!temp.join("leaked.txt").exists());
+}
+
+#[test]
 fn nonzero_shell_exit_uses_python_error_type() {
     let temp = temp_dir("shell-nonzero-type");
     let config = AgentConfig::default();
@@ -2585,11 +2732,7 @@ fn memory_bootstrap_content_and_per_file_limits_match_python() {
         .split("\n\n[MEMORY.md]")
         .next()
         .unwrap();
-    let memory_block = bounded
-        .text
-        .split("[MEMORY.md]\n")
-        .nth(1)
-        .unwrap();
+    let memory_block = bounded.text.split("[MEMORY.md]\n").nth(1).unwrap();
     assert_eq!(soul_block.chars().count(), 400);
     assert_eq!(user_block.chars().count(), 400);
     assert_eq!(memory_block.chars().count(), 1_200);
@@ -2849,7 +2992,8 @@ fn weixin_send_media_encrypts_uploads_and_sends_metadata_like_python() {
 
 #[test]
 fn weixin_send_text_uses_unique_client_id_like_python() {
-    let server = start_http_server(|_base_url, _requests| |_| TestHttpResponse::json(r#"{"ret":0}"#));
+    let server =
+        start_http_server(|_base_url, _requests| |_| TestHttpResponse::json(r#"{"ret":0}"#));
     let mut config = AgentConfig::default();
     config.channels_weixin.token = "token".to_string();
     config.channels_weixin.base_url = server.base_url.clone();
@@ -3022,7 +3166,10 @@ impl ModelClient for AlwaysToolModel {
                 name: "files.list".to_string(),
                 arguments: {
                     let mut map = serde_json::Map::new();
-                    map.insert("path".to_string(), serde_json::Value::String(".".to_string()));
+                    map.insert(
+                        "path".to_string(),
+                        serde_json::Value::String(".".to_string()),
+                    );
                     map
                 },
             }],
@@ -3068,7 +3215,10 @@ impl ModelClient for TwoToolsThenTextModel {
         self.calls += 1;
         if self.calls == 1 {
             let mut args = serde_json::Map::new();
-            args.insert("path".to_string(), serde_json::Value::String(".".to_string()));
+            args.insert(
+                "path".to_string(),
+                serde_json::Value::String(".".to_string()),
+            );
             return Ok(colibri_rust::messages::ModelResponse {
                 text: String::new(),
                 tool_calls: vec![
@@ -3136,11 +3286,12 @@ impl ModelClient for BudgetInspectModel {
         _system: &str,
         _limits: &ModelLimits,
     ) -> Result<colibri_rust::messages::ModelResponse, String> {
-        assert!(messages.iter().any(|message| message.role == "user"
-            && message.content == "latest message"));
-        assert!(!messages.iter().any(|message| {
-            message.role == "user" && message.content.starts_with("old user")
-        }));
+        assert!(messages
+            .iter()
+            .any(|message| message.role == "user" && message.content == "latest message"));
+        assert!(!messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content.starts_with("old user") }));
         Ok(colibri_rust::messages::ModelResponse {
             text: "budget ok".to_string(),
             tool_calls: Vec::new(),

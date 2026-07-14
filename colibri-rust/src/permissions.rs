@@ -8,6 +8,7 @@ use crate::tools::{ToolContext, ToolInfo};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectGrants {
     pub shell_commands: Vec<String>,
+    pub shell_prefixes: Vec<String>,
     pub tool_names: Vec<String>,
     pub file_roots: Vec<String>,
 }
@@ -32,6 +33,7 @@ impl ProjectPermissionStore {
         };
         ProjectGrants {
             shell_commands: string_list_at(&value, &["shell", "commands"]),
+            shell_prefixes: string_list_at(&value, &["shell", "prefixes"]),
             tool_names: string_list_at(&value, &["tools", "names"]),
             file_roots: string_list_at(&value, &["files", "roots"]),
         }
@@ -42,11 +44,13 @@ impl ProjectPermissionStore {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let mut shell_commands = sorted_dedup(grants.shell_commands.clone());
+        let mut shell_prefixes = sorted_dedup(grants.shell_prefixes.clone());
         let mut tool_names = sorted_dedup(grants.tool_names.clone());
         let mut file_roots = sorted_dedup(grants.file_roots.clone());
         let text = format!(
-            "[shell]\ncommands = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
+            "[shell]\ncommands = [{}]\nprefixes = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
             toml_array(&mut shell_commands),
+            toml_array(&mut shell_prefixes),
             toml_array(&mut tool_names),
             toml_array(&mut file_roots)
         );
@@ -126,12 +130,18 @@ impl<'a> PermissionPolicy<'a> {
         context: &ToolContext,
     ) -> PermissionDecision {
         let subject = permission_subject_for_internal(tool, arguments, context);
-        if subject.tool_name == "shell.run"
-            && subject
+        let hard_denied = if subject.tool_name == "shell.run" {
+            subject.shell_command.as_ref().is_some_and(|command| {
+                crate::shell_policy::denied_shell_executable(command, &context.config.shell.deny)
+                    .is_some()
+            }) || subject
                 .shell_executable
                 .as_ref()
                 .is_some_and(|executable| context.config.shell.deny.contains(executable))
-        {
+        } else {
+            false
+        };
+        if hard_denied {
             return decision(false, "deny", "none", &subject, "hard_deny");
         }
 
@@ -178,6 +188,9 @@ impl<'a> PermissionPolicy<'a> {
             }
             if contains_opt(&grants.shell_commands, subject.shell_command.as_ref()) {
                 return Some(decision(true, "allow", "project", subject, ""));
+            }
+            if shell_command_matches_project_prefixes(subject.shell_command.as_deref(), grants) {
+                return Some(decision(true, "allow", "project_prefix", subject, ""));
             }
             return None;
         }
@@ -297,7 +310,7 @@ fn permission_subject_for_internal(
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
         let argv = shell_words::split(&command).unwrap_or_default();
-        let executable = argv.first().cloned();
+        let executable = crate::shell_policy::first_shell_executable(&command);
         if let Some(write_path) = shell_write_path(&command, &argv, context) {
             let root = grant_root_for(&write_path);
             return PermissionSubject {
@@ -379,6 +392,35 @@ fn decision(
         file_path: subject.file_path.clone(),
         file_root: subject.file_root.clone(),
     }
+}
+
+fn shell_command_matches_project_prefixes(command: Option<&str>, grants: &ProjectGrants) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+    if grants.shell_prefixes.is_empty() {
+        return false;
+    }
+    if crate::shell_policy::has_dangerous_shell_features(command) {
+        return false;
+    }
+    let segments = crate::shell_policy::shell_command_segments(command);
+    if segments.is_empty() {
+        return false;
+    }
+    segments.iter().all(|segment| {
+        grants.shell_commands.contains(segment)
+            || grants
+                .shell_prefixes
+                .iter()
+                .any(|prefix| command_prefix_matches(segment, prefix))
+    })
+}
+
+fn command_prefix_matches(command: &str, prefix: &str) -> bool {
+    let command = command.trim();
+    let prefix = prefix.trim();
+    !prefix.is_empty() && (command == prefix || command.starts_with(&format!("{prefix} ")))
 }
 
 fn string_list_at(value: &toml::Value, path: &[&str]) -> Vec<String> {

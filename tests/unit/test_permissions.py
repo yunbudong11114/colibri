@@ -160,7 +160,7 @@ def test_shell_project_command_grant_is_exact(tmp_path):
     config = AgentConfig.default()
     store = ProjectPermissionStore.for_cwd(tmp_path)
     store.save(ProjectGrants(shell_commands={"git status"}))
-    prompter = FakePrompter(replies=["n"], requests=[])
+    prompter = FakePrompter(replies=["n", "n", "n", "n"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
@@ -171,6 +171,44 @@ def test_shell_project_command_grant_is_exact(tmp_path):
     assert allowed.scope == "project"
     assert not denied.allowed
     assert prompter.requests[0].subject.shell_command == "git push"
+
+
+def test_shell_project_prefix_grant_allows_token_boundary_matches(tmp_path):
+    config = AgentConfig.default()
+    store = ProjectPermissionStore.for_cwd(tmp_path)
+    store.save(ProjectGrants(shell_prefixes={"git status", "cargo test"}))
+    prompter = FakePrompter(replies=["n", "n", "n", "n"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    exact = policy.decide(ShellRunTool(), {"command": "git status"}, context)
+    longer = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
+    other = policy.decide(ShellRunTool(), {"command": "cargo test --manifest-path colibri-rust/Cargo.toml"}, context)
+    compound = policy.decide(ShellRunTool(), {"command": "git status --short && cargo test"}, context)
+    background = policy.decide(ShellRunTool(), {"command": "git status --short & cargo test"}, context)
+    denied = policy.decide(ShellRunTool(), {"command": "git statusx"}, context)
+    denied_compound = policy.decide(ShellRunTool(), {"command": "git status --short && python -V"}, context)
+    denied_background = policy.decide(ShellRunTool(), {"command": "git status --short & python -V"}, context)
+    denied_substitution = policy.decide(ShellRunTool(), {"command": "git status $(echo ok)"}, context)
+
+    assert exact.allowed
+    assert exact.scope == "project_prefix"
+    assert longer.allowed
+    assert longer.scope == "project_prefix"
+    assert other.allowed
+    assert other.scope == "project_prefix"
+    assert compound.allowed
+    assert compound.scope == "project_prefix"
+    assert background.allowed
+    assert background.scope == "project_prefix"
+    assert not denied.allowed
+    assert prompter.requests[0].subject.shell_command == "git statusx"
+    assert not denied_compound.allowed
+    assert prompter.requests[1].subject.shell_command == "git status --short && python -V"
+    assert not denied_background.allowed
+    assert prompter.requests[2].subject.shell_command == "git status --short & python -V"
+    assert not denied_substitution.allowed
+    assert prompter.requests[3].subject.shell_command == "git status $(echo ok)"
 
 
 def test_shell_hard_deny_blocks_without_prompt(tmp_path):

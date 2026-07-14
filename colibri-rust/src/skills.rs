@@ -149,7 +149,8 @@ impl SkillIndex {
         ];
         let mut names = Vec::new();
         for skill in &selected {
-            let location = if skill.root.file_name().and_then(|name| name.to_str()) == Some("builtin")
+            let location = if skill.root.file_name().and_then(|name| name.to_str())
+                == Some("builtin")
                 && skill.content.is_some()
             {
                 "[builtin]".to_string()
@@ -196,7 +197,10 @@ pub fn skill_catalog(context: &ToolContext) -> (String, Vec<String>, bool) {
 }
 
 pub fn read_skill(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let Some(name) = args.get("name").map(|value| value.trim()).filter(|value| !value.is_empty())
+    let Some(name) = args
+        .get("name")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
     else {
         return ToolResult::error("invalid_arguments", "name is required");
     };

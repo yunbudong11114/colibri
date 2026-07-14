@@ -252,7 +252,10 @@ fn tool_names_by_id(messages: &[Message]) -> std::collections::BTreeMap<String, 
 fn tool_status(content: &str) -> &str {
     for prefix in ["permission_denied:", "unknown_tool:", "tool_error:"] {
         if content.starts_with(prefix) {
-            return content.split_once(':').map(|(left, _)| left).unwrap_or("ok");
+            return content
+                .split_once(':')
+                .map(|(left, _)| left)
+                .unwrap_or("ok");
         }
     }
     "ok"

@@ -9,6 +9,7 @@ import tomllib
 @dataclass(frozen=True)
 class ProjectGrants:
     shell_commands: set[str] = field(default_factory=set)
+    shell_prefixes: set[str] = field(default_factory=set)
     tool_names: set[str] = field(default_factory=set)
     file_roots: set[str] = field(default_factory=set)
 
@@ -30,6 +31,7 @@ class ProjectPermissionStore:
         files = data.get("files", {})
         return ProjectGrants(
             shell_commands={item for item in shell.get("commands", []) if isinstance(item, str)},
+            shell_prefixes={item for item in shell.get("prefixes", []) if isinstance(item, str)},
             tool_names={item for item in tools.get("names", []) if isinstance(item, str)},
             file_roots={item for item in files.get("roots", []) if isinstance(item, str)},
         )
@@ -52,6 +54,7 @@ class ProjectPermissionStore:
     def _format(self, grants: ProjectGrants) -> str:
         lines = ["[shell]"]
         lines.append(f"commands = {_toml_string_list(sorted(grants.shell_commands))}")
+        lines.append(f"prefixes = {_toml_string_list(sorted(grants.shell_prefixes))}")
         lines.append("")
         lines.append("[tools]")
         lines.append(f"names = {_toml_string_list(sorted(grants.tool_names))}")

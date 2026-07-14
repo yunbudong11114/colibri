@@ -24,7 +24,7 @@ This change must be implemented in both Python and Rust with matching user-visib
 
 - Do not add background memory review.
 - Do not change Colibri's configuration defaults.
-- Do not switch `shell.run` back to `sh -c`.
+- Do not bypass `shell.run` permission classification when shell execution is enabled.
 - Do not remove full tool output from transcript logs.
 
 ## Design

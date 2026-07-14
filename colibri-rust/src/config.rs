@@ -501,7 +501,9 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
             return Err("unknown config field: skills.dirs (use skills.dir)".to_string());
         }
         if table.contains_key("max_loaded") {
-            return Err("unknown config field: skills.max_loaded (use skills.max_catalog)".to_string());
+            return Err(
+                "unknown config field: skills.max_loaded (use skills.max_catalog)".to_string(),
+            );
         }
     }
     validate_table(

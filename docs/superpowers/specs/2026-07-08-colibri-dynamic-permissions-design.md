@@ -15,7 +15,7 @@ This milestone changes permissions from static allowlists into a small interacti
 - every tool call goes through a unified permission policy before execution,
 - missing grants trigger a short stdin/stdout confirmation prompt,
 - the user can allow once, allow for the session, allow for the project, or deny,
-- project-level shell grants are complete-command grants only,
+- project-level shell grants support exact complete-command grants and explicit command-prefix grants,
 - hard-deny safety rules remain available for dangerous commands.
 
 The design should feel closer to Claude Code's permission flow while staying small enough for CardputerZero-class devices.
@@ -26,7 +26,7 @@ This milestone will not implement:
 
 - a graphical or full-screen TUI permission UI,
 - a complex permission rule language,
-- shell wildcard, regex, prefix, or executable-wide project grants,
+- shell wildcard, regex, or executable-wide project grants,
 - marketplace, plugin, or remote skill installation permissions,
 - OS-level privilege escalation such as sudo or sandbox escape,
 - network sandbox approval outside Colibri's own tool policy,
@@ -77,14 +77,23 @@ A project grant for `files.read` allows future `files.read` calls in the same pr
 
 ### 4.3 Shell Grants
 
-Shell project grants are complete-command grants only.
+Shell project grants support exact complete-command grants plus explicit command-prefix grants.
 
 ```toml
 [shell]
 commands = ["pwd", "git status"]
+prefixes = ["git status", "cargo test"]
 ```
 
 `git status` allows exactly `git status`. It does not allow `git add`, `git commit`, `git push`, or arbitrary `git ...` commands.
+
+`prefixes = ["cargo test"]` allows `cargo test`, `cargo test --all`, and `cargo test --manifest-path colibri-rust/Cargo.toml`. Prefix matching is token-boundary aware: `git status` matches `git status --short`, but not `git statusx` or `git stash`.
+
+For compound shell commands, every unquoted segment must be covered by either an exact command grant or a prefix grant. Segment separators include `&&`, `||`, `;`, `|`, newline, and single background `&` outside quotes. `prefixes = ["git status"]` allows `git status --short`, but it does not allow `git status --short && cargo test` unless `cargo test` is also covered.
+
+Commands containing nested or higher-order shell execution forms must not be auto-allowed by project prefix grants. This includes command substitution `$()`, backticks, subshell grouping `(...)`, here-documents, function definitions, `eval`, and `source`/`.`. These commands may still go through ordinary confirmation unless hard-denied by executable rules.
+
+Hard-deny executable checks are evaluated before project grants. A prefix grant cannot allow a command containing an executable from `shell.deny`, including denied executables in later compound segments.
 
 Session shell grants may support both:
 
@@ -125,9 +134,10 @@ The model can then choose another tool, ask the user for information, or explain
 New shell behavior:
 
 - `shell.run` remains visible when `"shell"` is enabled.
-- `ShellRunTool` validates the command string, parses it safely with `shlex.split()`, runs the command with `subprocess.run(argv, shell=False)`, enforces timeout, and bounds output.
+- `ShellRunTool` validates the command string and shell quoting, delegates shell command analysis to a small shell-policy helper module, splits unquoted compound command segments for permission classification, executes the original command through the platform shell so pipes, redirection, and shell operators keep their normal semantics, enforces timeout, and bounds output.
+- Compound command permission checks inspect each unquoted segment separated by `&&`, `||`, `;`, `|`, single background `&`, or a newline before execution. Quoted text is not split.
 - `shell.deny` remains a hard-deny list for dangerous executables.
-- Hard-denied commands are blocked before prompting.
+- Hard-denied executables are blocked before prompting, even when they appear after a compound operator.
 
 The default hard-deny list remains conservative:
 
@@ -205,6 +215,7 @@ File format:
 ```toml
 [shell]
 commands = ["pwd", "git status"]
+prefixes = ["cargo test"]
 
 [tools]
 names = ["files.list", "files.read"]
@@ -323,6 +334,7 @@ default_permission = "allow"
 ```
 
 or pre-populate `.colibri/permissions.toml` for exact project commands.
+Advanced users may also pre-populate `shell.prefixes` for token-boundary command-prefix grants.
 
 ## 15. Future Work
 
@@ -331,7 +343,6 @@ Future milestones may add:
 - interactive path-root expansion,
 - separate network risk classification,
 - stricter destructive command detection beyond executable name,
-- command prefix grants for advanced users,
 - permission management CLI commands,
 - expiry timestamps for project grants,
 - MCP tool grant subjects.

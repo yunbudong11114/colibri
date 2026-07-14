@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from colibri.config import AgentConfig
@@ -258,6 +259,54 @@ def test_shell_run_rejects_denied_command(tmp_path):
     assert result.error_type == "permission_denied"
 
 
+def test_shell_run_executes_compound_command_with_real_shell(tmp_path):
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(id="1", name="shell.run", arguments={"command": "printf 'alpha\\nbeta\\n' | wc -l"}),
+        context,
+    )
+
+    assert result.ok
+    assert result.text.strip() == "2"
+
+
+def test_shell_run_rejects_denied_executable_in_compound_command(tmp_path):
+    target = tmp_path / "file"
+    target.write_text("keep", encoding="utf-8")
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(id="1", name="shell.run", arguments={"command": "printf ok && rm file"}),
+        context,
+    )
+
+    assert not result.ok
+    assert result.error_type == "permission_denied"
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
+def test_shell_run_rejects_denied_executable_after_background_operator(tmp_path):
+    target = tmp_path / "file"
+    target.write_text("keep", encoding="utf-8")
+    config = make_config(tmp_path)
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(id="1", name="shell.run", arguments={"command": "printf ok & rm file"}),
+        context,
+    )
+
+    assert not result.ok
+    assert result.error_type == "permission_denied"
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
 def test_shell_run_times_out_slow_command(tmp_path):
     config = make_config(tmp_path, tools={"max_result_chars": 100, "max_shell_seconds": 0.01})
     registry = ToolRegistry.from_config(config, cwd=tmp_path)
@@ -270,6 +319,26 @@ def test_shell_run_times_out_slow_command(tmp_path):
 
     assert not result.ok
     assert result.error_type == "timeout"
+
+
+def test_shell_run_timeout_kills_background_process_group(tmp_path):
+    config = make_config(tmp_path, tools={"max_result_chars": 100, "max_shell_seconds": 0.05})
+    registry = ToolRegistry.from_config(config, cwd=tmp_path)
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = registry.run(
+        ToolCall(
+            id="1",
+            name="shell.run",
+            arguments={"command": "sh -c 'sleep 0.2; printf leaked > leaked.txt' & wait"},
+        ),
+        context,
+    )
+    time.sleep(0.35)
+
+    assert not result.ok
+    assert result.error_type == "timeout"
+    assert not (tmp_path / "leaked.txt").exists()
 
 
 def test_web_search_builds_baidu_request_and_formats_results(monkeypatch, tmp_path):

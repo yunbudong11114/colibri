@@ -78,7 +78,7 @@ If `--config` is omitted, the Rust binary follows the Python runtime and reads `
 env HOME=/tmp/colibri-rust-smoke ./colibri-rust/target/release/colibri ask "hello"
 ```
 
-Rust supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through a Rust-native blocking HTTP client, markdown memory, transcripts, transcript restore, built-in local tools for files, file sending, shell, image understanding, memory, skills, and Baidu web search, plus Weixin QR auth/API, inbound and outbound Weixin media, and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[vision]`, `[session]`, and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by parsing shell-like quoting into argv and running the executable directly instead of through `sh -c`. `files.send` returns the same media result shape and requires an active channel media sender. `image.understand` uses the same vision defaults and fake-model response path as Python. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling uses a bounded Weixin work queue, sender-scoped sessions, Weixin permission prompts, channel media sending, and oldest-session eviction at `gateway.max_sessions`. MCP is not exposed by the current Python runtime, so the Rust config surface also omits top-level MCP defaults.
+Rust supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through a Rust-native blocking HTTP client, markdown memory, transcripts, transcript restore, built-in local tools for files, file sending, shell, image understanding, memory, skills, and Baidu web search, plus Weixin QR auth/API, inbound and outbound Weixin media, and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[vision]`, `[session]`, and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by validating shell quoting, scanning each unquoted compound command segment against `shell.deny`, checking project exact/prefix shell grants, and executing the original command through the platform shell. `files.send` returns the same media result shape and requires an active channel media sender. `image.understand` uses the same vision defaults and fake-model response path as Python. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling uses a bounded Weixin work queue, sender-scoped sessions, Weixin permission prompts, channel media sending, and oldest-session eviction at `gateway.max_sessions`. MCP is not exposed by the current Python runtime, so the Rust config surface also omits top-level MCP defaults.
 
 The Rust test suite is derived from the Python unit suite. `colibri-rust/tests/parity.rs` scans every Python `tests/unit/test_*.py::test_*` function, requires an explicit Rust coverage mapping for each one, rejects partial parity entries, verifies mapped Rust tests exist, and directly compares Python/Rust CLI output for deterministic commands such as `ask`, `diagnostics`, and `gateway` usage. Runtime tests cover the matching Rust library behavior for config, tools, permissions, memory, transcript, transcript restore, models, gateway, web search, skills, vision, media sending, Weixin auth, Weixin media download/upload, and Weixin permission reply parsing.
 
@@ -233,6 +233,16 @@ Project grants are stored in:
 ```text
 .colibri/permissions.toml
 ```
+
+Shell project grants support exact commands and token-boundary prefixes:
+
+```toml
+[shell]
+commands = ["pwd", "git status"]
+prefixes = ["cargo test", "git status"]
+```
+
+For compound commands, every unquoted segment must match an exact command or a prefix grant. `shell.deny` is checked first.
 
 That project runtime directory is ignored by git.
 

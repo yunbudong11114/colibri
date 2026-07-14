@@ -203,10 +203,7 @@ fn read_repl_line_plain<R: Read, W: Write>(
 /// Returns `None` on timeout, EOF, or when stdin is not selectable (so callers
 /// can disable the concurrent steering pump). If `abort` returns true after
 /// select indicates readiness, returns `None` without reading.
-pub fn try_read_line(
-    timeout_seconds: f64,
-    abort: Option<&dyn Fn() -> bool>,
-) -> Option<String> {
+pub fn try_read_line(timeout_seconds: f64, abort: Option<&dyn Fn() -> bool>) -> Option<String> {
     #[cfg(unix)]
     {
         use std::io::IsTerminal;

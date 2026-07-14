@@ -61,10 +61,10 @@ impl GatewaySessionCache {
         };
         let history_loader = if config.session.restore_transcript {
             let session_config = config.session.clone();
-            Some(Arc::new(move || {
-                TranscriptHistoryLoader::default(&session_config).load()
-            })
-                as Arc<dyn Fn() -> Vec<crate::messages::Message> + Send + Sync>)
+            Some(
+                Arc::new(move || TranscriptHistoryLoader::default(&session_config).load())
+                    as Arc<dyn Fn() -> Vec<crate::messages::Message> + Send + Sync>,
+            )
         } else {
             None
         };
