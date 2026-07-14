@@ -2,17 +2,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
 use crate::tools::ToolContext;
 
-static SKILL_SCAN_CACHE: OnceLock<Mutex<HashMap<Vec<(String, Option<u128>)>, SkillIndex>>> =
+static SKILL_SCAN_CACHE: OnceLock<Mutex<HashMap<Vec<(String, Option<u128>)>, Arc<SkillIndex>>>> =
     OnceLock::new();
 
-fn skill_scan_cache() -> &'static Mutex<HashMap<Vec<(String, Option<u128>)>, SkillIndex>> {
+fn skill_scan_cache() -> &'static Mutex<HashMap<Vec<(String, Option<u128>)>, Arc<SkillIndex>>> {
     SKILL_SCAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -74,11 +74,11 @@ pub struct SkillIndex {
 }
 
 impl SkillIndex {
-    pub fn scan(skill_dir: &Path) -> Self {
+    pub fn scan(skill_dir: &Path) -> Arc<Self> {
         let fingerprint = dir_fingerprint(skill_dir);
         if let Ok(cache) = skill_scan_cache().lock() {
             if let Some(cached) = cache.get(&fingerprint) {
-                return cached.clone();
+                return Arc::clone(cached);
             }
         }
 
@@ -124,9 +124,9 @@ impl SkillIndex {
                 seen.insert(name);
             }
         }
-        let index = Self { skills };
+        let index = Arc::new(Self { skills });
         if let Ok(mut cache) = skill_scan_cache().lock() {
-            cache.insert(fingerprint, index.clone());
+            cache.insert(fingerprint, Arc::clone(&index));
         }
         index
     }

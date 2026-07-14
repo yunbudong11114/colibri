@@ -2743,6 +2743,49 @@ fn memory_bootstrap_content_and_per_file_limits_match_python() {
 }
 
 #[test]
+fn memory_load_cache_reuses_arc_until_mtime_changes() {
+    use std::sync::Arc;
+
+    let temp = temp_dir("memory-arc-cache");
+    let mut config = AgentConfig::default();
+    config.memory.root = temp.join("memory");
+    fs::create_dir_all(&config.memory.root).unwrap();
+    fs::write(config.memory.root.join("MEMORY.md"), "fact one\n").unwrap();
+
+    let first = MemoryContext::new(config.clone()).load().unwrap();
+    let second = MemoryContext::new(config.clone()).load().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(first.text.contains("fact one"));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(config.memory.root.join("MEMORY.md"), "fact two\n").unwrap();
+    let third = MemoryContext::new(config).load().unwrap();
+    assert!(!Arc::ptr_eq(&first, &third));
+    assert!(third.text.contains("fact two"));
+}
+
+#[test]
+fn skill_scan_cache_reuses_arc_until_mtime_changes() {
+    use std::sync::Arc;
+
+    let temp = temp_dir("skill-arc-cache");
+    let skill_dir = temp.join("skills/release");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("SKILL.md"), "# Release\n\nfirst\n").unwrap();
+
+    let first = SkillIndex::scan(&temp.join("skills"));
+    let second = SkillIndex::scan(&temp.join("skills"));
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(first.get("release").unwrap().description, "Release");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(skill_dir.join("SKILL.md"), "# Release Notes\n\nsecond\n").unwrap();
+    let third = SkillIndex::scan(&temp.join("skills"));
+    assert!(!Arc::ptr_eq(&first, &third));
+    assert_eq!(third.get("release").unwrap().description, "Release Notes");
+}
+
+#[test]
 fn openai_tool_arguments_preserve_json_value_types_like_python() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     let server = start_http_server(|_base_url, _requests| {

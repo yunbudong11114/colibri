@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use crate::config::AgentConfig;
@@ -17,10 +17,10 @@ const MEMORY_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/M
 const INDEX_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/INDEX.md");
 const TOPIC_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/topics/sample.md");
 
-static MEMORY_LOAD_CACHE: OnceLock<Mutex<HashMap<MemoryCacheKey, MemoryLoadResult>>> =
+static MEMORY_LOAD_CACHE: OnceLock<Mutex<HashMap<MemoryCacheKey, Arc<MemoryLoadResult>>>> =
     OnceLock::new();
 
-fn memory_load_cache() -> &'static Mutex<HashMap<MemoryCacheKey, MemoryLoadResult>> {
+fn memory_load_cache() -> &'static Mutex<HashMap<MemoryCacheKey, Arc<MemoryLoadResult>>> {
     MEMORY_LOAD_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -51,13 +51,13 @@ impl MemoryContext {
         }
     }
 
-    pub fn load(&self) -> Result<MemoryLoadResult, String> {
+    pub fn load(&self) -> Result<Arc<MemoryLoadResult>, String> {
         if !self.config.memory.enabled {
-            return Ok(MemoryLoadResult {
+            return Ok(Arc::new(MemoryLoadResult {
                 text: String::new(),
                 files: Vec::new(),
                 truncated: false,
-            });
+            }));
         }
         let _ = bootstrap(&self.config);
         let cache_key = memory_cache_key(
@@ -66,7 +66,7 @@ impl MemoryContext {
         );
         if let Ok(cache) = memory_load_cache().lock() {
             if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached.clone());
+                return Ok(Arc::clone(cached));
             }
         }
 
@@ -92,22 +92,22 @@ impl MemoryContext {
             blocks.push(format!("[{}]\n{}", name, text));
         }
         let result = if files.is_empty() {
-            MemoryLoadResult {
+            Arc::new(MemoryLoadResult {
                 text: String::new(),
                 files,
                 truncated: false,
-            }
+            })
         } else {
             let (text, total_truncated) =
                 truncate(blocks.join("\n\n"), self.config.memory.max_recall_chars);
-            MemoryLoadResult {
+            Arc::new(MemoryLoadResult {
                 text,
                 files,
                 truncated: any_file_truncated || total_truncated,
-            }
+            })
         };
         if let Ok(mut cache) = memory_load_cache().lock() {
-            cache.insert(cache_key, result.clone());
+            cache.insert(cache_key, Arc::clone(&result));
         }
         Ok(result)
     }
