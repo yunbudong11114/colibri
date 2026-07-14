@@ -1,8 +1,8 @@
 # Colibri Gateway Thin Bus Design
 
 Date: 2026-07-14
-Status: Implemented
-Scope: Channel/gateway inbound–outbound shape, concurrency, media pipeline
+Status: Revision 2 ready for review
+Scope: Channel/gateway inbound-outbound shape, channel registration, permissions, concurrency, media pipeline
 Non-goals: cron, heartbeat, new chat channels, MCP, web dashboard
 
 ## 1. Goal
@@ -34,6 +34,7 @@ Preserve: permissions, transcript, steering, immediate dispatch, Python/Rust par
 - Telegram or other new channels in this change (registry must allow them later)
 - ZeroClaw-style async orchestrator, feature-gated channel zoo
 - Changing Weixin API semantics or removing steering
+- Implementing a second production chat service. A fake adapter proves the extension boundary.
 
 ## 4. Core types
 
@@ -83,6 +84,28 @@ Responsibilities:
 - Implement `send_text` / `send_media` for the outbound dispatcher
 - Provide `PermissionPrompter` factory for this channel (no gateway `isinstance`)
 
+Rust exposes a transport-neutral `GatewayChannel` trait from `channel.rs`:
+
+```text
+name(&self) -> &str
+poll_once(&self) -> Result<Vec<InboundEnvelope>, String>
+resolve_inbound_media(&self, &mut InboundEnvelope) -> Result<(), String>
+outbound_for(&self, &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String>
+permission_prompter(outbound, session_key, waiters) -> Option<Box<dyn PermissionPrompter>>
+```
+
+`WeixinGatewayChannel` implements that trait in `weixin.rs` and owns its
+poll cursor. `channel_registry.rs` is the only production composition root:
+it checks config and returns enabled `Arc<dyn GatewayChannel>` instances.
+The generic gateway receives that registry and never imports Weixin API
+functions, constructs a Weixin sink, or matches a channel name. The registry
+type is a `BTreeMap<String, Arc<dyn GatewayChannel>>`; duplicate names and an
+envelope whose `channel` differs from its adapter name are rejected.
+
+Python keeps the equivalent `Channel` protocol and `channels.registry`
+composition root. The protocol methods and lifecycle must remain behaviorally
+aligned with Rust even when language-specific signatures differ.
+
 ### 5.2 InboundRouter
 
 - Accepts envelopes from any channel adapter
@@ -98,6 +121,11 @@ Responsibilities:
 
 Default `max_concurrent_turns = 1` keeps RSS predictable on Cardputer while still giving **per-session ordering** and a clean path to raise to 2 later.
 
+The router tracks both pending and active work. `idle` means **both** counts
+are zero. A finite channel poller may end in tests or embedding scenarios;
+gateway shutdown must wait for router idle before closing sessions. A worker
+that already acquired an item is active even though `pending_len == 0`.
+
 ### 5.4 Session owner (take / put)
 
 Both Python and Rust:
@@ -109,6 +137,8 @@ Both Python and Rust:
 5. `put_back(key)` + `touch(key)`
 
 Idle eviction must not close a taken session. Python must match Rust here.
+Once a Rust worker takes a session, it must return the session to the cache on
+both successful and failed model submission paths before propagating an error.
 
 ### 5.5 OutboundDispatcher
 
@@ -131,10 +161,18 @@ The Weixin numeric reply flow is the shared **text-reply permission** pattern:
 
 1. Format a channel-neutral prompt (`format_channel_permission_prompt`)
 2. Send it through `OutboundSink` / `channel.send_text`
-3. Wait for the same sender's next text message (`prompt_for_text` / waiter map)
+3. Wait for the same channel session's next text message (`prompt_for_text` / waiter map)
 4. Parse `"0"…"5"` into a grant choice
 
 Any new chat channel that can round-trip plain text should reuse `ChannelTextPermissionPrompter` (Python/Rust). REPL keeps `ConsolePermissionPrompter`. Channels without interactive text may return `None` from `permission_prompter` and fall back to policy defaults / deny.
+
+Permission waiter identity is always the complete session key
+`"{channel}:{sender_id}"`, never a bare sender ID. Registration and inbound
+delivery must use the same helper. Thus `weixin:user-1` cannot consume a reply
+intended for `another:user-1`. Rust centralizes this in a
+`ChannelPermissionWaiters` wrapper so callers cannot accidentally choose a
+different map key. Python's channel-local waiter map also stores the complete
+session key for explicit parity and regression coverage.
 
 ## 6. Gateway surface cleanup
 
@@ -148,7 +186,15 @@ Instead:
 - Channel registry entry: `{ name, build(config), permission_prompter_factory, resolve_media(refs) → parts }`
 - Outbound sink obtained from dispatcher bound to `channel` + `recipient_id`
 
-Rust: move Weixin worker orchestration out of `cli.rs` into `gateway` + `channels`-equivalent modules mirroring Python.
+Rust module ownership:
+
+- `channel.rs`: generic envelopes, adapter trait, outbound trait, permission waiters/prompter
+- `channel_registry.rs`: config-to-adapter construction only
+- `weixin.rs`: Weixin polling, media resolution, outbound implementation
+- `gateway.rs`: generic poll scheduling, routing, sessions and turn workers
+
+Adding a production channel may add its module, config and one registry entry;
+it must not require a branch or match in `gateway.rs`.
 
 ## 7. Config
 
@@ -183,6 +229,8 @@ Reject unknown fields as today. No cron/heartbeat keys.
 | take/put + SteerHandle | Yes |
 | Outbound kinds text/ack/media/permission_prompt | Yes |
 | No Weixin type switch in generic gateway core | Yes |
+| Waiter key is `channel:sender_id` | Yes |
+| Finite pollers drain pending and active turns | Yes |
 | Transcript scoped metadata | Yes (existing) |
 
 ## 10. Migration / rollback
@@ -200,6 +248,12 @@ Reject unknown fields as today. No cron/heartbeat keys.
 5. Gateway core has no `isinstance(..., WeixinChannel)`.
 6. Existing Weixin/steering/permission unit tests updated and green on Python and Rust.
 7. No cron/heartbeat code paths.
+8. A fake Rust adapter can be registered and exercise inbound, outbound,
+   media-resolution and permission paths without editing generic gateway code.
+9. Two adapters with the same `sender_id` cannot consume each other's
+   permission response.
+10. Python `GatewayRunner.run()` does not return or close sessions while an
+    acquired turn is still active.
 
 ## 12. Implementation phases
 
