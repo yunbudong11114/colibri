@@ -130,16 +130,16 @@ def test_context_obeys_character_budget(tmp_path):
 def test_context_truncates_without_write_guidance_when_always_on_files_exceed_file_limits(tmp_path):
     root = tmp_path / "memory"
     root.mkdir(parents=True)
-    (root / "SOUL.md").write_text("S" * 410, encoding="utf-8")
-    (root / "USER.md").write_text("U" * 410, encoding="utf-8")
-    (root / "MEMORY.md").write_text("M" * 1210, encoding="utf-8")
+    (root / "SOUL.md").write_text("S" * 1010, encoding="utf-8")
+    (root / "USER.md").write_text("U" * 1010, encoding="utf-8")
+    (root / "MEMORY.md").write_text("M" * 2010, encoding="utf-8")
     context = MemoryContext(make_memory_config(tmp_path, max_recall_chars=4000))
 
     result = context.load()
 
-    assert "SOUL.md exceeds 400 characters" not in result.text
-    assert "USER.md exceeds 400 characters" not in result.text
-    assert "MEMORY.md exceeds 1200 characters" not in result.text
+    assert "SOUL.md exceeds 1000 characters" not in result.text
+    assert "USER.md exceeds 1000 characters" not in result.text
+    assert "MEMORY.md exceeds 2000 characters" not in result.text
     assert 'memory.write' not in result.text
     assert 'mode="replace"' not in result.text
     assert result.truncated

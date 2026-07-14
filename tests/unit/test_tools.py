@@ -543,18 +543,18 @@ def test_memory_write_appends_and_replaces_files(tmp_path):
     assert (tmp_path / "memory" / "INDEX.md").read_text(encoding="utf-8") == "# Memory Index\n"
 
 
-def test_memory_write_description_contains_format_routing_and_limit_guidance():
+def test_memory_write_description_contains_function_targets_and_format_guidance():
     description = ToolRegistry.from_config(AgentConfig.default()).get("memory.write").spec.description
 
     assert "SOUL.md" in description
-    assert "400 characters" in description
     assert "USER.md" in description
     assert "MEMORY.md" in description
-    assert "1200 characters" in description
     assert "INDEX.md" in description
     assert "topics/<name>.md" in description
     assert "type: soul|user|feedback|project|reference|system" in description
     assert "updated: YYYY-MM-DD" in description
+    assert "Choose SOUL.md" not in description
+    assert "Consolidate or replace" not in description
 
 
 def test_memory_write_warns_when_short_memory_file_exceeds_limit(tmp_path):
@@ -563,12 +563,12 @@ def test_memory_write_warns_when_short_memory_file_exceeds_limit(tmp_path):
     context = ToolContext(config=config, cwd=tmp_path)
 
     result = registry.run(
-        ToolCall(id="1", name="memory.write", arguments={"file": "SOUL.md", "content": "S" * 401}),
+        ToolCall(id="1", name="memory.write", arguments={"file": "SOUL.md", "content": "S" * 1001}),
         context,
     )
 
     assert result.ok
-    assert "SOUL.md exceeds 400 characters" in result.text
+    assert "SOUL.md exceeds 1000 characters" in result.text
     assert 'mode="replace"' in result.text
 
 

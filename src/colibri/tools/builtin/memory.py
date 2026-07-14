@@ -138,19 +138,13 @@ class MemoryWriteTool:
     spec = ToolSpec(
         name="memory.write",
         description=(
-            "Append to or replace a memory file. Memory files must use frontmatter:\n"
+            "Append to or replace an allowed memory file: SOUL.md, USER.md, MEMORY.md, INDEX.md, or topics/<name>.md. "
+            "Memory files must use frontmatter:\n"
             "---\n"
             "type: soul|user|feedback|project|reference|system\n"
             "description: one-line description\n"
             "updated: YYYY-MM-DD\n"
-            "---\n"
-            "Choose SOUL.md for Colibri persona, principles, expression style, and durable self-constraints; keep it under 400 characters. "
-            "Choose USER.md for user profile, preferences, and collaboration style; keep it under 400 characters. "
-            "Choose MEMORY.md for short stable general, project, or system facts; keep it under 1200 characters. "
-            "Choose INDEX.md for the searchable topic manifest used by memory.search. "
-            "Choose topics/<name>.md for detailed topic notes. "
-            "When creating or materially changing a topic file, also update INDEX.md with a searchable one-line pointer. "
-            "Consolidate or replace SOUL.md, USER.md, and MEMORY.md instead of appending forever."
+            "---"
         ),
         input_schema={
             "type": "object",

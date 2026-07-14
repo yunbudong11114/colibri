@@ -216,7 +216,7 @@ fn memory_tool_specs() -> Vec<serde_json::Value> {
         ),
         openai_tool(
             "memory.write",
-            "Append to or replace a memory file. Memory files must use frontmatter:\n---\ntype: soul|user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---\nChoose SOUL.md for Colibri persona, principles, expression style, and durable self-constraints; keep it under 400 characters. Choose USER.md for user profile, preferences, and collaboration style; keep it under 400 characters. Choose MEMORY.md for short stable general, project, or system facts; keep it under 1200 characters. Choose INDEX.md for the searchable topic manifest used by memory.search. Choose topics/<name>.md for detailed topic notes. When creating or materially changing a topic file, also update INDEX.md with a searchable one-line pointer. Consolidate or replace SOUL.md, USER.md, and MEMORY.md instead of appending forever.",
+            "Append to or replace an allowed memory file: SOUL.md, USER.md, MEMORY.md, INDEX.md, or topics/<name>.md. Memory files must use frontmatter:\n---\ntype: soul|user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---",
             serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"},"content":{"type":"string"},"mode":{"type":"string","enum":["append","replace"]}},"required":["content"]}),
         ),
     ]
@@ -687,9 +687,9 @@ fn memory_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolR
                 );
             }
             let limit = match label.as_str() {
-                "SOUL.md" => Some(400usize),
-                "USER.md" => Some(400usize),
-                "MEMORY.md" => Some(1200usize),
+                "SOUL.md" => Some(1000usize),
+                "USER.md" => Some(1000usize),
+                "MEMORY.md" => Some(2000usize),
                 _ => None,
             };
             if let Some(limit) = limit {

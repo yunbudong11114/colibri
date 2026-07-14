@@ -9,7 +9,7 @@ from colibri.textutil import bound_text
 
 
 ALWAYS_ON_MEMORY_FILES = ("SOUL.md", "USER.md", "MEMORY.md")
-ALWAYS_ON_MEMORY_FILE_LIMITS = {"SOUL.md": 400, "USER.md": 400, "MEMORY.md": 1200}
+ALWAYS_ON_MEMORY_FILE_LIMITS = {"SOUL.md": 1000, "USER.md": 1000, "MEMORY.md": 2000}
 _BOOTSTRAP_SENTINELS = ("SOUL.md", "USER.md", "MEMORY.md", "INDEX.md")
 _SAMPLE_MEMORY_FILES = ("SOUL.md", "USER.md", "MEMORY.md", "INDEX.md", "topics/sample.md")
 

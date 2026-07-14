@@ -2628,11 +2628,13 @@ fn tool_schemas_match_python_property_types_and_required_fields() {
     );
     let description = memory_write["function"]["description"].as_str().unwrap();
     assert!(description.contains("SOUL.md"));
-    assert!(description.contains("400 characters"));
     assert!(description.contains("USER.md"));
     assert!(description.contains("MEMORY.md"));
-    assert!(description.contains("1200 characters"));
+    assert!(description.contains("INDEX.md"));
+    assert!(description.contains("topics/<name>.md"));
     assert!(description.contains("type: soul|user|feedback|project|reference|system"));
+    assert!(!description.contains("Choose SOUL.md"));
+    assert!(!description.contains("Consolidate or replace"));
 }
 
 #[test]
@@ -2712,9 +2714,9 @@ fn memory_bootstrap_content_and_per_file_limits_match_python() {
     assert!(first.text.contains("Always-on memory:\n\n[SOUL.md]"));
     assert_eq!(first.files, vec!["SOUL.md", "USER.md", "MEMORY.md"]);
 
-    fs::write(config.memory.root.join("SOUL.md"), "S".repeat(500)).unwrap();
-    fs::write(config.memory.root.join("USER.md"), "U".repeat(500)).unwrap();
-    fs::write(config.memory.root.join("MEMORY.md"), "M".repeat(1_400)).unwrap();
+    fs::write(config.memory.root.join("SOUL.md"), "S".repeat(1_100)).unwrap();
+    fs::write(config.memory.root.join("USER.md"), "U".repeat(1_100)).unwrap();
+    fs::write(config.memory.root.join("MEMORY.md"), "M".repeat(2_100)).unwrap();
     let bounded = MemoryContext::new(config).load().unwrap();
     let soul_block = bounded
         .text
@@ -2733,9 +2735,9 @@ fn memory_bootstrap_content_and_per_file_limits_match_python() {
         .next()
         .unwrap();
     let memory_block = bounded.text.split("[MEMORY.md]\n").nth(1).unwrap();
-    assert_eq!(soul_block.chars().count(), 400);
-    assert_eq!(user_block.chars().count(), 400);
-    assert_eq!(memory_block.chars().count(), 1_200);
+    assert_eq!(soul_block.chars().count(), 1_000);
+    assert_eq!(user_block.chars().count(), 1_000);
+    assert_eq!(memory_block.chars().count(), 2_000);
     assert!(soul_block.ends_with("\n...[truncated]"));
     assert!(user_block.ends_with("\n...[truncated]"));
     assert!(memory_block.ends_with("\n...[truncated]"));

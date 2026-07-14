@@ -265,7 +265,7 @@ When `memory.enabled = true`, Colibri injects bounded always-on context from `SO
 
 If the memory directory is missing or contains no files, Colibri bootstraps sample `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, and `topics/sample.md` files on first memory load. Existing memory files are never overwritten.
 
-Keep `SOUL.md` under 400 characters, `USER.md` under 400 characters, and `MEMORY.md` under 1200 characters. If a `memory.write` call leaves any of them over its limit, the tool result asks the model to consolidate it and replace the file.
+Keep `SOUL.md` under 1000 characters, `USER.md` under 1000 characters, and `MEMORY.md` under 2000 characters. If a `memory.write` call leaves any of them over its limit, the tool result asks the model to consolidate it and replace the file.
 
 ## Local Skills
 

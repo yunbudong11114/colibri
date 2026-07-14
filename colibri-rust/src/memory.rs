@@ -7,9 +7,9 @@ use std::time::UNIX_EPOCH;
 use crate::config::AgentConfig;
 
 const TRUNCATED_SUFFIX: &str = "\n...[truncated]";
-const SOUL_LIMIT: usize = 400;
-const USER_LIMIT: usize = 400;
-const MEMORY_LIMIT: usize = 1200;
+const SOUL_LIMIT: usize = 1000;
+const USER_LIMIT: usize = 1000;
+const MEMORY_LIMIT: usize = 2000;
 const BOOTSTRAP_SENTINELS: &[&str] = &["SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"];
 const SOUL_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/SOUL.md");
 const USER_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/USER.md");

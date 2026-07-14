@@ -535,7 +535,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_memory_search_only_searches_index_lines_with_limit",
             "test_memory_search_does_not_scan_topic_content",
             "test_memory_write_appends_and_replaces_files",
-            "test_memory_write_description_contains_format_routing_and_limit_guidance",
+            "test_memory_write_description_contains_function_targets_and_format_guidance",
             "test_memory_write_warns_when_short_memory_file_exceeds_limit",
             "test_memory_write_is_not_read_only",
             "test_skill_read_is_read_only",

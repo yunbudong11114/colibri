@@ -41,9 +41,9 @@ File roles:
 
 | File | Role | Loaded automatically |
 | --- | --- | --- |
-| `SOUL.md` | Colibri persona, principles, expression style, and self-constraints, max 400 chars | yes |
-| `USER.md` | User profile, preferences, collaboration style, max 400 chars | yes |
-| `MEMORY.md` | Stable long-term facts and project-level context, max 1200 chars | yes |
+| `SOUL.md` | Colibri persona, principles, expression style, and self-constraints, max 1000 chars | yes |
+| `USER.md` | User profile, preferences, collaboration style, max 1000 chars | yes |
+| `MEMORY.md` | Stable long-term facts and project-level context, max 2000 chars | yes |
 | `INDEX.md` | Short manifest of topic files | no, read through tools |
 | `topics/*.md` | Detailed topic memories | no, read through tools |
 
@@ -283,12 +283,8 @@ Write tool. Accepts:
 
 The `memory.write` tool description must include:
 
-- supported memory file roles:
-  - `SOUL.md`: Colibri persona, principles, expression style, and self-constraints, max 400 characters,
-  - `USER.md`: user profile, preferences, collaboration style, max 400 characters,
-  - `MEMORY.md`: stable general, project, or system facts, max 1200 characters,
-  - `INDEX.md`: searchable topic manifest used by `memory.search`,
-  - `topics/<name>.md`: detailed topic notes;
+- the tool function: append to or replace an allowed memory file,
+- allowed targets: `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or `topics/<name>.md`,
 - frontmatter format:
 
 ```markdown
@@ -299,13 +295,9 @@ updated: YYYY-MM-DD
 ---
 ```
 
-- routing guidance: choose `SOUL.md` for persona and durable behavior constraints, `USER.md` for user preferences, `MEMORY.md` for short stable facts, and a topic file for longer details;
-- topic maintenance guidance: whenever a topic file is created or materially changed, also update `INDEX.md` with a searchable one-line pointer;
-- concise-memory guidance: consolidate or replace `SOUL.md`/`USER.md`/`MEMORY.md` instead of appending forever.
-
 When writing `topics/<name>.md`, the model must also update `INDEX.md` so future searches can discover the topic. The tool should remind the model about this in the result text for topic writes, but the model owns the actual index entry wording.
 
-When `memory.write` detects that a write leaves `SOUL.md` over 400 characters, `USER.md` over 400 characters, or `MEMORY.md` over 1200 characters, the tool should still complete the write, but return an additional maintenance prompt telling the model to summarize/consolidate the file and call `memory.write` again with `mode="replace"`.
+When `memory.write` detects that a write leaves `SOUL.md` over 1000 characters, `USER.md` over 1000 characters, or `MEMORY.md` over 2000 characters, the tool should still complete the write, but return an additional maintenance prompt telling the model to summarize/consolidate the file and call `memory.write` again with `mode="replace"`.
 
 Writes are permission-gated by the existing dynamic permission system.
 
@@ -315,9 +307,9 @@ Automatic memory injection must obey `memory.max_recall_chars`.
 
 Suggested per-file split:
 
-- `SOUL.md`: max 400 characters,
-- `USER.md`: max 400 characters,
-- `MEMORY.md`: max 1200 characters,
+- `SOUL.md`: max 1000 characters,
+- `USER.md`: max 1000 characters,
+- `MEMORY.md`: max 2000 characters,
 - if one file is missing or short, the total message still obeys `memory.max_recall_chars`.
 
 Topic files are never injected automatically. Tool results already obey `tools.max_result_chars`.
