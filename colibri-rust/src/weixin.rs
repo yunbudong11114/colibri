@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,10 +11,15 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use serde_json::json;
 
+use crate::channel::{
+    ChannelPermissionWaiters, ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope,
+    OutboundSink,
+};
 use crate::config::AgentConfig;
 use crate::http::{json_string_field, request_binary, request_json};
 use crate::messages::MediaPart;
 use crate::model::escape_json;
+use crate::permissions::PermissionPrompter;
 use crate::terminal_qr::render_terminal_qr;
 use crate::tools::content_type_for_path;
 
@@ -24,6 +31,7 @@ const WEIXIN_DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c
 const MEDIA_TEMP_DIR: &str = "/tmp/colibri/media";
 const MEDIA_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 const MEDIA_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+const CHANNEL_PERMISSION_TIMEOUT_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug)]
 pub struct WeixinAuthResult {
@@ -43,6 +51,117 @@ pub struct InboundWeixinMessage {
     pub media: Vec<MediaPart>,
     /// Raw Weixin media items deferred until the worker turn (keeps poll RSS/latency low).
     pub pending_media_items: Vec<serde_json::Value>,
+}
+
+pub struct WeixinGatewayChannel {
+    config: Arc<AgentConfig>,
+    get_updates_buf: Mutex<String>,
+}
+
+impl WeixinGatewayChannel {
+    pub fn new(config: AgentConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            get_updates_buf: Mutex::new(String::new()),
+        }
+    }
+}
+
+impl GatewayChannel for WeixinGatewayChannel {
+    fn name(&self) -> &str {
+        "weixin"
+    }
+
+    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+        let mut cursor = self
+            .get_updates_buf
+            .lock()
+            .map_err(|_| "weixin poll cursor lock poisoned".to_string())?;
+        let (next_cursor, messages) = poll_weixin_once(&self.config, &cursor)?;
+        *cursor = next_cursor;
+        Ok(messages.into_iter().map(envelope_from_weixin).collect())
+    }
+
+    fn resolve_inbound_media(&self, envelope: &mut InboundEnvelope) -> Result<(), String> {
+        ensure_weixin_envelope(envelope)?;
+        let mut message = InboundWeixinMessage {
+            sender_id: envelope.sender_id.clone(),
+            text: envelope.text.clone(),
+            context_token: envelope.context_token().to_string(),
+            message_id: envelope.message_id.clone(),
+            media: std::mem::take(&mut envelope.media),
+            pending_media_items: std::mem::take(&mut envelope.media_refs),
+        };
+        resolve_inbound_media(&self.config, &mut message)?;
+        envelope.media = message.media;
+        Ok(())
+    }
+
+    fn outbound_for(&self, envelope: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String> {
+        ensure_weixin_envelope(envelope)?;
+        Ok(Arc::new(WeixinOutboundSink {
+            config: Arc::clone(&self.config),
+            sender_id: envelope.sender_id.clone(),
+            context_token: envelope.context_token().to_string(),
+        }))
+    }
+
+    fn permission_prompter(
+        &self,
+        outbound: Arc<dyn OutboundSink>,
+        session_key: String,
+        waiters: Arc<ChannelPermissionWaiters>,
+    ) -> Option<Box<dyn PermissionPrompter>> {
+        Some(Box::new(ChannelTextPermissionPrompter::new(
+            outbound,
+            session_key,
+            waiters,
+            CHANNEL_PERMISSION_TIMEOUT_SECONDS,
+        )))
+    }
+}
+
+struct WeixinOutboundSink {
+    config: Arc<AgentConfig>,
+    sender_id: String,
+    context_token: String,
+}
+
+impl OutboundSink for WeixinOutboundSink {
+    fn send_text(&self, text: &str) -> Result<(), String> {
+        send_weixin_text(&self.config, &self.sender_id, &self.context_token, text)
+    }
+
+    fn send_media(&self, media: &MediaPart) -> Result<(), String> {
+        send_weixin_media(&self.config, &self.sender_id, &self.context_token, media)
+    }
+}
+
+fn envelope_from_weixin(message: InboundWeixinMessage) -> InboundEnvelope {
+    let mut context = BTreeMap::new();
+    if !message.context_token.is_empty() {
+        context.insert("context_token".to_string(), message.context_token);
+    }
+    InboundEnvelope {
+        channel: "weixin".to_string(),
+        sender_id: message.sender_id,
+        text: message.text,
+        message_id: message.message_id,
+        media: message.media,
+        media_refs: message.pending_media_items,
+        context,
+    }
+}
+
+fn ensure_weixin_envelope(envelope: &InboundEnvelope) -> Result<(), String> {
+    if envelope.channel == "weixin" {
+        Ok(())
+    } else {
+        Err(format!(
+            "channel adapter mismatch: expected weixin, got {}",
+            envelope.channel
+        ))
+    }
 }
 
 pub fn parse_weixin_updates(

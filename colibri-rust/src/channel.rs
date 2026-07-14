@@ -28,7 +28,10 @@ impl InboundEnvelope {
     }
 
     pub fn context_token(&self) -> &str {
-        self.context.get("context_token").map(String::as_str).unwrap_or("")
+        self.context
+            .get("context_token")
+            .map(String::as_str)
+            .unwrap_or("")
     }
 }
 
@@ -46,24 +49,108 @@ pub trait OutboundSink: Send + Sync {
     }
 }
 
+pub trait GatewayChannel: Send + Sync {
+    fn name(&self) -> &str;
+    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String>;
+    fn resolve_inbound_media(&self, envelope: &mut InboundEnvelope) -> Result<(), String>;
+    fn outbound_for(&self, envelope: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String>;
+
+    fn permission_prompter(
+        &self,
+        _outbound: Arc<dyn OutboundSink>,
+        _session_key: String,
+        _waiters: Arc<ChannelPermissionWaiters>,
+    ) -> Option<Box<dyn PermissionPrompter>> {
+        None
+    }
+}
+
+pub type ChannelRegistry = BTreeMap<String, Arc<dyn GatewayChannel>>;
+
+pub fn build_channel_registry(
+    channels: Vec<Arc<dyn GatewayChannel>>,
+) -> Result<ChannelRegistry, String> {
+    let mut registry = BTreeMap::new();
+    for channel in channels {
+        let name = channel.name().to_string();
+        if registry.contains_key(&name) {
+            return Err(format!("duplicate gateway channel: {name}"));
+        }
+        registry.insert(name, channel);
+    }
+    Ok(registry)
+}
+
+#[derive(Default)]
+pub struct ChannelPermissionWaiters {
+    inner: Mutex<ChannelPermissionWaiterState>,
+}
+
+#[derive(Default)]
+struct ChannelPermissionWaiterState {
+    next_id: u64,
+    entries: HashMap<String, (u64, mpsc::SyncSender<String>)>,
+}
+
+impl ChannelPermissionWaiters {
+    fn register(&self, session_key: &str) -> (u64, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.next_id = state.next_id.wrapping_add(1);
+        let waiter_id = state.next_id;
+        state
+            .entries
+            .insert(session_key.to_string(), (waiter_id, tx));
+        (waiter_id, rx)
+    }
+
+    fn remove(&self, session_key: &str, waiter_id: u64) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if state
+            .entries
+            .get(session_key)
+            .map(|(current_id, _)| *current_id == waiter_id)
+            .unwrap_or(false)
+        {
+            state.entries.remove(session_key);
+        }
+    }
+
+    pub fn deliver(&self, session_key: &str, text: &str) -> bool {
+        let cleaned = text.trim();
+        if cleaned.is_empty() {
+            return false;
+        }
+        let waiter = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|state| state.entries.get(session_key).map(|(_, tx)| tx.clone()));
+        let Some(waiter) = waiter else {
+            return false;
+        };
+        waiter.try_send(cleaned.to_string()).is_ok()
+    }
+}
+
 /// Transport-agnostic permission UX: prompt on channel, wait for numeric text reply.
 pub struct ChannelTextPermissionPrompter {
     outbound: Arc<dyn OutboundSink>,
-    sender_id: String,
-    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    session_key: String,
+    waiters: Arc<ChannelPermissionWaiters>,
     timeout_seconds: u64,
 }
 
 impl ChannelTextPermissionPrompter {
     pub fn new(
         outbound: Arc<dyn OutboundSink>,
-        sender_id: String,
-        waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+        session_key: String,
+        waiters: Arc<ChannelPermissionWaiters>,
         timeout_seconds: u64,
     ) -> Self {
         Self {
             outbound,
-            sender_id,
+            session_key,
             waiters,
             timeout_seconds,
         }
@@ -72,47 +159,21 @@ impl ChannelTextPermissionPrompter {
 
 impl PermissionPrompter for ChannelTextPermissionPrompter {
     fn confirm(&mut self, request: PermissionRequest) -> String {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.insert(self.sender_id.clone(), tx);
-        }
+        let (waiter_id, rx) = self.waiters.register(&self.session_key);
         let prompt = format_channel_permission_prompt(&request);
         if self.outbound.send_permission_prompt(&prompt).is_err() {
-            if let Ok(mut waiters) = self.waiters.lock() {
-                waiters.remove(&self.sender_id);
-            }
+            self.waiters.remove(&self.session_key, waiter_id);
             return "0".to_string();
         }
         let reply = rx
             .recv_timeout(Duration::from_secs(self.timeout_seconds))
             .ok();
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.remove(&self.sender_id);
-        }
+        self.waiters.remove(&self.session_key, waiter_id);
         reply
             .as_deref()
             .map(parse_permission_choice)
             .unwrap_or_else(|| "0".to_string())
     }
-}
-
-pub fn deliver_text_waiter(
-    waiters: &Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
-    sender_id: &str,
-    text: &str,
-) -> bool {
-    let cleaned = text.trim();
-    if cleaned.is_empty() {
-        return false;
-    }
-    let waiter = waiters
-        .lock()
-        .ok()
-        .and_then(|map| map.get(sender_id).cloned());
-    let Some(waiter) = waiter else {
-        return false;
-    };
-    waiter.try_send(cleaned.to_string()).is_ok()
 }
 
 pub fn format_channel_permission_prompt(request: &PermissionRequest) -> String {
@@ -158,11 +219,7 @@ pub fn format_channel_permission_prompt(request: &PermissionRequest) -> String {
 }
 
 pub fn parse_permission_choice(reply: &str) -> String {
-    let first = reply
-        .trim()
-        .split_whitespace()
-        .next()
-        .unwrap_or("0");
+    let first = reply.trim().split_whitespace().next().unwrap_or("0");
     if matches!(first, "0" | "1" | "2" | "3" | "4" | "5") {
         first.to_string()
     } else {

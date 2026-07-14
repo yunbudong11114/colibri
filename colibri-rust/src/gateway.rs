@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -7,9 +7,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::channel::{
-    deliver_text_waiter, ChannelTextPermissionPrompter, InboundEnvelope, OutboundSink,
-};
+use crate::channel::{ChannelPermissionWaiters, ChannelRegistry, GatewayChannel, InboundEnvelope};
+use crate::channel_registry::build_enabled_channels;
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
 use crate::model::{build_model, ModelClient};
@@ -17,10 +16,6 @@ use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::steering::SteerHandle;
 use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
-use crate::weixin::{
-    poll_weixin_once, resolve_inbound_media, send_weixin_media, send_weixin_text,
-    InboundWeixinMessage,
-};
 
 #[derive(Clone, Debug)]
 pub struct GatewayStatus {
@@ -622,128 +617,45 @@ impl<T> InboundRouter<T> {
     }
 }
 
-
-/// Serial outbound path for one Weixin recipient.
-struct WeixinOutboundSink {
-    config: Arc<AgentConfig>,
-    sender_id: String,
-    context_token: String,
-}
-
-impl OutboundSink for WeixinOutboundSink {
-    fn send_text(&self, text: &str) -> Result<(), String> {
-        send_weixin_text(&self.config, &self.sender_id, &self.context_token, text)
-    }
-
-    fn send_media(&self, media: &MediaPart) -> Result<(), String> {
-        send_weixin_media(
-            &self.config,
-            &self.sender_id,
-            &self.context_token,
-            media,
-        )
-    }
-}
-
-fn envelope_from_weixin(message: InboundWeixinMessage) -> InboundEnvelope {
-    let mut context = BTreeMap::new();
-    if !message.context_token.is_empty() {
-        context.insert("context_token".to_string(), message.context_token);
-    }
-    InboundEnvelope {
-        channel: "weixin".to_string(),
-        sender_id: message.sender_id,
-        text: message.text,
-        message_id: message.message_id,
-        media: message.media,
-        media_refs: message.pending_media_items,
-        context,
-    }
-}
-
-fn resolve_envelope_media(config: &AgentConfig, envelope: &mut InboundEnvelope) -> Result<(), String> {
-    match envelope.channel.as_str() {
-        "weixin" => {
-            let mut message = InboundWeixinMessage {
-                sender_id: envelope.sender_id.clone(),
-                text: envelope.text.clone(),
-                context_token: envelope.context_token().to_string(),
-                message_id: envelope.message_id.clone(),
-                media: std::mem::take(&mut envelope.media),
-                pending_media_items: std::mem::take(&mut envelope.media_refs),
-            };
-            resolve_inbound_media(config, &mut message)?;
-            envelope.media = message.media;
-            Ok(())
-        }
-        other => Err(format!("unknown channel for media resolve: {other}")),
-    }
-}
-
-fn outbound_for(
-    config: Arc<AgentConfig>,
-    envelope: &InboundEnvelope,
-) -> Result<Arc<dyn OutboundSink>, String> {
-    match envelope.channel.as_str() {
-        "weixin" => Ok(Arc::new(WeixinOutboundSink {
-            config,
-            sender_id: envelope.sender_id.clone(),
-            context_token: envelope.context_token().to_string(),
-        })),
-        other => Err(format!("unknown channel for outbound: {other}")),
-    }
-}
-
-fn channel_enabled(config: &AgentConfig, name: &str) -> bool {
-    config.gateway.enabled_channels.iter().any(|item| item == name)
-        && match name {
-            "weixin" => config.channels_weixin.enabled,
-            _ => false,
-        }
-}
-
 /// Foreground gateway: enabled channel pollers → inbound router → turn workers.
 pub fn run_gateway(config: AgentConfig) -> Result<i32, String> {
-    let enabled: Vec<&str> = ["weixin"]
-        .into_iter()
-        .filter(|name| channel_enabled(&config, name))
-        .collect();
-    if enabled.is_empty() {
+    let channels = Arc::new(build_enabled_channels(&config)?);
+    if channels.is_empty() {
         return Err("No gateway channels are enabled".to_string());
     }
     let max_pending = config.gateway.max_pending_inbound.max(1);
     let max_turns = config.gateway.max_concurrent_turns.max(1);
     let router = Arc::new(InboundRouter::new(max_pending));
     let (error_tx, error_rx) = mpsc::channel::<String>();
-    let waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let waiters = Arc::new(ChannelPermissionWaiters::default());
     let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config.clone())?));
     let mut workers = Vec::with_capacity(max_turns);
     for _ in 0..max_turns {
-        let worker_config = config.clone();
         let worker_router = Arc::clone(&router);
+        let worker_channels = Arc::clone(&channels);
         let worker_waiters = Arc::clone(&waiters);
         let worker_sessions = Arc::clone(&sessions);
         let worker_error_tx = error_tx.clone();
         workers.push(thread::spawn(move || {
-            if let Err(error) =
-                run_turn_worker(worker_config, worker_router, worker_waiters, worker_sessions)
-            {
+            if let Err(error) = run_turn_worker(
+                worker_router,
+                worker_channels,
+                worker_waiters,
+                worker_sessions,
+            ) {
                 let _ = worker_error_tx.send(error);
             }
         }));
     }
-    // Channel poll loops. Add new adapters by spawning another poller that enqueues InboundEnvelope.
     let mut pollers = Vec::new();
-    if enabled.contains(&"weixin") {
-        let poll_config = config.clone();
+    for channel in channels.values().cloned() {
         let poll_router = Arc::clone(&router);
         let poll_waiters = Arc::clone(&waiters);
         let poll_sessions = Arc::clone(&sessions);
         let poll_error_tx = error_tx.clone();
         pollers.push(thread::spawn(move || {
             if let Err(error) =
-                run_weixin_poll_loop(poll_config, poll_router, poll_waiters, poll_sessions)
+                run_channel_poll_loop(channel, poll_router, poll_waiters, poll_sessions)
             {
                 let _ = poll_error_tx.send(error);
             }
@@ -773,25 +685,26 @@ pub fn run_gateway(config: AgentConfig) -> Result<i32, String> {
     result
 }
 
-fn run_weixin_poll_loop(
-    config: AgentConfig,
+fn run_channel_poll_loop(
+    channel: Arc<dyn GatewayChannel>,
     router: Arc<InboundRouter<InboundEnvelope>>,
-    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    waiters: Arc<ChannelPermissionWaiters>,
     sessions: Arc<Mutex<GatewaySessionCache>>,
 ) -> Result<(), String> {
-    let mut get_updates_buf = String::new();
     loop {
-        let (next_buf, messages) = poll_weixin_once(&config, &get_updates_buf)?;
-        get_updates_buf = next_buf;
-        for message in messages {
-            let envelope = envelope_from_weixin(message);
-            if envelope.text_only()
-                && deliver_text_waiter(&waiters, &envelope.sender_id, &envelope.text)
-            {
+        for envelope in channel.poll_once()? {
+            if envelope.channel != channel.name() {
+                return Err(format!(
+                    "channel adapter mismatch: expected {}, got {}",
+                    channel.name(),
+                    envelope.channel
+                ));
+            }
+            let key = envelope.session_key();
+            if envelope.text_only() && waiters.deliver(&key, &envelope.text) {
                 continue;
             }
             if envelope.text_only() {
-                let key = envelope.session_key();
                 let steered = sessions
                     .lock()
                     .map_err(|_| "gateway session cache lock poisoned".to_string())?
@@ -800,7 +713,6 @@ fn run_weixin_poll_loop(
                     continue;
                 }
             }
-            let key = envelope.session_key();
             if router.try_enqueue(key, envelope).is_err() {
                 eprintln!("[colibri] inbound queue full; dropping message");
             }
@@ -809,16 +721,19 @@ fn run_weixin_poll_loop(
 }
 
 fn run_turn_worker(
-    config: AgentConfig,
     router: Arc<InboundRouter<InboundEnvelope>>,
-    waiters: Arc<Mutex<HashMap<String, mpsc::SyncSender<String>>>>,
+    channels: Arc<ChannelRegistry>,
+    waiters: Arc<ChannelPermissionWaiters>,
     sessions: Arc<Mutex<GatewaySessionCache>>,
 ) -> Result<(), String> {
-    let config = Arc::new(config);
     while let Some((key, mut envelope)) = router.acquire() {
         let turn_result = (|| -> Result<(), String> {
-            resolve_envelope_media(&config, &mut envelope)?;
-            let outbound = outbound_for(Arc::clone(&config), &envelope)?;
+            let channel = channels
+                .get(&envelope.channel)
+                .cloned()
+                .ok_or_else(|| format!("unknown gateway channel: {}", envelope.channel))?;
+            channel.resolve_inbound_media(&mut envelope)?;
+            let outbound = channel.outbound_for(&envelope)?;
             let media_outbound = Arc::clone(&outbound);
             let media_sender = Arc::new(move |media| media_outbound.send_media(&media));
             let mut session = {
@@ -839,17 +754,23 @@ fn run_turn_worker(
             session.set_steer_notifier(Some(Arc::new(move |ack| {
                 ack_outbound.send_ack(&ack);
             })));
-            let mut prompter = ChannelTextPermissionPrompter::new(
+            let prompter = channel.permission_prompter(
                 Arc::clone(&outbound),
-                envelope.sender_id.clone(),
+                key.clone(),
                 Arc::clone(&waiters),
-                300,
             );
-            let response = session.submit_with_media_and_permission_prompter(
-                &envelope.text,
-                envelope.media,
-                Some(&mut prompter),
-            )?;
+            let response_result = match prompter {
+                Some(mut prompter) => session.submit_with_media_and_permission_prompter(
+                    &envelope.text,
+                    envelope.media,
+                    Some(prompter.as_mut()),
+                ),
+                None => session.submit_with_media_and_permission_prompter(
+                    &envelope.text,
+                    envelope.media,
+                    None,
+                ),
+            };
             {
                 let mut guard = sessions
                     .lock()
@@ -857,6 +778,7 @@ fn run_turn_worker(
                 guard.put_back(&key, session);
                 guard.touch(&key);
             }
+            let response = response_result?;
             if !response.text.trim().is_empty() {
                 outbound.send_text(&response.text)?;
             }
@@ -870,7 +792,98 @@ fn run_turn_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::InboundRouter;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{run_channel_poll_loop, run_turn_worker, GatewaySessionCache, InboundRouter};
+    use crate::channel::{
+        build_channel_registry, ChannelPermissionWaiters, GatewayChannel, InboundEnvelope,
+        OutboundSink,
+    };
+    use crate::config::AgentConfig;
+    use crate::messages::MediaPart;
+
+    struct RecordingSink {
+        texts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl OutboundSink for RecordingSink {
+        fn send_text(&self, text: &str) -> Result<(), String> {
+            self.texts.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+
+        fn send_media(&self, _media: &MediaPart) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct FakeChannel {
+        texts: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct MismatchedChannel {
+        polled: AtomicBool,
+    }
+
+    impl GatewayChannel for MismatchedChannel {
+        fn name(&self) -> &str {
+            "expected"
+        }
+
+        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+            if self.polled.swap(true, Ordering::SeqCst) {
+                return Err("poll stopped".to_string());
+            }
+            Ok(vec![InboundEnvelope {
+                channel: "wrong".to_string(),
+                sender_id: "user-1".to_string(),
+                text: "hello".to_string(),
+                message_id: "message-1".to_string(),
+                media: Vec::new(),
+                media_refs: Vec::new(),
+                context: BTreeMap::new(),
+            }])
+        }
+
+        fn resolve_inbound_media(&self, _envelope: &mut InboundEnvelope) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn outbound_for(
+            &self,
+            _envelope: &InboundEnvelope,
+        ) -> Result<Arc<dyn OutboundSink>, String> {
+            Err("unused".to_string())
+        }
+    }
+
+    impl GatewayChannel for FakeChannel {
+        fn name(&self) -> &str {
+            "other"
+        }
+
+        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+            Ok(Vec::new())
+        }
+
+        fn resolve_inbound_media(&self, envelope: &mut InboundEnvelope) -> Result<(), String> {
+            envelope
+                .context
+                .insert("resolved".to_string(), "yes".to_string());
+            Ok(())
+        }
+
+        fn outbound_for(
+            &self,
+            _envelope: &InboundEnvelope,
+        ) -> Result<Arc<dyn OutboundSink>, String> {
+            Ok(Arc::new(RecordingSink {
+                texts: Arc::clone(&self.texts),
+            }))
+        }
+    }
 
     #[test]
     fn inbound_router_global_bound_and_fair_acquire() {
@@ -904,5 +917,59 @@ mod tests {
         let (key, value) = router.acquire().unwrap();
         assert_eq!((key.as_str(), value), ("a", 2));
         router.release("a");
+    }
+
+    #[test]
+    fn generic_turn_worker_dispatches_fake_channel_without_transport_branch() {
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let channel: Arc<dyn GatewayChannel> = Arc::new(FakeChannel {
+            texts: Arc::clone(&texts),
+        });
+        let channels = Arc::new(build_channel_registry(vec![channel]).unwrap());
+        let router = Arc::new(InboundRouter::new(1));
+        router
+            .try_enqueue(
+                "other:user-1".to_string(),
+                InboundEnvelope {
+                    channel: "other".to_string(),
+                    sender_id: "user-1".to_string(),
+                    text: "hello".to_string(),
+                    message_id: "message-1".to_string(),
+                    media: Vec::new(),
+                    media_refs: Vec::new(),
+                    context: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        router.close();
+        let waiters = Arc::new(ChannelPermissionWaiters::default());
+        let mut config = AgentConfig::default();
+        config.session.transcript = false;
+        config.session.restore_transcript = false;
+        let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config).unwrap()));
+
+        run_turn_worker(router, channels, waiters, sessions).unwrap();
+
+        assert_eq!(*texts.lock().unwrap(), vec!["fake: hello"]);
+    }
+
+    #[test]
+    fn generic_poll_loop_rejects_envelope_from_wrong_channel() {
+        let channel: Arc<dyn GatewayChannel> = Arc::new(MismatchedChannel {
+            polled: AtomicBool::new(false),
+        });
+        let router = Arc::new(InboundRouter::new(1));
+        let waiters = Arc::new(ChannelPermissionWaiters::default());
+        let mut config = AgentConfig::default();
+        config.session.transcript = false;
+        config.session.restore_transcript = false;
+        let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config).unwrap()));
+
+        let error = run_channel_poll_loop(channel, router, waiters, sessions).unwrap_err();
+
+        assert_eq!(
+            error,
+            "channel adapter mismatch: expected expected, got wrong"
+        );
     }
 }

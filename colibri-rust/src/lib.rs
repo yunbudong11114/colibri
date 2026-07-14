@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod channel_registry;
 pub mod cli;
 pub mod config;
 pub mod console;

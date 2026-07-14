@@ -3,9 +3,14 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 
+use colibri_rust::channel::{
+    build_channel_registry, parse_permission_choice, ChannelPermissionWaiters,
+    ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope, OutboundSink,
+};
+use colibri_rust::channel_registry::build_enabled_channels;
 use colibri_rust::cli::{run_steering_pump, run_with_io};
 use colibri_rust::config::{expand_user_path, AgentConfig};
 use colibri_rust::gateway::{format_gateway_status, GatewaySessionCache, GatewayStatus};
@@ -28,10 +33,10 @@ use colibri_rust::steering::{
 use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
-use colibri_rust::channel::parse_permission_choice;
 use colibri_rust::weixin::{
     cleanup_media_directory, decrypt_aes_ecb, download_inbound_media, encrypt_aes_ecb,
     parse_weixin_updates, resolve_inbound_media, send_weixin_media, send_weixin_text,
+    WeixinGatewayChannel,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -3077,6 +3082,196 @@ fn weixin_permission_numeric_choices_match_python() {
     ] {
         assert_eq!(parse_permission_choice(reply), expected);
     }
+}
+
+struct PermissionPromptSignal {
+    prompted: mpsc::Sender<()>,
+}
+
+impl OutboundSink for PermissionPromptSignal {
+    fn send_text(&self, _text: &str) -> Result<(), String> {
+        self.prompted.send(()).map_err(|error| error.to_string())
+    }
+
+    fn send_media(&self, _media: &MediaPart) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn shell_permission_request() -> PermissionRequest {
+    PermissionRequest {
+        tool_name: "shell.run".to_string(),
+        arguments: BTreeMap::from([("command".to_string(), "pwd".to_string())]),
+        read_only: false,
+        subject_kind: "shell".to_string(),
+        shell_command: Some("pwd".to_string()),
+        shell_executable: Some("pwd".to_string()),
+        file_path: None,
+        file_root: None,
+    }
+}
+
+#[test]
+fn channel_permission_waiters_isolate_same_sender_across_channels() {
+    let waiters = Arc::new(ChannelPermissionWaiters::default());
+    let (prompted_tx, prompted_rx) = mpsc::channel();
+
+    let wx_waiters = Arc::clone(&waiters);
+    let wx_outbound: Arc<dyn OutboundSink> = Arc::new(PermissionPromptSignal {
+        prompted: prompted_tx.clone(),
+    });
+    let wx_thread = thread::spawn(move || {
+        let mut prompter = ChannelTextPermissionPrompter::new(
+            wx_outbound,
+            "weixin:user-1".to_string(),
+            wx_waiters,
+            2,
+        );
+        prompter.confirm(shell_permission_request())
+    });
+
+    let other_waiters = Arc::clone(&waiters);
+    let other_outbound: Arc<dyn OutboundSink> = Arc::new(PermissionPromptSignal {
+        prompted: prompted_tx,
+    });
+    let other_thread = thread::spawn(move || {
+        let mut prompter = ChannelTextPermissionPrompter::new(
+            other_outbound,
+            "other:user-1".to_string(),
+            other_waiters,
+            2,
+        );
+        prompter.confirm(shell_permission_request())
+    });
+
+    prompted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    prompted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(waiters.deliver("weixin:user-1", "1"));
+    assert!(!other_thread.is_finished());
+    assert!(waiters.deliver("other:user-1", "0"));
+
+    assert_eq!(wx_thread.join().unwrap(), "1");
+    assert_eq!(other_thread.join().unwrap(), "0");
+}
+
+struct FakeGatewayChannel;
+
+impl GatewayChannel for FakeGatewayChannel {
+    fn name(&self) -> &str {
+        "other"
+    }
+
+    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+        Ok(vec![InboundEnvelope {
+            channel: self.name().to_string(),
+            sender_id: "user-1".to_string(),
+            text: "hello".to_string(),
+            message_id: "message-1".to_string(),
+            media: Vec::new(),
+            media_refs: vec![serde_json::json!({"fake": true})],
+            context: BTreeMap::new(),
+        }])
+    }
+
+    fn resolve_inbound_media(&self, envelope: &mut InboundEnvelope) -> Result<(), String> {
+        envelope.media_refs.clear();
+        envelope
+            .context
+            .insert("resolved".to_string(), "yes".to_string());
+        Ok(())
+    }
+
+    fn outbound_for(&self, _envelope: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String> {
+        let (prompted, _rx) = mpsc::channel();
+        Ok(Arc::new(PermissionPromptSignal { prompted }))
+    }
+
+    fn permission_prompter(
+        &self,
+        outbound: Arc<dyn OutboundSink>,
+        session_key: String,
+        waiters: Arc<ChannelPermissionWaiters>,
+    ) -> Option<Box<dyn PermissionPrompter>> {
+        Some(Box::new(ChannelTextPermissionPrompter::new(
+            outbound,
+            session_key,
+            waiters,
+            2,
+        )))
+    }
+}
+
+#[test]
+fn gateway_channel_registry_accepts_fake_adapter_without_gateway_changes() {
+    let adapter: Arc<dyn GatewayChannel> = Arc::new(FakeGatewayChannel);
+    let registry = build_channel_registry(vec![Arc::clone(&adapter)]).unwrap();
+    let channel = registry.get("other").unwrap();
+    let mut envelope = channel.poll_once().unwrap().remove(0);
+
+    channel.resolve_inbound_media(&mut envelope).unwrap();
+    let outbound = channel.outbound_for(&envelope).unwrap();
+    let prompter = channel.permission_prompter(
+        outbound,
+        envelope.session_key(),
+        Arc::new(ChannelPermissionWaiters::default()),
+    );
+
+    assert_eq!(
+        envelope.context.get("resolved").map(String::as_str),
+        Some("yes")
+    );
+    assert!(envelope.media_refs.is_empty());
+    assert!(prompter.is_some());
+}
+
+#[test]
+fn gateway_channel_registry_rejects_duplicate_adapter_names() {
+    let first: Arc<dyn GatewayChannel> = Arc::new(FakeGatewayChannel);
+    let second: Arc<dyn GatewayChannel> = Arc::new(FakeGatewayChannel);
+
+    let error = build_channel_registry(vec![first, second]).err().unwrap();
+
+    assert_eq!(error, "duplicate gateway channel: other");
+}
+
+#[test]
+fn rust_channel_registry_builds_only_configured_enabled_adapters() {
+    let mut config = AgentConfig::default();
+    assert!(build_enabled_channels(&config).unwrap().is_empty());
+
+    config.channels_weixin.enabled = true;
+    let registry = build_enabled_channels(&config).unwrap();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.get("weixin").unwrap().name(), "weixin");
+
+    config.gateway.enabled_channels.clear();
+    assert!(build_enabled_channels(&config).unwrap().is_empty());
+}
+
+#[test]
+fn weixin_gateway_channel_exposes_transport_through_generic_adapter() {
+    let mut config = AgentConfig::default();
+    config.channels_weixin.enabled = true;
+    let adapter = WeixinGatewayChannel::new(config);
+
+    let envelope = InboundEnvelope {
+        channel: "weixin".to_string(),
+        sender_id: "user-1".to_string(),
+        text: "hello".to_string(),
+        message_id: "message-1".to_string(),
+        media: Vec::new(),
+        media_refs: Vec::new(),
+        context: BTreeMap::from([("context_token".to_string(), "ctx".to_string())]),
+    };
+    let outbound = adapter.outbound_for(&envelope).unwrap();
+    let prompter = adapter.permission_prompter(
+        outbound,
+        envelope.session_key(),
+        Arc::new(ChannelPermissionWaiters::default()),
+    );
+
+    assert_eq!(adapter.name(), "weixin");
+    assert!(prompter.is_some());
 }
 
 #[test]

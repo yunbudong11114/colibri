@@ -609,7 +609,13 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
     validate_table(
         value,
         "gateway",
-        &["enabled_channels", "max_sessions", "session_idle_seconds", "max_pending_inbound", "max_concurrent_turns"],
+        &[
+            "enabled_channels",
+            "max_sessions",
+            "session_idle_seconds",
+            "max_pending_inbound",
+            "max_concurrent_turns",
+        ],
         &[],
     )?;
     if let Some(channels) = value.get("channels") {
