@@ -541,7 +541,7 @@ class WeixinPermissionPrompter:
             self.timeout_seconds,
         )
         if reply is None:
-            return "n"
+            return "0"
         return _permission_choice(reply)
 
 
@@ -790,27 +790,25 @@ def _permission_prompt_text(request: PermissionRequest) -> str:
             lines.append("path: " + line.removeprefix("file: ").split(" ", 1)[-1])
         else:
             lines.append(line)
-    lines.extend(["", "Reply one of:"])
+    lines.extend(["", "choose:"])
     if request.subject.kind == "shell":
-        lines.append("y=once s=session e=executable-session p=project n=deny")
+        lines.extend(
+            [
+                "1. once",
+                "2. session-command",
+                "3. session-executable",
+                "4. user-command",
+                "5. user-executable",
+                "0. deny",
+            ]
+        )
+    elif request.subject.kind == "file_path":
+        lines.extend(["1. once", "2. session-dir", "4. user-dir", "0. deny"])
     else:
-        lines.append("y=once s=session p=project n=deny")
+        lines.extend(["1. once", "2. session", "4. user", "0. deny"])
     return "\n".join(lines)
 
 
 def _permission_choice(reply: str) -> str:
-    normalized = reply.strip().lower()
-    aliases = {
-        "yes": "y",
-        "once": "y",
-        "allow": "y",
-        "session": "s",
-        "always": "s",
-        "executable": "e",
-        "executable-session": "e",
-        "project": "p",
-        "no": "n",
-        "deny": "n",
-    }
-    first = normalized.split()[0] if normalized.split() else "n"
-    return aliases.get(first, first if first in {"y", "s", "e", "p", "n"} else "n")
+    first = reply.strip().split(maxsplit=1)[0] if reply.strip() else "0"
+    return first if first in {"0", "1", "2", "3", "4", "5"} else "0"

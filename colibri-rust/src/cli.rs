@@ -181,11 +181,11 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
             repl(config, stdin, stdout, stderr, status, prefer_process_tty)
         }
         "auth" if rest.first().map(String::as_str) == Some("weixin") => {
-            let (result, lines) = perform_weixin_auth(&config)?;
             let mut stdout = stdout.lock().map_err(|_| "stdout lock poisoned")?;
-            for line in lines {
+            let result = perform_weixin_auth(&config, |line| {
                 writeln!(stdout, "{}", line).map_err(|error| error.to_string())?;
-            }
+                stdout.flush().map_err(|error| error.to_string())
+            })?;
             let active_path = config_path.unwrap_or_else(|| expand_user_path(DEFAULT_USER_CONFIG));
             save_weixin_auth_config(&active_path, &result)?;
             writeln!(stdout, "Weixin auth succeeded.").map_err(|error| error.to_string())?;
@@ -416,15 +416,14 @@ impl PermissionPrompter for WeixinPermissionPrompter {
         if let Ok(mut waiters) = self.waiters.lock() {
             waiters.insert(self.sender_id.clone(), tx);
         }
-        let prompt =
-            format_permission_prompt_lines(&request).join("\n") + "\nReply with y, s, e, p, or n.";
+        let prompt = format_weixin_permission_prompt(&request);
         let send_result =
             send_weixin_text(&self.config, &self.sender_id, &self.context_token, &prompt);
         if send_result.is_err() {
             if let Ok(mut waiters) = self.waiters.lock() {
                 waiters.remove(&self.sender_id);
             }
-            return "n".to_string();
+            return "0".to_string();
         }
         let reply = rx
             .recv_timeout(std::time::Duration::from_secs(self.timeout_seconds))
@@ -435,7 +434,7 @@ impl PermissionPrompter for WeixinPermissionPrompter {
         reply
             .as_deref()
             .map(permission_choice)
-            .unwrap_or_else(|| "n".to_string())
+            .unwrap_or_else(|| "0".to_string())
     }
 }
 
@@ -654,16 +653,18 @@ impl<R: BufRead, W: Write> PermissionPrompter for ConsolePermissionPrompter<'_, 
             let _ = writeln!(self.stdout, "{}", line);
         }
         let prompt = match request.subject_kind.as_str() {
-            "shell" => "[y] once [s] session [e] executable-session [p] project [n] deny: ",
-            "file_path" => "[y] once [s] session-dir [p] project-dir [n] deny: ",
-            _ => "[y] once [s] session [p] project [n] deny: ",
+            "shell" => {
+                "[1] once [2] session-command [3] session-executable [4] user-command [5] user-executable [0] deny: "
+            }
+            "file_path" => "[1] once [2] session-dir [4] user-dir [0] deny: ",
+            _ => "[1] once [2] session [4] user [0] deny: ",
         };
         let _ = write!(self.stdout, "{}", prompt);
         let _ = self.stdout.flush();
         let mut line = String::new();
         match self.stdin.read_line(&mut line) {
             Ok(_) => line.trim().to_lowercase(),
-            Err(_) => "n".to_string(),
+            Err(_) => "0".to_string(),
         }
     }
 }
@@ -711,6 +712,48 @@ fn format_permission_prompt_lines(request: &PermissionRequest) -> Vec<String> {
     }
 }
 
+fn format_weixin_permission_prompt(request: &PermissionRequest) -> String {
+    let mut lines = vec![format!("Colibri wants to run {}.", request.tool_name)];
+    for line in format_permission_prompt_lines(request) {
+        if request.subject_kind == "file_path" && line.starts_with("file: ") {
+            let path = line
+                .strip_prefix("file: ")
+                .and_then(|text| text.split_once(' ').map(|(_, path)| path))
+                .unwrap_or_else(|| line.strip_prefix("file: ").unwrap_or(&line));
+            lines.push(format!("path: {}", path));
+        } else {
+            lines.push(line);
+        }
+    }
+    lines.push(String::new());
+    lines.push("choose:".to_string());
+    match request.subject_kind.as_str() {
+        "shell" => lines.extend(
+            [
+                "1. once",
+                "2. session-command",
+                "3. session-executable",
+                "4. user-command",
+                "5. user-executable",
+                "0. deny",
+            ]
+            .into_iter()
+            .map(String::from),
+        ),
+        "file_path" => lines.extend(
+            ["1. once", "2. session-dir", "4. user-dir", "0. deny"]
+                .into_iter()
+                .map(String::from),
+        ),
+        _ => lines.extend(
+            ["1. once", "2. session", "4. user", "0. deny"]
+                .into_iter()
+                .map(String::from),
+        ),
+    }
+    lines.join("\n")
+}
+
 fn content_summary(value: Option<&String>) -> String {
     let value = value.map(String::as_str).unwrap_or("");
     let char_count = value.chars().count();
@@ -735,8 +778,8 @@ fn summarized_arguments(arguments: &std::collections::BTreeMap<String, String>) 
 }
 
 fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let project_permissions = if cwd.join(".colibri/permissions.toml").exists() {
+    let user_permissions_path = expand_user_path("~/.colibri/permissions.toml");
+    let user_permissions = if user_permissions_path.exists() {
         "present"
     } else {
         "missing"
@@ -765,7 +808,7 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
             config.skills.dir.display(),
             count_available_skills(config)
         ),
-        format!("project_permissions={}", project_permissions),
+        format!("user_permissions={}", user_permissions),
         format!(
             "transcript={} rss_kb={}",
             if config.session.transcript {

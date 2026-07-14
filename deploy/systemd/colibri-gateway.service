@@ -15,7 +15,7 @@ Environment=COLIBRI_HOME=/home/pi/.colibri
 # Optional secrets / overrides (API keys, etc.)
 EnvironmentFile=-/etc/colibri/colibri.env
 
-# Process cwd for shell/files relative paths and ./.colibri/permissions.toml
+# Process cwd for shell/files relative paths. User permissions live under COLIBRI_HOME/HOME.
 WorkingDirectory=/home/pi
 
 # Foreground runner — required for systemd. Do NOT use `gateway start` here.

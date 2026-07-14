@@ -5,52 +5,62 @@ use std::path::{Path, PathBuf};
 use crate::config::{expand_user_path, AgentConfig};
 use crate::tools::{ToolContext, ToolInfo};
 
+const DEFAULT_USER_PERMISSIONS: &str = "~/.colibri/permissions.toml";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProjectGrants {
+pub struct UserGrants {
     pub shell_commands: Vec<String>,
-    pub shell_prefixes: Vec<String>,
+    pub shell_executables: Vec<String>,
     pub tool_names: Vec<String>,
     pub file_roots: Vec<String>,
 }
 
-pub struct ProjectPermissionStore {
+pub struct UserPermissionStore {
     pub path: PathBuf,
 }
 
-impl ProjectPermissionStore {
-    pub fn for_cwd(cwd: PathBuf) -> Self {
+impl UserPermissionStore {
+    pub fn for_user() -> Self {
         Self {
-            path: cwd.join(".colibri/permissions.toml"),
+            path: expand_user_path(DEFAULT_USER_PERMISSIONS),
         }
     }
 
-    pub fn load(&self) -> ProjectGrants {
+    pub fn for_cwd(cwd: PathBuf) -> Self {
+        let _ = cwd;
+        Self::for_user()
+    }
+
+    pub fn load(&self) -> UserGrants {
         let Ok(text) = fs::read_to_string(&self.path) else {
-            return ProjectGrants::default();
+            return UserGrants::default();
         };
         let Ok(value) = text.parse::<toml::Value>() else {
-            return ProjectGrants::default();
+            return UserGrants::default();
         };
-        ProjectGrants {
+        UserGrants {
             shell_commands: string_list_at(&value, &["shell", "commands"]),
-            shell_prefixes: string_list_at(&value, &["shell", "prefixes"]),
+            shell_executables: merged_string_lists_at(
+                &value,
+                &[&["shell", "executables"], &["shell", "prefixes"]],
+            ),
             tool_names: string_list_at(&value, &["tools", "names"]),
             file_roots: string_list_at(&value, &["files", "roots"]),
         }
     }
 
-    pub fn save(&self, grants: &ProjectGrants) -> Result<(), String> {
+    pub fn save(&self, grants: &UserGrants) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let mut shell_commands = sorted_dedup(grants.shell_commands.clone());
-        let mut shell_prefixes = sorted_dedup(grants.shell_prefixes.clone());
+        let mut shell_executables = sorted_dedup(grants.shell_executables.clone());
         let mut tool_names = sorted_dedup(grants.tool_names.clone());
         let mut file_roots = sorted_dedup(grants.file_roots.clone());
         let text = format!(
-            "[shell]\ncommands = [{}]\nprefixes = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
+            "[shell]\ncommands = [{}]\nexecutables = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
             toml_array(&mut shell_commands),
-            toml_array(&mut shell_prefixes),
+            toml_array(&mut shell_executables),
             toml_array(&mut tool_names),
             toml_array(&mut file_roots)
         );
@@ -98,7 +108,7 @@ struct PermissionSubject {
 
 pub struct PermissionPolicy<'a> {
     default_permission: String,
-    project_store: ProjectPermissionStore,
+    user_store: UserPermissionStore,
     prompter: Option<&'a mut dyn PermissionPrompter>,
     session_tool_grants: Vec<String>,
     session_shell_commands: Vec<String>,
@@ -112,9 +122,10 @@ impl<'a> PermissionPolicy<'a> {
         cwd: PathBuf,
         prompter: Option<&'a mut dyn PermissionPrompter>,
     ) -> Self {
+        let _ = cwd;
         Self {
             default_permission: config.tools.default_permission.clone(),
-            project_store: ProjectPermissionStore::for_cwd(cwd),
+            user_store: UserPermissionStore::for_user(),
             prompter,
             session_tool_grants: Vec::new(),
             session_shell_commands: Vec::new(),
@@ -145,7 +156,7 @@ impl<'a> PermissionPolicy<'a> {
             return decision(false, "deny", "none", &subject, "hard_deny");
         }
 
-        let grants = self.project_store.load();
+        let grants = self.user_store.load();
         if let Some(granted) = self.granted(&subject, &grants) {
             return granted;
         }
@@ -167,14 +178,14 @@ impl<'a> PermissionPolicy<'a> {
             .prompter
             .as_mut()
             .map(|prompter| prompter.confirm(request))
-            .unwrap_or_else(|| "n".to_string());
-        self.apply_choice(&choice.to_lowercase(), &subject, &grants)
+            .unwrap_or_else(|| "0".to_string());
+        self.apply_choice(&permission_choice(&choice), &subject, &grants)
     }
 
     fn granted(
         &self,
         subject: &PermissionSubject,
-        grants: &ProjectGrants,
+        grants: &UserGrants,
     ) -> Option<PermissionDecision> {
         if subject.kind == "shell" {
             if contains_opt(&self.session_shell_commands, subject.shell_command.as_ref()) {
@@ -187,10 +198,10 @@ impl<'a> PermissionPolicy<'a> {
                 return Some(decision(true, "allow", "session_executable", subject, ""));
             }
             if contains_opt(&grants.shell_commands, subject.shell_command.as_ref()) {
-                return Some(decision(true, "allow", "project", subject, ""));
+                return Some(decision(true, "allow", "user", subject, ""));
             }
-            if shell_command_matches_project_prefixes(subject.shell_command.as_deref(), grants) {
-                return Some(decision(true, "allow", "project_prefix", subject, ""));
+            if shell_command_matches_user_executables(subject.shell_command.as_deref(), grants) {
+                return Some(decision(true, "allow", "user_executable", subject, ""));
             }
             return None;
         }
@@ -199,7 +210,7 @@ impl<'a> PermissionPolicy<'a> {
                 return Some(decision(true, "allow", "session_file_root", subject, ""));
             }
             if path_under_any_root(subject.file_path.as_ref(), &grants.file_roots) {
-                return Some(decision(true, "allow", "project_file_root", subject, ""));
+                return Some(decision(true, "allow", "user_file_root", subject, ""));
             }
             return None;
         }
@@ -207,7 +218,7 @@ impl<'a> PermissionPolicy<'a> {
             return Some(decision(true, "allow", "session", subject, ""));
         }
         if grants.tool_names.contains(&subject.tool_name) {
-            return Some(decision(true, "allow", "project", subject, ""));
+            return Some(decision(true, "allow", "user", subject, ""));
         }
         None
     }
@@ -230,12 +241,12 @@ impl<'a> PermissionPolicy<'a> {
         &mut self,
         choice: &str,
         subject: &PermissionSubject,
-        grants: &ProjectGrants,
+        grants: &UserGrants,
     ) -> PermissionDecision {
-        if matches!(choice, "y" | "yes") {
+        if choice == "1" {
             return decision(true, "allow", "once", subject, "");
         }
-        if matches!(choice, "s" | "session" | "a" | "always") {
+        if choice == "2" {
             if subject.kind == "shell" {
                 push_unique_opt(
                     &mut self.session_shell_commands,
@@ -253,14 +264,23 @@ impl<'a> PermissionPolicy<'a> {
             };
             return decision(true, "allow", scope, subject, "");
         }
-        if matches!(choice, "e" | "executable") && subject.kind == "shell" {
+        if choice == "3" && subject.kind == "shell" {
             push_unique_opt(
                 &mut self.session_shell_executables,
                 subject.shell_executable.clone(),
             );
             return decision(true, "allow", "session_executable", subject, "");
         }
-        if matches!(choice, "p" | "project") {
+        if choice == "5" && subject.kind == "shell" {
+            let mut next = grants.clone();
+            push_unique_opt(
+                &mut next.shell_executables,
+                subject.shell_executable.clone(),
+            );
+            let _ = self.user_store.save(&next);
+            return decision(true, "allow", "user_executable", subject, "");
+        }
+        if choice == "4" {
             let mut next = grants.clone();
             if subject.kind == "shell" {
                 push_unique_opt(&mut next.shell_commands, subject.shell_command.clone());
@@ -269,15 +289,24 @@ impl<'a> PermissionPolicy<'a> {
             } else {
                 push_unique(&mut next.tool_names, subject.tool_name.clone());
             }
-            let _ = self.project_store.save(&next);
+            let _ = self.user_store.save(&next);
             let scope = if subject.kind == "file_path" {
-                "project_file_root"
+                "user_file_root"
             } else {
-                "project"
+                "user"
             };
             return decision(true, "allow", scope, subject, "");
         }
         decision(false, "deny", "once", subject, "user_denied")
+    }
+}
+
+fn permission_choice(reply: &str) -> String {
+    let first = reply.split_whitespace().next().unwrap_or("0");
+    if matches!(first, "0" | "1" | "2" | "3" | "4" | "5") {
+        first.to_string()
+    } else {
+        "0".to_string()
     }
 }
 
@@ -394,11 +423,11 @@ fn decision(
     }
 }
 
-fn shell_command_matches_project_prefixes(command: Option<&str>, grants: &ProjectGrants) -> bool {
+fn shell_command_matches_user_executables(command: Option<&str>, grants: &UserGrants) -> bool {
     let Some(command) = command else {
         return false;
     };
-    if grants.shell_prefixes.is_empty() {
+    if grants.shell_executables.is_empty() {
         return false;
     }
     if crate::shell_policy::has_dangerous_shell_features(command) {
@@ -411,16 +440,17 @@ fn shell_command_matches_project_prefixes(command: Option<&str>, grants: &Projec
     segments.iter().all(|segment| {
         grants.shell_commands.contains(segment)
             || grants
-                .shell_prefixes
+                .shell_executables
                 .iter()
-                .any(|prefix| command_prefix_matches(segment, prefix))
+                .any(|executable| command_executable_matches(segment, executable))
     })
 }
 
-fn command_prefix_matches(command: &str, prefix: &str) -> bool {
+fn command_executable_matches(command: &str, executable: &str) -> bool {
     let command = command.trim();
-    let prefix = prefix.trim();
-    !prefix.is_empty() && (command == prefix || command.starts_with(&format!("{prefix} ")))
+    let executable = executable.trim();
+    !executable.is_empty()
+        && (command == executable || command.starts_with(&format!("{executable} ")))
 }
 
 fn string_list_at(value: &toml::Value, path: &[&str]) -> Vec<String> {
@@ -440,6 +470,13 @@ fn string_list_at(value: &toml::Value, path: &[&str]) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn merged_string_lists_at(value: &toml::Value, paths: &[&[&str]]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|path| string_list_at(value, path))
+        .collect()
 }
 
 fn sorted_dedup(mut items: Vec<String>) -> Vec<String> {

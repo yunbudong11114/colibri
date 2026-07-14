@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from colibri.config import AgentConfig
-from colibri.permissions_store import ProjectGrants, ProjectPermissionStore
+from colibri.permissions_store import UserGrants, UserPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
 from colibri.tools.builtin import FilesListTool, FilesWriteTool, ImageUnderstandTool, ShellRunTool
 from colibri.tools.permissions import (
@@ -54,7 +54,7 @@ def test_read_only_tool_is_allowed_under_default_policy():
 
 def test_confirm_policy_calls_prompter(tmp_path):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "confirm"}})
-    prompter = FakePrompter(replies=["yes"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter)
 
     result = policy.decide(FakeTool(), {"path": "note.txt"}, tool_context(config, tmp_path))
@@ -68,9 +68,9 @@ def test_confirm_policy_calls_prompter(tmp_path):
     assert prompter.requests[0].subject.kind == "tool"
 
 
-def test_always_choice_allows_tool_for_current_session(tmp_path):
+def test_numeric_session_choice_allows_tool_for_current_session(tmp_path):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "confirm"}})
-    prompter = FakePrompter(replies=["always"], requests=[])
+    prompter = FakePrompter(replies=["2"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
     tool = FakeTool()
@@ -87,7 +87,7 @@ def test_always_choice_allows_tool_for_current_session(tmp_path):
 
 def test_deny_policy_blocks_tool_without_prompting(tmp_path):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "deny"}})
-    prompter = FakePrompter(replies=["yes"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter)
 
     result = policy.decide(FakeTool(), {}, tool_context(config, tmp_path))
@@ -100,7 +100,7 @@ def test_deny_policy_blocks_tool_without_prompting(tmp_path):
 
 def test_allow_read_confirm_write_confirms_non_read_only_tool(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["no"], requests=[])
+    prompter = FakePrompter(replies=["0"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter)
 
     result = policy.decide(FakeTool(read_only=False), {"command": "write"}, tool_context(config, tmp_path))
@@ -115,7 +115,7 @@ def test_allow_read_confirm_write_confirms_non_read_only_tool(tmp_path):
 
 def test_shell_command_prompts_when_no_grant(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
 
     result = policy.decide(ShellRunTool(), {"command": "pwd"}, tool_context(config, tmp_path))
@@ -128,7 +128,7 @@ def test_shell_command_prompts_when_no_grant(tmp_path):
 
 def test_shell_session_command_grant_allows_second_call_without_prompt(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["s"], requests=[])
+    prompter = FakePrompter(replies=["2"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
@@ -143,7 +143,7 @@ def test_shell_session_command_grant_allows_second_call_without_prompt(tmp_path)
 
 def test_shell_session_executable_grant_allows_same_executable(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["e"], requests=[])
+    prompter = FakePrompter(replies=["3"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
@@ -156,11 +156,31 @@ def test_shell_session_executable_grant_allows_same_executable(tmp_path):
     assert len(prompter.requests) == 1
 
 
-def test_shell_project_command_grant_is_exact(tmp_path):
+def test_shell_user_executable_choice_persists_executable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     config = AgentConfig.default()
-    store = ProjectPermissionStore.for_cwd(tmp_path)
-    store.save(ProjectGrants(shell_commands={"git status"}))
-    prompter = FakePrompter(replies=["n", "n", "n", "n"], requests=[])
+    prompter = FakePrompter(replies=["5"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    first = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
+    second = policy.decide(ShellRunTool(), {"command": "git diff --stat"}, context)
+    grants = UserPermissionStore.for_user().load()
+
+    assert first.allowed
+    assert first.scope == "user_executable"
+    assert second.allowed
+    assert second.scope == "user_executable"
+    assert grants.shell_executables == {"git"}
+    assert len(prompter.requests) == 1
+
+
+def test_shell_user_command_grant_is_exact(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = AgentConfig.default()
+    store = UserPermissionStore.for_user()
+    store.save(UserGrants(shell_commands={"git status"}))
+    prompter = FakePrompter(replies=["0", "0", "0", "0"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
@@ -168,41 +188,61 @@ def test_shell_project_command_grant_is_exact(tmp_path):
     denied = policy.decide(ShellRunTool(), {"command": "git push"}, context)
 
     assert allowed.allowed
-    assert allowed.scope == "project"
+    assert allowed.scope == "user"
     assert not denied.allowed
     assert prompter.requests[0].subject.shell_command == "git push"
 
 
-def test_shell_project_prefix_grant_allows_token_boundary_matches(tmp_path):
+def test_shell_numeric_user_command_choice_persists_exact_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     config = AgentConfig.default()
-    store = ProjectPermissionStore.for_cwd(tmp_path)
-    store.save(ProjectGrants(shell_prefixes={"git status", "cargo test"}))
-    prompter = FakePrompter(replies=["n", "n", "n", "n"], requests=[])
+    prompter = FakePrompter(replies=["4"], requests=[])
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    context = tool_context(config, tmp_path)
+
+    first = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
+    second = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
+    grants = UserPermissionStore.for_user().load()
+
+    assert first.allowed
+    assert first.scope == "user"
+    assert second.allowed
+    assert second.scope == "user"
+    assert grants.shell_commands == {"git status --short"}
+    assert len(prompter.requests) == 1
+
+
+def test_shell_user_executable_grant_matches_executable_like_executable_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = AgentConfig.default()
+    store = UserPermissionStore.for_user()
+    store.save(UserGrants(shell_executables={"git", "cargo"}))
+    prompter = FakePrompter(replies=["0", "0", "0", "0"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
     exact = policy.decide(ShellRunTool(), {"command": "git status"}, context)
-    longer = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
+    longer = policy.decide(ShellRunTool(), {"command": "git diff --stat"}, context)
     other = policy.decide(ShellRunTool(), {"command": "cargo test --manifest-path colibri-rust/Cargo.toml"}, context)
     compound = policy.decide(ShellRunTool(), {"command": "git status --short && cargo test"}, context)
     background = policy.decide(ShellRunTool(), {"command": "git status --short & cargo test"}, context)
-    denied = policy.decide(ShellRunTool(), {"command": "git statusx"}, context)
+    denied = policy.decide(ShellRunTool(), {"command": "gitz status"}, context)
     denied_compound = policy.decide(ShellRunTool(), {"command": "git status --short && python -V"}, context)
     denied_background = policy.decide(ShellRunTool(), {"command": "git status --short & python -V"}, context)
     denied_substitution = policy.decide(ShellRunTool(), {"command": "git status $(echo ok)"}, context)
 
     assert exact.allowed
-    assert exact.scope == "project_prefix"
+    assert exact.scope == "user_executable"
     assert longer.allowed
-    assert longer.scope == "project_prefix"
+    assert longer.scope == "user_executable"
     assert other.allowed
-    assert other.scope == "project_prefix"
+    assert other.scope == "user_executable"
     assert compound.allowed
-    assert compound.scope == "project_prefix"
+    assert compound.scope == "user_executable"
     assert background.allowed
-    assert background.scope == "project_prefix"
+    assert background.scope == "user_executable"
     assert not denied.allowed
-    assert prompter.requests[0].subject.shell_command == "git statusx"
+    assert prompter.requests[0].subject.shell_command == "gitz status"
     assert not denied_compound.allowed
     assert prompter.requests[1].subject.shell_command == "git status --short && python -V"
     assert not denied_background.allowed
@@ -213,7 +253,7 @@ def test_shell_project_prefix_grant_allows_token_boundary_matches(tmp_path):
 
 def test_shell_hard_deny_blocks_without_prompt(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
 
     result = policy.decide(ShellRunTool(), {"command": "sudo whoami"}, tool_context(config, tmp_path))
@@ -225,7 +265,7 @@ def test_shell_hard_deny_blocks_without_prompt(tmp_path):
 
 def test_shell_hard_deny_wins_over_redirection_file_path_prompt(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
 
     result = policy.decide(
@@ -245,7 +285,7 @@ def test_out_of_root_file_path_prompts_instead_of_default_allow(tmp_path):
     allowed_root.mkdir()
     outside.mkdir()
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
 
     result = policy.decide(FilesListTool(), {"path": str(outside)}, tool_context(config, allowed_root))
@@ -264,7 +304,7 @@ def test_out_of_root_image_path_prompts_instead_of_default_allow(tmp_path):
     allowed_root.mkdir()
     outside.mkdir()
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
 
     result = policy.decide(
@@ -286,7 +326,7 @@ def test_out_of_root_files_write_prompts_as_file_path(tmp_path):
     outside.mkdir()
     target = outside / "artifact.html"
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
 
     result = policy.decide(
@@ -303,7 +343,7 @@ def test_out_of_root_files_write_prompts_as_file_path(tmp_path):
 
 def test_in_root_files_write_prompts_with_absolute_path_and_content_summary(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
     content = 'print("Hello, World!")\n'
@@ -347,7 +387,7 @@ def test_shell_redirection_to_out_of_root_path_prompts_as_file_path(tmp_path):
     outside.mkdir()
     target = outside / "baidu.html"
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["y"], requests=[])
+    prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
 
     result = policy.decide(
@@ -365,7 +405,7 @@ def test_shell_redirection_to_out_of_root_path_prompts_as_file_path(tmp_path):
 
 def test_files_under_startup_cwd_are_allowed_without_prompt(tmp_path):
     config = AgentConfig.default().with_overrides({"files": {"roots": []}})
-    prompter = FakePrompter(replies=["n"], requests=[])
+    prompter = FakePrompter(replies=["0"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
@@ -382,7 +422,7 @@ def test_file_path_session_grant_allows_same_resolved_path_without_prompt(tmp_pa
     allowed_root.mkdir()
     outside.mkdir()
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["s"], requests=[])
+    prompter = FakePrompter(replies=["2"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     context = tool_context(config, allowed_root)
 
@@ -403,7 +443,7 @@ def test_file_path_session_grant_allows_children_under_same_directory(tmp_path):
     (outside / "one.txt").write_text("one", encoding="utf-8")
     (outside / "two.txt").write_text("two", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(replies=["s"], requests=[])
+    prompter = FakePrompter(replies=["2"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     context = ToolContext(config=config, cwd=allowed_root)
 
@@ -417,21 +457,22 @@ def test_file_path_session_grant_allows_children_under_same_directory(tmp_path):
     assert len(prompter.requests) == 1
 
 
-def test_file_path_project_root_grant_allows_children_without_prompt(tmp_path):
+def test_file_path_user_root_grant_allows_children_without_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     allowed_root = tmp_path / "allowed"
     outside = tmp_path / "outside"
     allowed_root.mkdir()
     outside.mkdir()
     (outside / "note.txt").write_text("hello", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    store = ProjectPermissionStore.for_cwd(allowed_root)
-    store.save(ProjectGrants(file_roots={str(outside.resolve())}))
-    prompter = FakePrompter(replies=["n"], requests=[])
+    store = UserPermissionStore.for_user()
+    store.save(UserGrants(file_roots={str(outside.resolve())}))
+    prompter = FakePrompter(replies=["0"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     context = ToolContext(config=config, cwd=allowed_root)
 
     result = policy.decide(FilesListTool(), {"path": str(outside / "note.txt")}, context)
 
     assert result.allowed
-    assert result.scope == "project_file_root"
+    assert result.scope == "user_file_root"
     assert prompter.requests == []

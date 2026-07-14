@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from colibri.config import AgentConfig
-from colibri.permissions_store import ProjectPermissionStore
+from colibri.permissions_store import UserPermissionStore
 from colibri.skills import SkillIndex
 
 
@@ -18,8 +18,8 @@ def build_diagnostics(
 ) -> list[str]:
     memory_exists = config.memory.root.exists()
     skills_found = len(SkillIndex.scan(config.skills.dir).skills)
-    project_store = ProjectPermissionStore.for_cwd(cwd or Path.cwd())
-    project_permissions = "present" if project_store.path.exists() else "missing"
+    user_store = UserPermissionStore.for_user()
+    user_permissions = "present" if user_store.path.exists() else "missing"
     rss = rss_kb()
     lines = [
         "colibri diagnostics",
@@ -29,7 +29,7 @@ def build_diagnostics(
         f"tools={','.join(config.tools.enabled)}",
         f"memory_root={config.memory.root} exists={str(memory_exists).lower()}",
         f"skills_dir={config.skills.dir} skills_found={skills_found}",
-        f"project_permissions={project_permissions}",
+        f"user_permissions={user_permissions}",
         f"transcript={str(config.session.transcript).lower()} rss_kb={rss if rss is not None else 'unknown'}",
         (
             f"trigger_message_limit={config.session.trigger_message_limit} "

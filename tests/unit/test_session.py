@@ -629,7 +629,7 @@ def test_denied_tool_call_adds_result_without_running_tool(tmp_path):
 
 def test_session_returns_user_denial_to_model(tmp_path):
     config = AgentConfig.default()
-    prompter = FakePrompter(reply="n")
+    prompter = FakePrompter(reply="0")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     session = AgentSession(
         config=config,
@@ -654,7 +654,7 @@ def test_session_allows_out_of_root_file_path_after_dynamic_permission(tmp_path)
     outside.mkdir()
     (outside / "note.txt").write_text("hello", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(reply="y")
+    prompter = FakePrompter(reply="1")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     transcript = MemoryTranscript()
     session = AgentSession(
@@ -681,7 +681,7 @@ def test_session_file_directory_grant_passes_root_to_file_tool(tmp_path):
     outside.mkdir()
     (outside / "note.txt").write_text("hello", encoding="utf-8")
     config = AgentConfig.default().with_overrides({"files": {"roots": [str(allowed_root)]}})
-    prompter = FakePrompter(reply="s")
+    prompter = FakePrompter(reply="2")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=allowed_root)
     transcript = MemoryTranscript()
     session = AgentSession(
@@ -732,7 +732,7 @@ def test_session_writes_transcript_events(tmp_path):
 def test_session_logs_dynamic_permission_payload(tmp_path):
     config = AgentConfig.default()
     transcript = MemoryTranscript()
-    prompter = FakePrompter(reply="y")
+    prompter = FakePrompter(reply="1")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     session = AgentSession(
         config=config,
@@ -782,9 +782,10 @@ def test_close_closes_transcript():
     assert transcript.closed
 
 
-def test_memory_write_uses_permission_confirmation(tmp_path):
+def test_memory_write_uses_permission_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default().with_overrides({"memory": {"root": str(tmp_path / "memory")}})
-    prompter = FakePrompter(reply="yes")
+    prompter = FakePrompter(reply="1")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     session = AgentSession(
         config=config,
@@ -826,7 +827,7 @@ read_only = false
         encoding="utf-8",
     )
     config = AgentConfig.default().with_overrides({"skills": {"dir": str(tmp_path / "skills")}})
-    prompter = FakePrompter(reply="yes")
+    prompter = FakePrompter(reply="1")
     policy = PermissionPolicy.from_config(config, prompter=prompter)
     session = AgentSession(
         config=config,

@@ -211,27 +211,21 @@ pub fn cleanup_media_directory(root: &Path, retention_seconds: u64, max_total_by
 }
 
 pub fn permission_choice(reply: &str) -> String {
-    let first = reply
-        .trim()
-        .to_lowercase()
-        .split_whitespace()
-        .next()
-        .unwrap_or("n")
-        .to_string();
-    match first.as_str() {
-        "yes" | "once" | "allow" => "y".to_string(),
-        "session" | "always" => "s".to_string(),
-        "executable" | "executable-session" => "e".to_string(),
-        "project" => "p".to_string(),
-        "no" | "deny" => "n".to_string(),
-        "y" | "s" | "e" | "p" | "n" => first,
-        _ => "n".to_string(),
+    let first = reply.split_whitespace().next().unwrap_or("0");
+    if matches!(first, "0" | "1" | "2" | "3" | "4" | "5") {
+        first.to_string()
+    } else {
+        "0".to_string()
     }
 }
 
-pub fn perform_weixin_auth(
+pub fn perform_weixin_auth<F>(
     config: &AgentConfig,
-) -> Result<(WeixinAuthResult, Vec<String>), String> {
+    mut emit_line: F,
+) -> Result<WeixinAuthResult, String>
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
     let base_url = normalized_base_url(&config.channels_weixin.base_url);
     let qrcode_url = format!("{}ilink/bot/get_bot_qrcode?bot_type=3", base_url);
     let qr_response = request_json("GET", &qrcode_url, &weixin_headers(false, ""), None, 35)?;
@@ -240,12 +234,12 @@ pub fn perform_weixin_auth(
         .ok_or_else(|| "Weixin auth did not return a QR payload".to_string())?;
     let qr_id = json_string_field(&qr_response.body, "qrcode")
         .ok_or_else(|| "Weixin auth did not return a QR code id".to_string())?;
-    let mut lines = vec!["Scan this Weixin QR code with WeChat:".to_string()];
+    emit_line("Scan this Weixin QR code with WeChat:")?;
     if let Some(rendered) = render_terminal_qr(&qr_payload) {
-        lines.push(rendered);
+        emit_line(&rendered)?;
     }
-    lines.push("QR payload:".to_string());
-    lines.push(qr_payload);
+    emit_line("QR payload:")?;
+    emit_line(&qr_payload)?;
 
     let deadline =
         Instant::now() + Duration::from_secs(config.channels_weixin.auth_timeout_seconds);
@@ -270,22 +264,18 @@ pub fn perform_weixin_auth(
             }
             let base_url = json_string_field(&status_response.body, "baseurl")
                 .unwrap_or_else(|| config.channels_weixin.base_url.clone());
-            return Ok((
-                WeixinAuthResult {
-                    token,
-                    user_id,
-                    account_id,
-                    base_url,
-                },
-                lines,
-            ));
+            return Ok(WeixinAuthResult {
+                token,
+                user_id,
+                account_id,
+                base_url,
+            });
         }
         if state == "expired" {
             return Err("Weixin auth QR code expired".to_string());
         }
         thread::sleep(Duration::from_secs(2));
     }
-    lines.push("Weixin auth timed out".to_string());
     Err("Weixin auth timed out".to_string())
 }
 

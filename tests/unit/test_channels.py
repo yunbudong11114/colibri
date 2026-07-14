@@ -313,7 +313,7 @@ def test_weixin_channel_routes_permission_reply_to_active_waiter():
                             "message_state": 2,
                             "from_user_id": "user-1",
                             "context_token": "ctx-1",
-                            "item_list": [{"type": 1, "text_item": {"text": "y"}}],
+                            "item_list": [{"type": 1, "text_item": {"text": "1"}}],
                         }
                     ],
                 }
@@ -341,7 +341,7 @@ def test_weixin_channel_routes_permission_reply_to_active_waiter():
 
     channel.run(handler, ChannelContext(stop_requested=lambda: bool(choices)))
 
-    assert choices == ["y"]
+    assert choices == ["1"]
     assert len(api.sent) == 2
 
 
@@ -801,7 +801,7 @@ def test_weixin_permission_prompter_sends_prompt_and_maps_reply():
                         "message_type": 1,
                         "message_state": 2,
                         "from_user_id": "user-1",
-                        "item_list": [{"type": 1, "text_item": {"text": "p"}}],
+                        "item_list": [{"type": 1, "text_item": {"text": "5"}}],
                     }
                 ]
             }
@@ -817,10 +817,12 @@ def test_weixin_permission_prompter_sends_prompt_and_maps_reply():
 
     choice = WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
 
-    assert choice == "p"
+    assert choice == "5"
     assert api.sent[0][0] == "user-1"
     assert "shell.run" in api.sent[0][2]
     assert "pwd" in api.sent[0][2]
+    assert "1. once" in api.sent[0][2]
+    assert "5. user-executable" in api.sent[0][2]
 
 
 def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content(tmp_path):
@@ -832,7 +834,7 @@ def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content
                         "message_type": 1,
                         "message_state": 2,
                         "from_user_id": "user-1",
-                        "item_list": [{"type": 1, "text_item": {"text": "y"}}],
+                        "item_list": [{"type": 1, "text_item": {"text": "1"}}],
                     }
                 ]
             }
@@ -856,7 +858,8 @@ def test_weixin_permission_prompt_uses_absolute_file_path_and_summarizes_content
     choice = WeixinPermissionPrompter(channel, "user-1", timeout_seconds=1).confirm(request)
 
     prompt = api.sent[0][2]
-    assert choice == "y"
+    assert choice == "1"
+    assert "4. user-dir" in prompt
     assert f"path: {(tmp_path / 'hello_world.py').resolve()}" in prompt
     assert "content:" in prompt
     assert "chars" in prompt
