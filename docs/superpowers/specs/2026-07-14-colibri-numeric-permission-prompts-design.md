@@ -37,7 +37,8 @@ The numbers have stable meanings where possible:
 
 File directory grants are shared by file-path tools. A `user-dir` approval for a directory can cover `files.list`, `files.read`, `files.write`, `files.send`, and `image.understand` when they target paths under that directory.
 
-Shell user executable grants are stored as `[shell].executables`. Older `[shell].prefixes` files may be read for migration compatibility, but new writes use `executables` only.
+Shell user executable grants are stored as `[shell].executables`. The obsolete
+`[shell].prefixes` key is not supported and is not read as an alias.
 
 ## Channel Formatting
 

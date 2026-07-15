@@ -21,7 +21,8 @@ Python and Rust must keep matching behavior.
 - `5 user-executable` and `3 session-executable` intentionally use the same granularity:
   - `3` allows the executable for the current session only.
   - `5` allows the executable persistently at user level.
-- Existing `[shell].prefixes` is read only as a legacy compatibility alias. New writes use `[shell].executables`.
+- `[shell].executables` is the only supported executable-grant key. The obsolete
+  `[shell].prefixes` key is ignored and its compatibility code is removed.
 - Shell executable matching rejects commands with dangerous shell features before checking executable grants.
 - Internal code should use executable terminology instead of the old prefix terminology.
 
