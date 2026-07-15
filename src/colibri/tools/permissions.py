@@ -118,7 +118,7 @@ class PermissionPolicy:
             subject=subject,
         )
         choice = parse_permission_choice(self._prompter().confirm(request))
-        return self._apply_choice(choice, subject, user_grants)
+        return self._apply_choice(choice, subject)
 
     def _granted(
         self,
@@ -164,7 +164,6 @@ class PermissionPolicy:
         self,
         choice: str,
         subject: PermissionSubject,
-        user_grants: UserGrants,
     ) -> PermissionDecisionResult:
         if choice == "1":
             return _decision(True, "allow", "once", subject)
@@ -182,39 +181,16 @@ class PermissionPolicy:
             self.session_shell_executables.add(subject.shell_executable)
             return _decision(True, "allow", "session_executable", subject)
         if choice == "5" and subject.kind == "shell" and subject.shell_executable is not None:
-            next_grants = UserGrants(
-                shell_commands=set(user_grants.shell_commands),
-                shell_executables=set(user_grants.shell_executables) | {subject.shell_executable},
-                tool_names=set(user_grants.tool_names),
-                file_roots=set(user_grants.file_roots),
-            )
-            self.user_store.save(next_grants)
+            self.user_store.merge(UserGrants(shell_executables={subject.shell_executable}))
             return _decision(True, "allow", "user_executable", subject)
         if choice == "4":
             if subject.kind == "shell" and subject.shell_command is not None:
-                next_grants = UserGrants(
-                    shell_commands=set(user_grants.shell_commands) | {subject.shell_command},
-                    shell_executables=set(user_grants.shell_executables),
-                    tool_names=set(user_grants.tool_names),
-                    file_roots=set(user_grants.file_roots),
-                )
+                delta = UserGrants(shell_commands={subject.shell_command})
             elif subject.kind == "file_path" and subject.file_path is not None:
-                next_grants = UserGrants(
-                    shell_commands=set(user_grants.shell_commands),
-                    shell_executables=set(user_grants.shell_executables),
-                    tool_names=set(user_grants.tool_names),
-                    file_roots=(
-                        set(user_grants.file_roots) | ({subject.file_root} if subject.file_root else set())
-                    ),
-                )
+                delta = UserGrants(file_roots={subject.file_root} if subject.file_root else set())
             else:
-                next_grants = UserGrants(
-                    shell_commands=set(user_grants.shell_commands),
-                    shell_executables=set(user_grants.shell_executables),
-                    tool_names=set(user_grants.tool_names) | {subject.tool_name},
-                    file_roots=set(user_grants.file_roots),
-                )
-            self.user_store.save(next_grants)
+                delta = UserGrants(tool_names={subject.tool_name})
+            self.user_store.merge(delta)
             scope = "user_file_root" if subject.kind == "file_path" else "user"
             return _decision(True, "allow", scope, subject)
         return _decision(False, "deny", "once", subject, "user_denied")

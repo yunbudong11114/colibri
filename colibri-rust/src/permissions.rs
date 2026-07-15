@@ -1,11 +1,17 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::config::{expand_user_path, AgentConfig};
 use crate::tools::{ToolContext, ToolInfo};
 
 const DEFAULT_USER_PERMISSIONS: &str = "~/.colibri/permissions.toml";
+static NEXT_PERMISSION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserGrants {
@@ -17,12 +23,30 @@ pub struct UserGrants {
 
 pub struct UserPermissionStore {
     pub path: PathBuf,
+    cache: Mutex<PermissionCache>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileFingerprint {
+    device: u64,
+    inode: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    size: u64,
+}
+
+#[derive(Default)]
+struct PermissionCache {
+    loaded: bool,
+    fingerprint: Option<FileFingerprint>,
+    grants: UserGrants,
 }
 
 impl UserPermissionStore {
     pub fn for_user() -> Self {
         Self {
             path: expand_user_path(DEFAULT_USER_PERMISSIONS),
+            cache: Mutex::new(PermissionCache::default()),
         }
     }
 
@@ -32,6 +56,19 @@ impl UserPermissionStore {
     }
 
     pub fn load(&self) -> UserGrants {
+        let fingerprint = self.fingerprint();
+        {
+            let cache = self.cache();
+            if cache.loaded && cache.fingerprint == fingerprint {
+                return cache.grants.clone();
+            }
+        }
+        let (grants, fingerprint) = self.load_stable();
+        self.set_cache(&grants, fingerprint);
+        grants
+    }
+
+    fn load_uncached(&self) -> UserGrants {
         let Ok(text) = fs::read_to_string(&self.path) else {
             return UserGrants::default();
         };
@@ -40,31 +77,138 @@ impl UserPermissionStore {
         };
         UserGrants {
             shell_commands: string_list_at(&value, &["shell", "commands"]),
-            shell_executables: merged_string_lists_at(
-                &value,
-                &[&["shell", "executables"], &["shell", "prefixes"]],
-            ),
+            shell_executables: string_list_at(&value, &["shell", "executables"]),
             tool_names: string_list_at(&value, &["tools", "names"]),
             file_roots: string_list_at(&value, &["files", "roots"]),
         }
     }
 
     pub fn save(&self, grants: &UserGrants) -> Result<(), String> {
+        self.create_parent()?;
+        let _lock = PermissionFileLock::acquire(&self.lock_path())?;
+        let normalized = normalize_grants(grants);
+        self.write_atomic(&normalized)?;
+        self.set_cache(&normalized, self.fingerprint());
+        Ok(())
+    }
+
+    pub fn merge(&self, delta: &UserGrants) -> Result<UserGrants, String> {
+        self.create_parent()?;
+        let _lock = PermissionFileLock::acquire(&self.lock_path())?;
+        let current = self.load_uncached();
+        let merged = UserGrants {
+            shell_commands: union_strings(&current.shell_commands, &delta.shell_commands),
+            shell_executables: union_strings(&current.shell_executables, &delta.shell_executables),
+            tool_names: union_strings(&current.tool_names, &delta.tool_names),
+            file_roots: union_strings(&current.file_roots, &delta.file_roots),
+        };
+        self.write_atomic(&merged)?;
+        self.set_cache(&merged, self.fingerprint());
+        Ok(merged)
+    }
+
+    fn load_stable(&self) -> (UserGrants, Option<FileFingerprint>) {
+        for _ in 0..2 {
+            let before = self.fingerprint();
+            let grants = self.load_uncached();
+            let after = self.fingerprint();
+            if before == after {
+                return (grants, after);
+            }
+        }
+        (self.load_uncached(), self.fingerprint())
+    }
+
+    fn fingerprint(&self) -> Option<FileFingerprint> {
+        let metadata = fs::metadata(&self.path).ok()?;
+        Some(FileFingerprint {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            size: metadata.size(),
+        })
+    }
+
+    fn cache(&self) -> MutexGuard<'_, PermissionCache> {
+        self.cache.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn set_cache(&self, grants: &UserGrants, fingerprint: Option<FileFingerprint>) {
+        let mut cache = self.cache();
+        cache.loaded = true;
+        cache.fingerprint = fingerprint;
+        cache.grants = grants.clone();
+    }
+
+    fn create_parent(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let mut shell_commands = sorted_dedup(grants.shell_commands.clone());
-        let mut shell_executables = sorted_dedup(grants.shell_executables.clone());
-        let mut tool_names = sorted_dedup(grants.tool_names.clone());
-        let mut file_roots = sorted_dedup(grants.file_roots.clone());
-        let text = format!(
-            "[shell]\ncommands = [{}]\nexecutables = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
-            toml_array(&mut shell_commands),
-            toml_array(&mut shell_executables),
-            toml_array(&mut tool_names),
-            toml_array(&mut file_roots)
-        );
-        fs::write(&self.path, text).map_err(|error| error.to_string())
+        Ok(())
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        let filename = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("permissions.toml");
+        self.path.with_file_name(format!("{filename}.lock"))
+    }
+
+    fn write_atomic(&self, grants: &UserGrants) -> Result<(), String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "Permission file has no parent directory".to_string())?;
+        let text = format_grants(grants);
+        let temp_id = NEXT_PERMISSION_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(
+            ".permissions.{}.{}.tmp",
+            std::process::id(),
+            temp_id
+        ));
+        let result = (|| -> Result<(), String> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|error| error.to_string())?;
+            file.write_all(text.as_bytes())
+                .map_err(|error| error.to_string())?;
+            file.flush().map_err(|error| error.to_string())?;
+            drop(file);
+            fs::rename(&temp_path, &self.path).map_err(|error| error.to_string())
+        })();
+        let _ = fs::remove_file(&temp_path);
+        result
+    }
+}
+
+struct PermissionFileLock {
+    file: File,
+}
+
+impl PermissionFileLock {
+    fn acquire(path: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for PermissionFileLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -106,27 +250,21 @@ struct PermissionSubject {
     read_only: bool,
 }
 
-pub struct PermissionPolicy<'a> {
+pub struct PermissionPolicy {
     default_permission: String,
     user_store: UserPermissionStore,
-    prompter: Option<&'a mut dyn PermissionPrompter>,
     session_tool_grants: Vec<String>,
     session_shell_commands: Vec<String>,
     session_shell_executables: Vec<String>,
     session_file_roots: Vec<String>,
 }
 
-impl<'a> PermissionPolicy<'a> {
-    pub fn from_config(
-        config: &AgentConfig,
-        cwd: PathBuf,
-        prompter: Option<&'a mut dyn PermissionPrompter>,
-    ) -> Self {
+impl PermissionPolicy {
+    pub fn from_config(config: &AgentConfig, cwd: PathBuf) -> Self {
         let _ = cwd;
         Self {
             default_permission: config.tools.default_permission.clone(),
             user_store: UserPermissionStore::for_user(),
-            prompter,
             session_tool_grants: Vec::new(),
             session_shell_commands: Vec::new(),
             session_shell_executables: Vec::new(),
@@ -139,6 +277,7 @@ impl<'a> PermissionPolicy<'a> {
         tool: &ToolInfo,
         arguments: &BTreeMap<String, String>,
         context: &ToolContext,
+        prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionDecision {
         let subject = permission_subject_for_internal(tool, arguments, context);
         let hard_denied = if subject.tool_name == "shell.run" {
@@ -174,12 +313,10 @@ impl<'a> PermissionPolicy<'a> {
             file_path: subject.file_path.clone(),
             file_root: subject.file_root.clone(),
         };
-        let choice = self
-            .prompter
-            .as_mut()
+        let choice = prompter
             .map(|prompter| prompter.confirm(request))
             .unwrap_or_else(|| "0".to_string());
-        self.apply_choice(&permission_choice(&choice), &subject, &grants)
+        self.apply_choice(&permission_choice(&choice), &subject)
     }
 
     fn granted(
@@ -237,12 +374,7 @@ impl<'a> PermissionPolicy<'a> {
         }
     }
 
-    fn apply_choice(
-        &mut self,
-        choice: &str,
-        subject: &PermissionSubject,
-        grants: &UserGrants,
-    ) -> PermissionDecision {
+    fn apply_choice(&mut self, choice: &str, subject: &PermissionSubject) -> PermissionDecision {
         if choice == "1" {
             return decision(true, "allow", "once", subject, "");
         }
@@ -272,24 +404,28 @@ impl<'a> PermissionPolicy<'a> {
             return decision(true, "allow", "session_executable", subject, "");
         }
         if choice == "5" && subject.kind == "shell" {
-            let mut next = grants.clone();
+            let mut delta = UserGrants::default();
             push_unique_opt(
-                &mut next.shell_executables,
+                &mut delta.shell_executables,
                 subject.shell_executable.clone(),
             );
-            let _ = self.user_store.save(&next);
+            if self.user_store.merge(&delta).is_err() {
+                return decision(false, "deny", "none", subject, "persist_error");
+            }
             return decision(true, "allow", "user_executable", subject, "");
         }
         if choice == "4" {
-            let mut next = grants.clone();
+            let mut delta = UserGrants::default();
             if subject.kind == "shell" {
-                push_unique_opt(&mut next.shell_commands, subject.shell_command.clone());
+                push_unique_opt(&mut delta.shell_commands, subject.shell_command.clone());
             } else if subject.kind == "file_path" {
-                push_unique_opt(&mut next.file_roots, subject.file_root.clone());
+                push_unique_opt(&mut delta.file_roots, subject.file_root.clone());
             } else {
-                push_unique(&mut next.tool_names, subject.tool_name.clone());
+                push_unique(&mut delta.tool_names, subject.tool_name.clone());
             }
-            let _ = self.user_store.save(&next);
+            if self.user_store.merge(&delta).is_err() {
+                return decision(false, "deny", "none", subject, "persist_error");
+            }
             let scope = if subject.kind == "file_path" {
                 "user_file_root"
             } else {
@@ -401,8 +537,8 @@ pub fn decide_tool_permission(
     context: &ToolContext,
 ) -> PermissionDecision {
     let tool = crate::tools::tool_info(tool_name);
-    let mut policy = PermissionPolicy::from_config(config, context.cwd.clone(), None);
-    policy.decide(&tool, arguments, context)
+    let mut policy = PermissionPolicy::from_config(config, context.cwd.clone());
+    policy.decide(&tool, arguments, context, None)
 }
 
 fn decision(
@@ -472,13 +608,6 @@ fn string_list_at(value: &toml::Value, path: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn merged_string_lists_at(value: &toml::Value, paths: &[&[&str]]) -> Vec<String> {
-    paths
-        .iter()
-        .flat_map(|path| string_list_at(value, path))
-        .collect()
-}
-
 fn sorted_dedup(mut items: Vec<String>) -> Vec<String> {
     items.sort();
     items.dedup();
@@ -492,6 +621,33 @@ fn toml_array(items: &mut Vec<String>) -> String {
         .map(|item| format!("\"{}\"", item.replace('\\', "\\\\").replace('"', "\\\"")))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn union_strings(left: &[String], right: &[String]) -> Vec<String> {
+    sorted_dedup(left.iter().chain(right).cloned().collect())
+}
+
+fn format_grants(grants: &UserGrants) -> String {
+    let mut shell_commands = grants.shell_commands.clone();
+    let mut shell_executables = grants.shell_executables.clone();
+    let mut tool_names = grants.tool_names.clone();
+    let mut file_roots = grants.file_roots.clone();
+    format!(
+        "[shell]\ncommands = [{}]\nexecutables = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
+        toml_array(&mut shell_commands),
+        toml_array(&mut shell_executables),
+        toml_array(&mut tool_names),
+        toml_array(&mut file_roots)
+    )
+}
+
+fn normalize_grants(grants: &UserGrants) -> UserGrants {
+    UserGrants {
+        shell_commands: sorted_dedup(grants.shell_commands.clone()),
+        shell_executables: sorted_dedup(grants.shell_executables.clone()),
+        tool_names: sorted_dedup(grants.tool_names.clone()),
+        file_roots: sorted_dedup(grants.file_roots.clone()),
+    }
 }
 
 fn resolve_path(path: &str, cwd: &Path) -> PathBuf {

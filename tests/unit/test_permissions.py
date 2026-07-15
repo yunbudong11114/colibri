@@ -85,6 +85,34 @@ def test_numeric_session_choice_allows_tool_for_current_session(tmp_path):
     assert len(prompter.requests) == 1
 
 
+def test_concurrent_user_grants_merge_after_prompt_interleaving(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "confirm"}})
+    context = tool_context(config, tmp_path)
+    first_policy = PermissionPolicy.from_config(
+        config,
+        prompter=FakePrompter(replies=["4"], requests=[]),
+        cwd=tmp_path,
+    )
+
+    class InterleavingPrompter:
+        def confirm(self, request: PermissionRequest) -> str:
+            first = first_policy.decide(FakeTool("first.tool", read_only=False), {}, context)
+            assert first.allowed
+            return "4"
+
+    second_policy = PermissionPolicy.from_config(
+        config,
+        prompter=InterleavingPrompter(),
+        cwd=tmp_path,
+    )
+
+    second = second_policy.decide(FakeTool("second.tool", read_only=False), {}, context)
+
+    assert second.allowed
+    assert UserPermissionStore.for_user().load().tool_names == {"first.tool", "second.tool"}
+
+
 def test_deny_policy_blocks_tool_without_prompting(tmp_path):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "deny"}})
     prompter = FakePrompter(replies=["1"], requests=[])

@@ -1257,6 +1257,34 @@ fn session_denies_tool_calls_when_permission_mode_is_deny() {
 }
 
 #[test]
+fn session_permission_grant_survives_multiple_submits() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("session-permission-lifecycle");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let config = AgentConfig::default();
+    let mut session = AgentSession::new(config.clone(), Box::new(PermissionRoundModel));
+    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
+
+    session
+        .submit_with_permission_prompter("first", Some(&mut prompter))
+        .unwrap();
+    session
+        .submit_with_permission_prompter("second", Some(&mut prompter))
+        .unwrap();
+
+    assert_eq!(prompter.requests.len(), 1);
+
+    let mut fresh_session = AgentSession::new(config, Box::new(PermissionRoundModel));
+    let mut fresh_prompter = FakePermissionPrompter::new(vec!["0"]);
+    fresh_session
+        .submit_with_permission_prompter("fresh", Some(&mut fresh_prompter))
+        .unwrap();
+    assert_eq!(fresh_prompter.requests.len(), 1);
+    restore_home(old_home);
+}
+
+#[test]
 fn session_allows_read_only_tool_calls_by_default() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("session-readonly");
@@ -1616,19 +1644,20 @@ fn shell_tool_executes_compound_command_with_real_shell() {
 
 #[test]
 fn permission_policy_matches_python_session_and_user_grants() {
+    let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("permission-policy");
     let old_home = std::env::var_os("HOME");
     std::env::set_var("HOME", &temp);
     let config = AgentConfig::default();
     let context = ToolContext::new(config.clone(), temp.clone());
     let mut prompter = FakePermissionPrompter::new(vec!["2 session-command"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp.clone(), Some(&mut prompter));
+    let mut policy = PermissionPolicy::from_config(&config, temp.clone());
     let shell = ToolInfo::new("shell.run", false);
     let mut args = BTreeMap::new();
     args.insert("command".to_string(), "pwd".to_string());
 
-    let first = policy.decide(&shell, &args, &context);
-    let second = policy.decide(&shell, &args, &context);
+    let first = policy.decide(&shell, &args, &context, Some(&mut prompter));
+    let second = policy.decide(&shell, &args, &context, Some(&mut prompter));
 
     assert!(first.allowed);
     assert_eq!(first.scope, "session");
@@ -1646,11 +1675,10 @@ fn permission_policy_matches_python_session_and_user_grants() {
         })
         .unwrap();
     let mut deny_prompter = FakePermissionPrompter::new(vec!["0"]);
-    let mut user_policy =
-        PermissionPolicy::from_config(&config, temp.clone(), Some(&mut deny_prompter));
+    let mut user_policy = PermissionPolicy::from_config(&config, temp.clone());
     let mut git_args = BTreeMap::new();
     git_args.insert("command".to_string(), "git status".to_string());
-    let granted = user_policy.decide(&shell, &git_args, &context);
+    let granted = user_policy.decide(&shell, &git_args, &context, Some(&mut deny_prompter));
     assert!(granted.allowed);
     assert_eq!(granted.scope, "user");
 
@@ -1663,11 +1691,15 @@ fn permission_policy_matches_python_session_and_user_grants() {
         })
         .unwrap();
     let mut executable_prompter = FakePermissionPrompter::new(vec!["0", "0", "0", "0"]);
-    let mut executable_policy =
-        PermissionPolicy::from_config(&config, temp.clone(), Some(&mut executable_prompter));
+    let mut executable_policy = PermissionPolicy::from_config(&config, temp.clone());
     let mut executable_args = BTreeMap::new();
     executable_args.insert("command".to_string(), "git status --short".to_string());
-    let executable_granted = executable_policy.decide(&shell, &executable_args, &context);
+    let executable_granted = executable_policy.decide(
+        &shell,
+        &executable_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(executable_granted.allowed);
     assert_eq!(executable_granted.scope, "user_executable");
 
@@ -1676,7 +1708,12 @@ fn permission_policy_matches_python_session_and_user_grants() {
         "command".to_string(),
         "git status --short && cargo test".to_string(),
     );
-    let compound_granted = executable_policy.decide(&shell, &compound_args, &context);
+    let compound_granted = executable_policy.decide(
+        &shell,
+        &compound_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(compound_granted.allowed);
     assert_eq!(compound_granted.scope, "user_executable");
 
@@ -1685,13 +1722,23 @@ fn permission_policy_matches_python_session_and_user_grants() {
         "command".to_string(),
         "git status --short & cargo test".to_string(),
     );
-    let background_granted = executable_policy.decide(&shell, &background_args, &context);
+    let background_granted = executable_policy.decide(
+        &shell,
+        &background_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(background_granted.allowed);
     assert_eq!(background_granted.scope, "user_executable");
 
     let mut nonmatch_args = BTreeMap::new();
     nonmatch_args.insert("command".to_string(), "gitz status".to_string());
-    let nonmatch = executable_policy.decide(&shell, &nonmatch_args, &context);
+    let nonmatch = executable_policy.decide(
+        &shell,
+        &nonmatch_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(!nonmatch.allowed);
 
     let mut nonmatch_compound_args = BTreeMap::new();
@@ -1699,7 +1746,12 @@ fn permission_policy_matches_python_session_and_user_grants() {
         "command".to_string(),
         "git status --short && python -V".to_string(),
     );
-    let nonmatch_compound = executable_policy.decide(&shell, &nonmatch_compound_args, &context);
+    let nonmatch_compound = executable_policy.decide(
+        &shell,
+        &nonmatch_compound_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(!nonmatch_compound.allowed);
 
     let mut nonmatch_background_args = BTreeMap::new();
@@ -1707,12 +1759,22 @@ fn permission_policy_matches_python_session_and_user_grants() {
         "command".to_string(),
         "git status --short & python -V".to_string(),
     );
-    let nonmatch_background = executable_policy.decide(&shell, &nonmatch_background_args, &context);
+    let nonmatch_background = executable_policy.decide(
+        &shell,
+        &nonmatch_background_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(!nonmatch_background.allowed);
 
     let mut substitution_args = BTreeMap::new();
     substitution_args.insert("command".to_string(), "git status $(echo ok)".to_string());
-    let substitution = executable_policy.decide(&shell, &substitution_args, &context);
+    let substitution = executable_policy.decide(
+        &shell,
+        &substitution_args,
+        &context,
+        Some(&mut executable_prompter),
+    );
     assert!(!substitution.allowed);
     drop(executable_policy);
     assert_eq!(
@@ -1733,12 +1795,15 @@ fn permission_policy_matches_python_session_and_user_grants() {
     );
 
     let mut user_executable_prompter = FakePermissionPrompter::new(vec!["5 user-executable"]);
-    let mut user_executable_policy =
-        PermissionPolicy::from_config(&config, temp.clone(), Some(&mut user_executable_prompter));
+    let mut user_executable_policy = PermissionPolicy::from_config(&config, temp.clone());
     let mut user_executable_args = BTreeMap::new();
     user_executable_args.insert("command".to_string(), "node --version".to_string());
-    let user_executable_decision =
-        user_executable_policy.decide(&shell, &user_executable_args, &context);
+    let user_executable_decision = user_executable_policy.decide(
+        &shell,
+        &user_executable_args,
+        &context,
+        Some(&mut user_executable_prompter),
+    );
     drop(user_executable_policy);
     assert!(user_executable_decision.allowed);
     assert_eq!(user_executable_decision.scope, "user_executable");
@@ -1750,17 +1815,59 @@ fn permission_policy_matches_python_session_and_user_grants() {
 }
 
 #[test]
+fn permission_policy_persists_user_grants_as_concurrent_deltas() {
+    struct InterleavingPrompter;
+
+    impl PermissionPrompter for InterleavingPrompter {
+        fn confirm(&mut self, request: PermissionRequest) -> String {
+            assert_eq!(request.tool_name, "second.tool");
+            UserPermissionStore::for_user()
+                .merge(&UserGrants {
+                    tool_names: vec!["first.tool".to_string()],
+                    ..UserGrants::default()
+                })
+                .unwrap();
+            "4".to_string()
+        }
+    }
+
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("permission-policy-concurrent-delta");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "confirm".to_string();
+    let context = ToolContext::new(config.clone(), temp.clone());
+    let mut prompter = InterleavingPrompter;
+    let mut policy = PermissionPolicy::from_config(&config, temp);
+
+    let decision = policy.decide(
+        &ToolInfo::new("second.tool", false),
+        &BTreeMap::new(),
+        &context,
+        Some(&mut prompter),
+    );
+
+    assert!(decision.allowed);
+    assert_eq!(
+        UserPermissionStore::for_user().load().tool_names,
+        vec!["first.tool".to_string(), "second.tool".to_string()]
+    );
+    restore_home(old_home);
+}
+
+#[test]
 fn permission_policy_classifies_shell_redirection_as_file_path() {
     let temp = temp_dir("permission-shell-redirection");
     let config = AgentConfig::default();
     let context = ToolContext::new(config.clone(), temp.clone());
     let mut prompter = FakePermissionPrompter::new(vec!["0"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp.clone(), Some(&mut prompter));
+    let mut policy = PermissionPolicy::from_config(&config, temp.clone());
     let shell = ToolInfo::new("shell.run", false);
     let mut args = BTreeMap::new();
     args.insert("command".to_string(), "printf hello > out.txt".to_string());
 
-    let decision = policy.decide(&shell, &args, &context);
+    let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
 
     assert!(!decision.allowed);
     assert_eq!(decision.subject_kind, "file_path");
@@ -1777,12 +1884,12 @@ fn permission_policy_hard_deny_wins_over_shell_redirection_file_path() {
     let config = AgentConfig::default();
     let context = ToolContext::new(config.clone(), temp.clone());
     let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp, Some(&mut prompter));
+    let mut policy = PermissionPolicy::from_config(&config, temp);
     let shell = ToolInfo::new("shell.run", false);
     let mut args = BTreeMap::new();
     args.insert("command".to_string(), "rm old.txt > out.txt".to_string());
 
-    let decision = policy.decide(&shell, &args, &context);
+    let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
 
     assert!(!decision.allowed);
     assert_eq!(decision.scope, "none");
@@ -1801,12 +1908,12 @@ fn permission_policy_classifies_out_of_root_file_paths() {
     config.files.roots = vec![allowed.clone()];
     let context = ToolContext::new(config.clone(), allowed.clone());
     let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-    let mut policy = PermissionPolicy::from_config(&config, allowed, Some(&mut prompter));
+    let mut policy = PermissionPolicy::from_config(&config, allowed);
     let tool = ToolInfo::new("files.list", true);
     let mut args = BTreeMap::new();
     args.insert("path".to_string(), outside.display().to_string());
 
-    let decision = policy.decide(&tool, &args, &context);
+    let decision = policy.decide(&tool, &args, &context, Some(&mut prompter));
 
     assert!(decision.allowed);
     assert_eq!(decision.subject_kind, "file_path");
@@ -1817,6 +1924,7 @@ fn permission_policy_classifies_out_of_root_file_paths() {
 
 #[test]
 fn user_permission_store_saves_and_loads_deduplicated_toml() {
+    let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("permission-store");
     let old_home = std::env::var_os("HOME");
     std::env::set_var("HOME", &temp);
@@ -1850,7 +1958,8 @@ fn user_permission_store_saves_and_loads_deduplicated_toml() {
 }
 
 #[test]
-fn user_permission_store_loads_legacy_shell_prefixes_as_executables() {
+fn user_permission_store_ignores_obsolete_shell_prefixes() {
+    let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("permission-store-legacy-prefixes");
     let old_home = std::env::var_os("HOME");
     std::env::set_var("HOME", &temp);
@@ -1860,10 +1969,58 @@ fn user_permission_store_loads_legacy_shell_prefixes_as_executables() {
 
     let loaded = store.load();
 
-    assert_eq!(
-        loaded.shell_executables,
-        vec!["cargo".to_string(), "git".to_string()]
-    );
+    assert!(loaded.shell_executables.is_empty());
+    restore_home(old_home);
+}
+
+#[test]
+fn user_permission_store_refreshes_cache_after_atomic_replacement() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("permission-store-cache-replacement");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let store = UserPermissionStore::for_user();
+    fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+    fs::write(&store.path, "[shell]\nexecutables = [\"git\"]\n").unwrap();
+
+    assert_eq!(store.load().shell_executables, vec!["git".to_string()]);
+
+    let replacement = store.path.with_extension("replacement");
+    fs::write(&replacement, "[shell]\nexecutables = [\"cargo\"]\n").unwrap();
+    fs::rename(replacement, &store.path).unwrap();
+
+    assert_eq!(store.load().shell_executables, vec!["cargo".to_string()]);
+    restore_home(old_home);
+}
+
+#[test]
+fn user_permission_store_merge_preserves_concurrent_stale_grants() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("permission-store-concurrent-merge");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let first = UserPermissionStore::for_user();
+    let second = UserPermissionStore::for_user();
+
+    assert_eq!(first.load(), UserGrants::default());
+    assert_eq!(second.load(), UserGrants::default());
+
+    first
+        .merge(&UserGrants {
+            shell_commands: vec!["git status".to_string()],
+            ..UserGrants::default()
+        })
+        .unwrap();
+    second
+        .merge(&UserGrants {
+            shell_executables: vec!["cargo".to_string()],
+            ..UserGrants::default()
+        })
+        .unwrap();
+
+    let grants = UserPermissionStore::for_user().load();
+    assert_eq!(grants.shell_commands, vec!["git status".to_string()]);
+    assert_eq!(grants.shell_executables, vec!["cargo".to_string()]);
     restore_home(old_home);
 }
 
@@ -3462,6 +3619,39 @@ impl PermissionPrompter for FakePermissionPrompter {
     fn confirm(&mut self, request: PermissionRequest) -> String {
         self.requests.push(request);
         self.replies.pop().unwrap_or_else(|| "0".to_string())
+    }
+}
+
+struct PermissionRoundModel;
+
+impl ModelClient for PermissionRoundModel {
+    fn complete(
+        &mut self,
+        messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        if messages
+            .last()
+            .is_some_and(|message| message.role == "tool")
+        {
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "done".to_string(),
+                tool_calls: Vec::new(),
+            });
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "permission-call".to_string(),
+                name: "shell.run".to_string(),
+                arguments: serde_json::Map::from_iter([(
+                    "command".to_string(),
+                    serde_json::Value::String("pwd".to_string()),
+                )]),
+            }],
+        })
     }
 }
 

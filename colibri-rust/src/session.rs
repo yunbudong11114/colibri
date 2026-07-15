@@ -30,6 +30,7 @@ pub struct AgentSession {
     media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     history_loader: Option<Box<dyn Fn() -> Vec<Message> + Send>>,
     history_loaded: bool,
+    permission_policy: PermissionPolicy,
     steering: Arc<SteeringState>,
     steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
@@ -60,6 +61,7 @@ impl AgentSession {
         transcript: Option<Arc<Mutex<TranscriptWriter>>>,
         transcript_metadata: BTreeMap<String, String>,
     ) -> Self {
+        let permission_policy = PermissionPolicy::from_config(&config, std::path::PathBuf::new());
         Self {
             config,
             model,
@@ -72,6 +74,7 @@ impl AgentSession {
             media_sender: None,
             history_loader: None,
             history_loaded: false,
+            permission_policy,
             steering: Arc::new(SteeringState::new()),
             steer_notifier: None,
         }
@@ -192,7 +195,6 @@ impl AgentSession {
         if let Some(sender) = &self.media_sender {
             context = context.with_media_sender(Arc::clone(sender));
         }
-        let mut policy = PermissionPolicy::from_config(&self.config, context.cwd.clone(), prompter);
         let memory = MemoryContext::new(Arc::clone(&self.config)).load()?;
         if !memory.text.is_empty() {
             self.write_transcript(
@@ -211,7 +213,8 @@ impl AgentSession {
         let steering = Arc::clone(&self.steering);
         steering.set_turn_active(true);
         let _turn_guard = TurnGuard { steering };
-        self.run_tool_rounds(&memory.text, &skill_text, &tools, &mut policy, &context)
+        let mut prompter = prompter;
+        self.run_tool_rounds(&memory.text, &skill_text, &tools, &context, &mut prompter)
     }
 
     fn run_tool_rounds(
@@ -219,8 +222,8 @@ impl AgentSession {
         memory_text: &str,
         skill_text: &str,
         tools: &[serde_json::Value],
-        policy: &mut PermissionPolicy<'_>,
         context: &ToolContext,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
             let model_messages = self.model_messages_for_completion(memory_text, skill_text);
@@ -260,7 +263,7 @@ impl AgentSession {
 
             let calls = response.tool_calls;
             for index in 0..calls.len() {
-                self.execute_tool_call(&calls[index], policy, context)?;
+                self.execute_tool_call(&calls[index], context, prompter)?;
                 if let Some(steered) = self.steering.drain_one() {
                     let skipped = calls.len() - index - 1;
                     for skipped_call in &calls[index + 1..] {
@@ -288,8 +291,8 @@ impl AgentSession {
     fn execute_tool_call(
         &mut self,
         call: &ToolCall,
-        policy: &mut PermissionPolicy<'_>,
         context: &ToolContext,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<(), String> {
         let execution_arguments = string_arguments(&call.arguments);
         self.write_transcript(
@@ -300,7 +303,21 @@ impl AgentSession {
         let _permission_guard = PermissionPendingGuard {
             steering: Arc::clone(&self.steering),
         };
-        let decision = policy.decide(&tool_info(&call.name), &execution_arguments, context);
+        let decision = if let Some(prompter) = prompter.as_mut() {
+            self.permission_policy.decide(
+                &tool_info(&call.name),
+                &execution_arguments,
+                context,
+                Some(&mut **prompter),
+            )
+        } else {
+            self.permission_policy.decide(
+                &tool_info(&call.name),
+                &execution_arguments,
+                context,
+                None,
+            )
+        };
         drop(_permission_guard);
         self.write_transcript(
             "permission_decision",
