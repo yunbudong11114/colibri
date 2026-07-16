@@ -143,7 +143,7 @@ class SkillIndex:
             "",
         ]
         for skill in selected:
-            location = "[builtin]" if skill.root.name == "builtin" and skill.content is not None else str(skill.root)
+            location = "builtin" if skill.root.name == "builtin" and skill.content is not None else str(skill.root)
             command_text = (
                 f" Commands: {', '.join(command.name for command in skill.commands)}"
                 if skill.commands

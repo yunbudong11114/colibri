@@ -67,6 +67,8 @@ def test_skill_catalog_includes_builtin_and_local_without_bodies(tmp_path):
     assert context.skills[0] == "create-colibri-skill"
     assert "release" in context.skills
     assert context.text.startswith("Available skills")
+    assert "[builtin]" in context.text
+    assert "[[builtin]]" not in context.text
     assert "skill.read" in context.text
     assert "release:" in context.text
     assert "Commands: render" in context.text

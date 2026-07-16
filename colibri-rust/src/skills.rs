@@ -176,7 +176,7 @@ impl SkillIndex {
                 == Some("builtin")
                 && skill.content.is_some()
             {
-                "[builtin]".to_string()
+                "builtin".to_string()
             } else {
                 skill.root.display().to_string()
             };

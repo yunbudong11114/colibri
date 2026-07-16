@@ -2189,6 +2189,8 @@ commands:
     assert_eq!(skills[0], "create-colibri-skill");
     assert!(skills.contains(&"release".to_string()));
     assert!(text.starts_with("Available skills"));
+    assert!(text.contains("[builtin]"));
+    assert!(!text.contains("[[builtin]]"));
     assert!(text.contains("skill.read"));
     assert!(text.contains("release:"));
     assert!(text.contains("Commands: render"));
