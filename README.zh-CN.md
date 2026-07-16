@@ -258,10 +258,27 @@ Skills 统一放在单一目录：
 
 ```text
 ~/.colibri/skills/<name>/SKILL.md
-~/.colibri/skills/<name>/skill.toml   # 可选
+~/.colibri/skills/<name>/scripts/...  # 可选
 ```
 
-每轮只注入有界 skill catalog（name / description / path）。模型需要完整说明时调用 `skill.read`；`skill.toml` 里声明的命令仍由 `skill.run` 执行。
+每个 `SKILL.md` 都必须以 YAML frontmatter 开头，其中的 name 必须与目录名一致：
+
+```markdown
+---
+name: example
+description: 当用户需要示例工作流时使用。
+commands:
+  - name: check
+    description: 运行本地检查。
+    command: python
+    args: [scripts/check.py]
+    read_only: true
+---
+
+# Example Skill
+```
+
+每轮只注入有界 skill catalog（name / description / command names / path）。模型需要完整说明时调用 `skill.read`；当已配置的 command 与用户请求匹配时，应使用 `skill.run`，而不是通过 `shell.run` 直接执行底层命令。
 
 内置 `create-colibri-skill` 仍是指导 skill，不从磁盘扫描。
 

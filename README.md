@@ -274,10 +274,27 @@ Skills live under a single directory:
 
 ```text
 ~/.colibri/skills/<name>/SKILL.md
-~/.colibri/skills/<name>/skill.toml   # optional
+~/.colibri/skills/<name>/scripts/...  # optional
 ```
 
-Colibri injects a bounded skill catalog (name, description, path) into each turn. The model calls `skill.read` when it needs full instructions, and `skill.run` for commands declared in `skill.toml`.
+Every `SKILL.md` must start with YAML frontmatter. The frontmatter name must match the directory name:
+
+```markdown
+---
+name: example
+description: Use when the user needs the example workflow.
+commands:
+  - name: check
+    description: Run the local check.
+    command: python
+    args: [scripts/check.py]
+    read_only: true
+---
+
+# Example Skill
+```
+
+Colibri injects a bounded skill catalog containing each skill's name, description, command names, and path. The model calls `skill.read` when it needs full instructions. When a configured command matches the requested action, the model should use `skill.run` instead of invoking that command through `shell.run`.
 
 Colibri also ships the built-in `create-colibri-skill` guidance skill (not scanned from disk).
 
