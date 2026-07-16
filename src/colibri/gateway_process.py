@@ -7,6 +7,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from colibri.diagnostics import rss_kb
@@ -163,6 +164,27 @@ def update_gateway_agent_status(status: str, *, home: Path | None = None) -> Non
             temporary.unlink()
         except OSError:
             pass
+
+
+class GatewayAgentHealth:
+    def __init__(self, *, home: Path | None = None, initial: str = "healthy"):
+        self.home = home
+        self._status = initial
+        self._lock = threading.Lock()
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    def report(self, status: str) -> None:
+        if status not in {"healthy", "unhealthy"}:
+            raise ValueError(f"invalid agent status: {status}")
+        with self._lock:
+            if status == self._status:
+                return
+            update_gateway_agent_status(status, home=self.home)
+            self._status = status
 
 
 def _gateway_run_command(config_path: Path | None) -> list[str]:

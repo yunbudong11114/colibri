@@ -15,6 +15,7 @@ use crate::channel_registry::build_enabled_channels;
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
 use crate::model::{build_model, ModelClient};
+use crate::runtime_reload::{PartialRuntimeReloader, RuntimeReloadResult, RuntimeSnapshot};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::steering::SteerHandle;
@@ -34,6 +35,43 @@ pub struct GatewayStatus {
     pub reason: String,
 }
 
+pub struct GatewayAgentHealth {
+    status: Mutex<String>,
+    reporter: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Default for GatewayAgentHealth {
+    fn default() -> Self {
+        Self {
+            status: Mutex::new("healthy".to_string()),
+            reporter: Arc::new(update_gateway_agent_status),
+        }
+    }
+}
+
+impl GatewayAgentHealth {
+    pub fn with_reporter(reporter: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        Self {
+            status: Mutex::new("healthy".to_string()),
+            reporter,
+        }
+    }
+
+    pub fn report(&self, status: &str) {
+        if !matches!(status, "healthy" | "unhealthy") {
+            return;
+        }
+        let Ok(mut current) = self.status.lock() else {
+            return;
+        };
+        if current.as_str() == status {
+            return;
+        }
+        (self.reporter)(status);
+        *current = status.to_string();
+    }
+}
+
 pub struct GatewaySessionCache {
     config: Arc<AgentConfig>,
     model: Arc<Mutex<Box<dyn ModelClient>>>,
@@ -45,14 +83,7 @@ pub struct GatewaySessionCache {
     /// Cloned independently of session ownership so receive can steer while
     /// the worker holds the session outside this cache mutex during submit.
     steer_handles: BTreeMap<String, SteerHandle>,
-    config_path: Option<PathBuf>,
-    config_fingerprint: Option<ConfigFingerprint>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ConfigFingerprint {
-    modified_ns: u128,
-    len: u64,
+    runtime_reloader: PartialRuntimeReloader,
 }
 
 struct GatewaySessionEntry {
@@ -71,9 +102,15 @@ impl GatewaySessionCache {
     ) -> Result<Self, String> {
         let active_path = config_path
             .unwrap_or_else(|| crate::config::expand_user_path(crate::config::DEFAULT_USER_CONFIG));
-        let config_fingerprint = config_fingerprint(&active_path);
         let config = Arc::new(config);
         let model = Arc::new(Mutex::new(build_model(&config.model)?));
+        let runtime_reloader = PartialRuntimeReloader::new(
+            active_path,
+            RuntimeSnapshot {
+                config: Arc::clone(&config),
+                model: Arc::clone(&model),
+            },
+        );
         let transcript = if config.session.transcript {
             TranscriptWriter::default_with_metadata_and_limits(
                 BTreeMap::new(),
@@ -103,47 +140,30 @@ impl GatewaySessionCache {
             history_loader,
             entries: BTreeMap::new(),
             steer_handles: BTreeMap::new(),
-            config_path: Some(active_path),
-            config_fingerprint,
+            runtime_reloader,
         })
     }
 
     pub fn reload_if_changed(&mut self) {
-        let Some(path) = self.config_path.as_ref() else {
-            return;
-        };
-        let fingerprint = config_fingerprint(path);
-        if fingerprint == self.config_fingerprint {
-            return;
-        }
-        self.config_fingerprint = fingerprint;
-        let candidate = match AgentConfig::load(Some(path)) {
-            Ok(config) => config,
-            Err(error) => {
+        let snapshot = match self.runtime_reloader.reload_if_changed() {
+            RuntimeReloadResult::Unchanged => return,
+            RuntimeReloadResult::Rejected(error) => {
                 eprintln!("[colibri] config reload skipped: {}", error);
                 return;
             }
+            RuntimeReloadResult::Reloaded(snapshot) => snapshot,
         };
-        let mut next = (*self.config).clone();
-        next.model = candidate.model;
-        next.vision = candidate.vision;
-        next.web_search = candidate.web_search;
-        let model = match build_model(&next.model) {
-            Ok(model) => Arc::new(Mutex::new(model)),
-            Err(error) => {
-                eprintln!("[colibri] config reload skipped: {}", error);
-                return;
-            }
-        };
-        let config = Arc::new(next);
-        self.config = Arc::clone(&config);
-        self.model = Arc::clone(&model);
+        self.config = Arc::clone(&snapshot.config);
+        self.model = Arc::clone(&snapshot.model);
         for entry in self.entries.values_mut() {
             entry
                 .session
-                .adopt_runtime(Arc::clone(&config), Arc::clone(&model));
+                .adopt_runtime(Arc::clone(&snapshot.config), Arc::clone(&snapshot.model));
         }
-        eprintln!("[colibri] config reloaded: model={}", config.model.model);
+        eprintln!(
+            "[colibri] config reloaded: model={}",
+            snapshot.config.model.model
+        );
     }
 
     pub fn get_or_create(&mut self, key: &str) -> Result<&mut AgentSession, String> {
@@ -231,9 +251,11 @@ impl GatewaySessionCache {
         self.evict_idle();
         if let Some(mut entry) = self.entries.remove(key) {
             entry.last_activity_at = Instant::now();
-            entry
-                .session
-                .adopt_runtime(Arc::clone(&self.config), Arc::clone(&self.model));
+            if !Arc::ptr_eq(&entry.session.config, &self.config) {
+                entry
+                    .session
+                    .adopt_runtime(Arc::clone(&self.config), Arc::clone(&self.model));
+            }
             entry.session.set_media_sender(media_sender);
             self.steer_handles
                 .insert(key.to_string(), entry.session.steer_handle());
@@ -741,12 +763,14 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
         config.clone(),
         config_path,
     )?));
+    let health = Arc::new(GatewayAgentHealth::default());
     let mut workers = Vec::with_capacity(max_turns);
     for _ in 0..max_turns {
         let worker_router = Arc::clone(&router);
         let worker_channels = Arc::clone(&channels);
         let worker_waiters = Arc::clone(&waiters);
         let worker_sessions = Arc::clone(&sessions);
+        let worker_health = Arc::clone(&health);
         let worker_error_tx = error_tx.clone();
         workers.push(thread::spawn(move || {
             if let Err(error) = run_turn_worker(
@@ -754,6 +778,7 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
                 worker_channels,
                 worker_waiters,
                 worker_sessions,
+                worker_health,
             ) {
                 let _ = worker_error_tx.send(error);
             }
@@ -831,6 +856,7 @@ fn run_turn_worker(
     channels: Arc<ChannelRegistry>,
     waiters: Arc<ChannelPermissionWaiters>,
     sessions: Arc<Mutex<GatewaySessionCache>>,
+    health: Arc<GatewayAgentHealth>,
 ) -> Result<(), String> {
     while let Some((key, mut envelope)) = router.acquire() {
         let turn_result = (|| -> Result<(), String> {
@@ -888,11 +914,11 @@ fn run_turn_worker(
             let response = match response_result {
                 Ok(response) => response,
                 Err(error) => {
-                    update_gateway_agent_status("unhealthy");
+                    health.report("unhealthy");
                     return Err(error);
                 }
             };
-            update_gateway_agent_status(if response.error_type.is_some() {
+            health.report(if response.error_type.is_some() {
                 "unhealthy"
             } else {
                 "healthy"
@@ -906,20 +932,6 @@ fn run_turn_worker(
         turn_result?;
     }
     Ok(())
-}
-
-fn config_fingerprint(path: &std::path::Path) -> Option<ConfigFingerprint> {
-    let metadata = fs::metadata(path).ok()?;
-    let modified_ns = metadata
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    Some(ConfigFingerprint {
-        modified_ns,
-        len: metadata.len(),
-    })
 }
 
 fn update_gateway_agent_status(status: &str) {
@@ -952,10 +964,13 @@ fn update_gateway_agent_status(status: &str) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use super::{run_channel_poll_loop, run_turn_worker, GatewaySessionCache, InboundRouter};
+    use super::{
+        run_channel_poll_loop, run_turn_worker, GatewayAgentHealth, GatewaySessionCache,
+        InboundRouter,
+    };
     use crate::channel::{
         build_channel_registry, ChannelPermissionWaiters, GatewayChannel, InboundEnvelope,
         OutboundSink,
@@ -990,6 +1005,22 @@ mod tests {
 
     struct FailOnceModel {
         calls: usize,
+    }
+
+    #[test]
+    fn agent_health_persists_only_on_state_change() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let reporter_writes = Arc::clone(&writes);
+        let health = GatewayAgentHealth::with_reporter(Arc::new(move |_| {
+            reporter_writes.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        health.report("healthy");
+        health.report("unhealthy");
+        health.report("unhealthy");
+        health.report("healthy");
+
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
     }
 
     impl ModelClient for FailOnceModel {
@@ -1132,7 +1163,14 @@ mod tests {
         config.session.restore_transcript = false;
         let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config).unwrap()));
 
-        run_turn_worker(router, channels, waiters, sessions).unwrap();
+        run_turn_worker(
+            router,
+            channels,
+            waiters,
+            sessions,
+            Arc::new(GatewayAgentHealth::default()),
+        )
+        .unwrap();
 
         assert_eq!(*texts.lock().unwrap(), vec!["fake: hello"]);
     }
@@ -1202,7 +1240,14 @@ mod tests {
         cache.model = Arc::new(Mutex::new(Box::new(FailOnceModel { calls: 0 })));
         let sessions = Arc::new(Mutex::new(cache));
 
-        run_turn_worker(router, channels, waiters, Arc::clone(&sessions)).unwrap();
+        run_turn_worker(
+            router,
+            channels,
+            waiters,
+            Arc::clone(&sessions),
+            Arc::new(GatewayAgentHealth::default()),
+        )
+        .unwrap();
 
         assert!(sessions
             .lock()

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from colibri.gateway_process import GatewayProcessManager, format_gateway_status
+from colibri.gateway_process import GatewayAgentHealth, GatewayProcessManager, format_gateway_status
 
 
 def test_gateway_process_start_writes_state_and_uses_gateway_run(monkeypatch, tmp_path):
@@ -95,3 +95,19 @@ def test_gateway_process_stop_terminates_verified_gateway_pid(monkeypatch, tmp_p
 
     assert not status.running
     assert kills
+
+
+def test_gateway_agent_health_persists_only_on_state_change(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        "colibri.gateway_process.update_gateway_agent_status",
+        lambda status, home=None: writes.append(status),
+    )
+    health = GatewayAgentHealth()
+
+    health.report("healthy")
+    health.report("unhealthy")
+    health.report("unhealthy")
+    health.report("healthy")
+
+    assert writes == ["unhealthy", "healthy"]

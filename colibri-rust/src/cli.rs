@@ -16,6 +16,7 @@ use crate::permissions::{PermissionPrompter, PermissionRequest};
 use crate::repl_input::{
     read_repl_line_auto, stdin_supports_steering_pump, try_read_line, ReplReadError,
 };
+use crate::runtime_reload::{PartialRuntimeReloader, RuntimeReloadResult};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::steering::SteerHandle;
@@ -383,14 +384,15 @@ fn repl_loop<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     stderr: Arc<Mutex<E>>,
     status: &mut StatusWriter<E>,
     prefer_process_tty: bool,
-    mut plain_answer: bool,
+    plain_answer: bool,
     status_enabled: bool,
 ) -> Result<i32, String> {
     let mut reader = stdin;
     let mut history: Vec<String> = Vec::new();
     let mut last_activity = Instant::now();
     let active_config_path = config_path.unwrap_or_else(|| expand_user_path(DEFAULT_USER_CONFIG));
-    let mut config_fingerprint = file_fingerprint(&active_config_path);
+    let mut runtime_reloader =
+        PartialRuntimeReloader::new(active_config_path, session.runtime_snapshot());
     loop {
         let idle_seconds = if session.config.session.idle_exit_enabled {
             session.config.session.idle_exit_seconds
@@ -438,41 +440,21 @@ fn repl_loop<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
             continue;
         }
         history.push(user_text.clone());
-        let current_fingerprint = file_fingerprint(&active_config_path);
-        if current_fingerprint != config_fingerprint {
-            config_fingerprint = current_fingerprint;
-            match AgentConfig::load(Some(&active_config_path)) {
-                Ok(candidate) => {
-                    let mut next = (*session.config).clone();
-                    next.model = candidate.model;
-                    next.vision = candidate.vision;
-                    next.web_search = candidate.web_search;
-                    match build_model(&next.model) {
-                        Ok(model) => {
-                            plain_answer = next.console.plain_answer;
-                            let config = Arc::new(next);
-                            session.adopt_runtime(Arc::clone(&config), Arc::new(Mutex::new(model)));
-                            status.write(
-                                "config_reloaded",
-                                &[("model", session.config.model.model.as_str())],
-                            );
-                        }
-                        Err(error) => {
-                            let _ = writeln!(
-                                stderr.lock().map_err(|_| "stderr lock poisoned")?,
-                                "[colibri] config reload skipped: {}",
-                                error
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = writeln!(
-                        stderr.lock().map_err(|_| "stderr lock poisoned")?,
-                        "[colibri] config reload skipped: {}",
-                        error
-                    );
-                }
+        match runtime_reloader.reload_if_changed() {
+            RuntimeReloadResult::Unchanged => {}
+            RuntimeReloadResult::Reloaded(snapshot) => {
+                session.adopt_runtime(snapshot.config, snapshot.model);
+                status.write(
+                    "config_reloaded",
+                    &[("model", session.config.model.model.as_str())],
+                );
+            }
+            RuntimeReloadResult::Rejected(error) => {
+                let _ = writeln!(
+                    stderr.lock().map_err(|_| "stderr lock poisoned")?,
+                    "[colibri] config reload skipped: {}",
+                    error
+                );
             }
         }
         status.write("thinking", &[]);
@@ -508,17 +490,6 @@ fn repl_loop<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
         .map_err(|error| error.to_string())?;
         last_activity = Instant::now();
     }
-}
-
-fn file_fingerprint(path: &std::path::Path) -> Option<(u128, u64)> {
-    let metadata = fs::metadata(path).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    Some((modified, metadata.len()))
 }
 
 struct ConsolePermissionPrompter<'a, R: BufRead, W: Write> {

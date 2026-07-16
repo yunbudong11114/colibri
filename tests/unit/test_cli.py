@@ -4,10 +4,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from colibri.cli import main, run_steering_pump
+from colibri.cli import _run_repl, main, run_steering_pump
 from colibri.config import AgentConfig
 from colibri.console import ConsoleStatusWriter
 from colibri.model.errors import ModelError
+from colibri.model.fake import FakeModelClient
+from colibri.session import AgentSession
+from colibri.tools.permissions import PermissionPolicy
 from colibri.repl_input import (
     ReplLineEditor,
     read_escape_sequence,
@@ -119,6 +122,40 @@ def test_repl_hot_reloads_model_vision_and_web_search_only(monkeypatch, tmp_path
 
     assert exit_code == 0
     assert built == ["before", "after-longer"]
+
+
+def test_repl_hot_reload_preserves_session_permission_grants(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[model]\nprovider = "fake"\nmodel = "before"\n', encoding="utf-8")
+    config = AgentConfig.load(config_path)
+    policy = PermissionPolicy.from_config(config)
+    policy.session_shell_commands.add("echo retained")
+    session = AgentSession(
+        config=config,
+        model=FakeModelClient(),
+        permission_policy=policy,
+    )
+    inputs = iter(["hello", "/quit"])
+
+    def read_input(_prompt):
+        value = next(inputs)
+        if value == "hello":
+            config_path.write_text(
+                '[model]\nprovider = "fake"\nmodel = "after-longer"\n',
+                encoding="utf-8",
+            )
+        return value
+
+    exit_code = _run_repl(
+        session,
+        status=ConsoleStatusWriter(enabled=False),
+        config_path=config_path,
+        input_func=read_input,
+    )
+
+    assert exit_code == 0
+    assert session.permission_policy is policy
+    assert session.permission_policy.session_shell_commands == {"echo retained"}
 
 
 def test_repl_continues_after_model_error(monkeypatch, capsys):

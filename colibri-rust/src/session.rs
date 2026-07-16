@@ -7,6 +7,7 @@ use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
 use crate::model::ModelClient;
 use crate::permissions::{PermissionPolicy, PermissionPrompter};
+use crate::runtime_reload::RuntimeSnapshot;
 use crate::skills::skill_catalog;
 use crate::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
 use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
@@ -159,8 +160,13 @@ impl AgentSession {
     ) {
         self.config = config;
         self.model = model;
-        self.permission_policy =
-            PermissionPolicy::from_config(&self.config, std::path::PathBuf::new());
+    }
+
+    pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            config: Arc::clone(&self.config),
+            model: Arc::clone(&self.model),
+        }
     }
 
     pub fn submit_with_permission_prompter(

@@ -14,7 +14,9 @@ use colibri_rust::channel::{
 use colibri_rust::channel_registry::build_enabled_channels;
 use colibri_rust::cli::{run_steering_pump, run_with_io};
 use colibri_rust::config::{expand_user_path, AgentConfig};
-use colibri_rust::gateway::{format_gateway_status, GatewaySessionCache, GatewayStatus};
+use colibri_rust::gateway::{
+    format_gateway_status, GatewayAgentHealth, GatewaySessionCache, GatewayStatus,
+};
 use colibri_rust::memory::MemoryContext;
 use colibri_rust::messages::{MediaPart, Message, ModelLimits, ToolCall};
 use colibri_rust::model::{FakeModel, ModelClient, OpenAiCompatibleModel};
@@ -3075,6 +3077,24 @@ fn gateway_status_reports_stale_state_file() {
 }
 
 #[test]
+fn agent_health_persists_only_on_state_change() {
+    use std::sync::atomic::AtomicUsize;
+
+    let writes = Arc::new(AtomicUsize::new(0));
+    let reporter_writes = Arc::clone(&writes);
+    let health = GatewayAgentHealth::with_reporter(Arc::new(move |_| {
+        reporter_writes.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    health.report("healthy");
+    health.report("unhealthy");
+    health.report("unhealthy");
+    health.report("healthy");
+
+    assert_eq!(writes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn gateway_session_cache_reuses_and_evicts_oldest_like_python() {
     let mut config = AgentConfig::default();
     config.gateway.max_sessions = 1;
@@ -3117,6 +3137,28 @@ fn gateway_hot_reload_applies_only_model_vision_and_web_search() {
     assert_eq!(session.config.vision.model, "vision-after");
     assert_eq!(session.config.web_search.api_key, "search-after");
     assert_eq!(session.config.session.max_tool_rounds, 7);
+}
+
+#[test]
+fn hot_reload_preserves_session_permission_grants() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("hot-reload-permission-lifecycle");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let config = AgentConfig::default();
+    let mut session = AgentSession::new(config.clone(), Box::new(PermissionRoundModel));
+    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
+    session
+        .submit_with_permission_prompter("first", Some(&mut prompter))
+        .unwrap();
+    let replacement_model: Box<dyn ModelClient> = Box::new(PermissionRoundModel);
+    session.adopt_runtime(Arc::new(config), Arc::new(Mutex::new(replacement_model)));
+    session
+        .submit_with_permission_prompter("second", Some(&mut prompter))
+        .unwrap();
+
+    assert_eq!(prompter.requests.len(), 1);
+    restore_home(old_home);
 }
 
 #[test]

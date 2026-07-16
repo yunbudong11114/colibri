@@ -25,6 +25,7 @@ from colibri.model.fake import FakeModelClient
 from colibri.model.errors import ModelError
 from colibri.messages import ModelResponse
 from colibri.tools.permissions import PermissionRequest, PermissionSubject
+from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
 
 
@@ -1036,6 +1037,30 @@ def test_gateway_hot_reload_applies_only_model_vision_and_web_search(monkeypatch
     assert runner.config.vision.model == "vision-after"
     assert runner.config.web_search.api_key == "search-after"
     assert runner.config.session.max_tool_rounds == 7
+
+
+def test_gateway_hot_reload_preserves_session_permission_grants(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[model]\nprovider = "fake"\nmodel = "before"\n', encoding="utf-8")
+    config = AgentConfig.load(config_path)
+    runner = GatewayRunner(
+        config,
+        FakeModelClient(),
+        config_path=config_path,
+        cwd=tmp_path,
+    )
+    policy = PermissionPolicy.from_config(config)
+    policy.session_shell_commands.add("echo retained")
+    session = runner.sessions.get("weixin:user-1", policy)
+    config_path.write_text(
+        '[model]\nprovider = "fake"\nmodel = "after-longer"\n',
+        encoding="utf-8",
+    )
+
+    runner._reload_config_if_changed()
+
+    assert session.permission_policy is policy
+    assert session.permission_policy.session_shell_commands == {"echo retained"}
 
 
 def test_gateway_invalid_reload_keeps_last_known_good_runtime(tmp_path):

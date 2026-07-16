@@ -203,17 +203,26 @@ result and continue the turn.
 `running` remains strictly process-oriented. An unhealthy Agent does not make
 the Gateway process appear stopped.
 
-The background Gateway writes `agent_status` to its existing state file after
-turn completion. Status reads remain config-independent and do not probe the
-model or channels.
+The background Gateway owns an in-memory, thread-safe health state. Turn
+workers report success or failure to that state, but do not directly edit the
+process state file. The health reporter persists `agent_status` only when the
+value changes, serializes writes, and uses atomic replacement. This avoids
+per-turn disk writes and same-temporary-file races when multiple turns finish
+concurrently.
+
+Status reads remain config-independent and do not probe the model or channels.
 
 ## 13. Runtime Configuration Reload
 
-The Gateway and REPL record the active config path and a filesystem
-fingerprint. At the next turn boundary they check whether `config.toml`
-changed. This avoids a permanent watcher thread on small devices while still
-making changes effective on the next user action. One-shot `ask` loads
-configuration once because it has no later turn.
+Python and Rust each provide one shared partial-runtime reloader used by both
+Gateway and REPL. The reloader owns the active config path, filesystem
+fingerprint, last-known-good snapshot, candidate parsing, whitelist merge, and
+model construction. Gateway and REPL only call `reload_if_changed()` at a turn
+boundary.
+
+This avoids a permanent watcher thread on small devices while still making
+changes effective on the next user action. One-shot `ask` loads configuration
+once because it has no later turn.
 
 When the fingerprint changes:
 
@@ -246,3 +255,9 @@ sections are copied into the active runtime snapshot.
 This narrow boundary keeps session limits/history behavior, permissions, tool
 availability, memory roots, Gateway worker/router topology, and channel
 lifecycles stable while a process is running.
+
+Runtime adoption must preserve the existing `PermissionPolicy` object and all
+session-scoped grants. The three hot-reloaded sections do not change permission
+rules, so they must never clear or reconstruct session authorization. A normal
+next turn and the first turn after a successful reload must both retain
+session-level command, executable, tool, file-root, and file-path grants.

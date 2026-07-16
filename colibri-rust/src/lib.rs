@@ -11,6 +11,7 @@ pub mod messages;
 pub mod model;
 pub mod permissions;
 pub mod repl_input;
+pub mod runtime_reload;
 pub mod session;
 pub mod session_history;
 pub mod shell_policy;
