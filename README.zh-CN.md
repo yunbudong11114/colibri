@@ -145,6 +145,8 @@ uv run python -m colibri.cli gateway status
 - `gateway stop`：停止后台 gateway。
 - `gateway restart`：重启后台 gateway。
 - `gateway status`：查看运行状态、PID、RSS、配置路径、日志路径等。
+- `gateway status` 还会显示 `agent_status=healthy|unhealthy`；进程是否运行与 Agent 是否健康相互独立。
+- 运行中的 Gateway 和 REPL 会在下一轮对话前热加载配置中的 `[model]`、`[vision]`、`[web_search]`。无效修改会被拒绝并继续使用上一份可用配置；其他配置项需要重启后生效。
 
 后台状态和日志：
 

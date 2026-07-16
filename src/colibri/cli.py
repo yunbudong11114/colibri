@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import threading
 import time
@@ -97,7 +98,11 @@ def main(
 
         if args.command == "gateway" and args.gateway_action == "run":
             _write_ready_status(config, status)
-            GatewayRunner(config=config, model=build_model_client(config.model)).run()
+            GatewayRunner(
+                config=config,
+                model=build_model_client(config.model),
+                config_path=_active_config_path(args.config),
+            ).run()
             return 0
 
         transcript = (
@@ -126,7 +131,13 @@ def main(
                 return 1 if response.error_type else 0
 
             if args.command == "repl":
-                return _run_repl(session, status=status, input_func=input_func, monotonic_func=monotonic_func)
+                return _run_repl(
+                    session,
+                    status=status,
+                    config_path=_active_config_path(args.config),
+                    input_func=input_func,
+                    monotonic_func=monotonic_func,
+                )
 
             return 2
         finally:
@@ -177,11 +188,14 @@ def _run_repl(
     session: AgentSession,
     *,
     status: ConsoleStatusWriter,
+    config_path: Path | None = None,
     input_func: Callable[[str], str | None] | None = None,
     monotonic_func: Callable[[], float] = monotonic,
 ) -> int:
     last_activity = monotonic_func()
     history: list[str] = []
+    active_config_path = config_path or expand_user_path(DEFAULT_USER_CONFIG)
+    config_fingerprint = _config_fingerprint(active_config_path)
     while True:
         idle_seconds = session.config.session.idle_exit_seconds if session.config.session.idle_exit_enabled else 0
         if idle_seconds > 0 and monotonic_func() - last_activity >= idle_seconds:
@@ -207,6 +221,26 @@ def _run_repl(
         if not user_text.strip():
             continue
         history.append(user_text)
+
+        current_fingerprint = _config_fingerprint(active_config_path)
+        if current_fingerprint != config_fingerprint:
+            config_fingerprint = current_fingerprint
+            try:
+                candidate = AgentConfig.load(active_config_path)
+                reloaded = replace(
+                    session.config,
+                    model=candidate.model,
+                    vision=candidate.vision,
+                    web_search=candidate.web_search,
+                )
+                session.config = reloaded
+                session.model = build_model_client(reloaded.model)
+                session.tools = None
+                session.permission_policy = None
+                session._image_analyzer = None
+                status.write("config_reloaded", model=reloaded.model.model)
+            except Exception as error:
+                print(f"Config reload failed: {error}", file=sys.stderr)
 
         stop = threading.Event()
         pump_thread: threading.Thread | None = None
@@ -252,6 +286,14 @@ def _write_ready_status(config: AgentConfig, status: ConsoleStatusWriter) -> Non
 
 def _active_config_path(path: Path | None) -> Path:
     return path if path is not None else expand_user_path(DEFAULT_USER_CONFIG)
+
+
+def _config_fingerprint(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
 def save_weixin_auth_config(path: Path, token: str, base_url: str) -> None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import queue
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+import sys
 import threading
 from time import monotonic
 from typing import Callable
@@ -10,6 +11,9 @@ from typing import Callable
 from colibri.channels.base import Channel, ChannelContext, InboundMessage
 from colibri.channels.registry import build_channel_registry, build_enabled_channels
 from colibri.config import AgentConfig, ConfigError
+from colibri.config import DEFAULT_USER_CONFIG, expand_user_path
+from colibri.gateway_process import update_gateway_agent_status
+from colibri.model.factory import build_model_client
 from colibri.inbound_router import InboundRouter
 from colibri.media import MediaPart
 from colibri.messages import Message
@@ -121,6 +125,14 @@ class GatewaySessionCache:
                 self.transcript.close()
                 self.transcript = None
 
+    def apply_runtime(self, config: AgentConfig, model: ModelClient, registry: ToolRegistry) -> None:
+        with self._lock:
+            self.config = config
+            self.model = model
+            self.registry = registry
+            for entry in self._entries.values():
+                _adopt_session_runtime(entry.session, config, model, registry)
+
     def _get_or_create_locked(
         self,
         key: str,
@@ -190,10 +202,14 @@ class GatewayRunner:
         *,
         registry: ToolRegistry | None = None,
         cwd: Path | None = None,
+        config_path: Path | None = None,
     ):
         self.config = config
         self.model = model
         self.registry = registry or ToolRegistry.from_config(config, cwd=cwd)
+        self.config_path = (config_path or expand_user_path(DEFAULT_USER_CONFIG)).expanduser()
+        self._config_fingerprint = _config_fingerprint(self.config_path)
+        self._runtime_lock = threading.Lock()
         transcript = (
             TranscriptWriter.default(
                 retention_days=config.session.transcript_retention_days,
@@ -337,6 +353,7 @@ class GatewayRunner:
             router.close()
 
     def handle_message(self, channel: Channel, message: InboundMessage) -> str:
+        self._reload_config_if_changed()
         key = f"{message.channel}:{message.sender_id}"
         prompter = channel.permission_prompter(message.sender_id)
         policy = PermissionPolicy.from_config(
@@ -355,16 +372,50 @@ class GatewayRunner:
             },
             media_sender=outbound.send_media,
         )
+        _adopt_session_runtime(session, self.config, self.model, self.registry)
         session.steer_notifier = outbound.send_ack
         try:
             if session.is_turn_active():
                 if session.steer(message.text):
                     return ""
             response = session.submit(message.text, media=message.media)
+            update_gateway_agent_status("unhealthy" if response.error_type else "healthy")
             return response.text
+        except Exception:
+            update_gateway_agent_status("unhealthy")
+            raise
         finally:
             self.sessions.put_back(key, session)
             self.sessions.touch(key)
+
+    def _reload_config_if_changed(self) -> None:
+        fingerprint = _config_fingerprint(self.config_path)
+        if fingerprint == self._config_fingerprint:
+            return
+        with self._runtime_lock:
+            fingerprint = _config_fingerprint(self.config_path)
+            if fingerprint == self._config_fingerprint:
+                return
+            try:
+                candidate = AgentConfig.load(self.config_path)
+                config = replace(
+                    self.config,
+                    model=candidate.model,
+                    vision=candidate.vision,
+                    web_search=candidate.web_search,
+                )
+                model = build_model_client(config.model)
+                registry = ToolRegistry.from_config(config, cwd=self.registry.cwd)
+            except Exception as error:
+                self._config_fingerprint = fingerprint
+                print(f"[colibri] config reload skipped: {error}", file=sys.stderr)
+                return
+            self.config = config
+            self.model = model
+            self.registry = registry
+            self.sessions.apply_runtime(config, model, registry)
+            self._config_fingerprint = fingerprint
+            print(f"[colibri] config reloaded: model={config.model.model}", file=sys.stderr)
 
     def _build_channels(self) -> list[Channel]:
         return build_enabled_channels(self.config)
@@ -385,3 +436,24 @@ class OutboundSink:
 
     def send_media(self, media: MediaPart) -> None:
         self.channel.send_media(self.recipient_id, media)
+
+
+def _config_fingerprint(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def _adopt_session_runtime(
+    session: AgentSession,
+    config: AgentConfig,
+    model: ModelClient,
+    registry: ToolRegistry,
+) -> None:
+    session.config = config
+    session.model = model
+    session.tools = registry
+    session.permission_policy = None
+    session._image_analyzer = None

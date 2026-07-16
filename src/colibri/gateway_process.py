@@ -23,6 +23,7 @@ class GatewayProcessStatus:
     config_path: str
     cwd: str
     started_at: str
+    agent_status: str = "healthy"
     rss_kb: int | None = None
     reason: str = ""
 
@@ -55,6 +56,7 @@ class GatewayProcessManager:
             )
         state = {
             "pid": process.pid,
+            "agent_status": "healthy",
             "config": str(config_path.expanduser()) if config_path is not None else "default",
             "cwd": str(self.cwd),
             "log": str(self.log_path),
@@ -111,6 +113,7 @@ class GatewayProcessManager:
             config_path=str(state.get("config") or "default"),
             cwd=str(state.get("cwd") or ""),
             started_at=str(state.get("started_at") or ""),
+            agent_status=str(state.get("agent_status") or "healthy") if running else "unhealthy",
             rss_kb=_rss_kb(pid) if running and pid is not None else None,
             reason=reason,
         )
@@ -125,6 +128,7 @@ class GatewayProcessManager:
 def format_gateway_status(status: GatewayProcessStatus) -> list[str]:
     lines = [
         f"running={str(status.running).lower()}",
+        f"agent_status={getattr(status, 'agent_status', 'healthy' if status.running else 'unhealthy')}",
         f"pid={status.pid if status.pid is not None else 'unknown'}",
         f"rss_kb={status.rss_kb if status.rss_kb is not None else 'unknown'}",
         f"config={status.config_path}",
@@ -137,6 +141,28 @@ def format_gateway_status(status: GatewayProcessStatus) -> list[str]:
     if status.reason:
         lines.append(f"reason={status.reason}")
     return lines
+
+
+def update_gateway_agent_status(status: str, *, home: Path | None = None) -> None:
+    if status not in {"healthy", "unhealthy"}:
+        raise ValueError(f"invalid agent status: {status}")
+    state_path = (home or colibri_home()) / "run" / "gateway.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if _int_or_none(state.get("pid")) != os.getpid():
+        return
+    state["agent_status"] = status
+    temporary = state_path.with_suffix(".json.tmp")
+    try:
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(state_path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def _gateway_run_command(config_path: Path | None) -> list[str]:

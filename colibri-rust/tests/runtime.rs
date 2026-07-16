@@ -724,9 +724,7 @@ fn repl_continues_after_model_error_like_python() {
                     body: b"temporary".to_vec(),
                 }
             } else {
-                TestHttpResponse::json(
-                    r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
-                )
+                TestHttpResponse::json(r#"{"choices":[{"message":{"content":"recovered"}}]}"#)
             }
         }
     });
@@ -2443,7 +2441,10 @@ fn skill_index_skips_invalid_yaml_frontmatter_like_python() {
 
         let skills = SkillIndex::scan(&temp.join("skills"));
 
-        assert!(skills.get("release").is_none(), "document {index} was accepted");
+        assert!(
+            skills.get("release").is_none(),
+            "document {index} was accepted"
+        );
     }
 }
 
@@ -2570,9 +2571,7 @@ fn openai_compatible_retries_transient_http_error_then_succeeds() {
                     body: b"temporary".to_vec(),
                 }
             } else {
-                TestHttpResponse::json(
-                    r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
-                )
+                TestHttpResponse::json(r#"{"choices":[{"message":{"content":"recovered"}}]}"#)
             }
         }
     });
@@ -3062,6 +3061,7 @@ fn gateway_status_reports_stale_state_file() {
         lines,
         vec![
             "running=false".to_string(),
+            "agent_status=unhealthy".to_string(),
             "pid=999999".to_string(),
             "rss_kb=unknown".to_string(),
             "config=default".to_string(),
@@ -3091,6 +3091,32 @@ fn gateway_session_cache_reuses_and_evicts_oldest_like_python() {
     assert_eq!(cache.len(), 1);
     assert!(!cache.contains_key("weixin:user-1"));
     assert!(cache.contains_key("weixin:user-2"));
+}
+
+#[test]
+fn gateway_hot_reload_applies_only_model_vision_and_web_search() {
+    let temp = temp_dir("gateway-hot-reload");
+    let path = temp.join("config.toml");
+    fs::write(
+        &path,
+        "[model]\nprovider = \"fake\"\nmodel = \"before\"\n[session]\nmax_tool_rounds = 7\n",
+    )
+    .unwrap();
+    let config = AgentConfig::load(Some(&path)).unwrap();
+    let mut cache = GatewaySessionCache::new_with_config_path(config, Some(path.clone())).unwrap();
+    fs::write(
+        &path,
+        "[model]\nprovider = \"fake\"\nmodel = \"after-longer\"\n[vision]\nmodel = \"vision-after\"\n[web_search]\napi_key = \"search-after\"\n[session]\nmax_tool_rounds = 99\n",
+    )
+    .unwrap();
+
+    cache.reload_if_changed();
+    let session = cache.get_or_create("weixin:user").unwrap();
+
+    assert_eq!(session.config.model.model, "after-longer");
+    assert_eq!(session.config.vision.model, "vision-after");
+    assert_eq!(session.config.web_search.api_key, "search-after");
+    assert_eq!(session.config.session.max_tool_rounds, 7);
 }
 
 #[test]

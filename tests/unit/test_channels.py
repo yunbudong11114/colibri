@@ -1004,6 +1004,57 @@ def test_gateway_runner_keeps_session_after_model_error(tmp_path):
     assert recovered == "recovered"
 
 
+def test_gateway_hot_reload_applies_only_model_vision_and_web_search(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[model]\nprovider = "fake"\nmodel = "before"\n[session]\nmax_tool_rounds = 7\n',
+        encoding="utf-8",
+    )
+    config = AgentConfig.load(config_path)
+    runner = GatewayRunner(
+        config,
+        FakeModelClient(),
+        config_path=config_path,
+        cwd=tmp_path,
+    )
+    config_path.write_text(
+        '[model]\nprovider = "fake"\nmodel = "after-longer"\n'
+        '[vision]\nmodel = "vision-after"\n'
+        '[web_search]\napi_key = "search-after"\n'
+        '[session]\nmax_tool_rounds = 99\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "build_model_client",
+        lambda model_config: FakeModelClient(),
+    )
+
+    runner._reload_config_if_changed()
+
+    assert runner.config.model.model == "after-longer"
+    assert runner.config.vision.model == "vision-after"
+    assert runner.config.web_search.api_key == "search-after"
+    assert runner.config.session.max_tool_rounds == 7
+
+
+def test_gateway_invalid_reload_keeps_last_known_good_runtime(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[model]\nprovider = "fake"\nmodel = "before"\n', encoding="utf-8")
+    config = AgentConfig.load(config_path)
+    runner = GatewayRunner(
+        config,
+        FakeModelClient(),
+        config_path=config_path,
+        cwd=tmp_path,
+    )
+    config_path.write_text("[model\n", encoding="utf-8")
+
+    runner._reload_config_if_changed()
+
+    assert runner.config.model.model == "before"
+
+
 def test_gateway_runner_passes_inbound_media_paths_to_session(tmp_path):
     config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
     channel = FakeChannel("weixin", [])

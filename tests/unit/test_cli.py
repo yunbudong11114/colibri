@@ -85,6 +85,42 @@ def test_repl_exits_on_quit(capsys):
     assert "fake: hello" in captured.out
 
 
+def test_repl_hot_reloads_model_vision_and_web_search_only(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[model]\nprovider = "fake"\nmodel = "before"\n[session]\nmax_tool_rounds = 7\n',
+        encoding="utf-8",
+    )
+    built = []
+
+    def build(model_config):
+        built.append(model_config.model)
+        from colibri.model.fake import FakeModelClient
+
+        return FakeModelClient()
+
+    inputs = iter(["hello", "/quit"])
+
+    def read_input(_prompt):
+        value = next(inputs)
+        if value == "hello":
+            config_path.write_text(
+                '[model]\nprovider = "fake"\nmodel = "after-longer"\n'
+                '[vision]\nmodel = "vision-after"\n'
+                '[web_search]\napi_key = "search-after"\n'
+                '[session]\nmax_tool_rounds = 99\n',
+                encoding="utf-8",
+            )
+        return value
+
+    monkeypatch.setattr("colibri.cli.build_model_client", build)
+
+    exit_code = main(["--config", str(config_path), "repl"], input_func=read_input)
+
+    assert exit_code == 0
+    assert built == ["before", "after-longer"]
+
+
 def test_repl_continues_after_model_error(monkeypatch, capsys):
     class FailOnceModel:
         def __init__(self):
@@ -156,8 +192,8 @@ def test_parser_accepts_gateway_run_command(monkeypatch):
     called = []
 
     class FakeGateway:
-        def __init__(self, config, model):
-            called.append((config, model))
+        def __init__(self, config, model, config_path=None):
+            called.append((config, model, config_path))
 
         def run(self):
             called.append("run")

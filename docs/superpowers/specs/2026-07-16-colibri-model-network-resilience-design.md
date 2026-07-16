@@ -178,3 +178,71 @@ Python and Rust tests cover:
 - Channels remain transport-only and unchanged.
 - Python and Rust full test suites pass.
 - A new Rust release binary is built and copied to `~/.local/bin/colibri`.
+
+## 12. Gateway Agent Health
+
+`gateway status` reports process state and one coarse Agent health state:
+
+```text
+running=true
+agent_status=healthy
+```
+
+The only allowed Agent states are:
+
+- `healthy`: the Gateway has not observed a failed Agent turn since startup, or
+  the most recent completed Agent turn succeeded;
+- `unhealthy`: the most recent completed Agent turn failed because the model
+  was unavailable, configuration reload failed, or another Agent-runtime error
+  prevented a normal response.
+
+Tool failures such as an unavailable `web.search` are normal tool results and
+do not by themselves mark the Agent unhealthy. The model can consume that
+result and continue the turn.
+
+`running` remains strictly process-oriented. An unhealthy Agent does not make
+the Gateway process appear stopped.
+
+The background Gateway writes `agent_status` to its existing state file after
+turn completion. Status reads remain config-independent and do not probe the
+model or channels.
+
+## 13. Runtime Configuration Reload
+
+The Gateway and REPL record the active config path and a filesystem
+fingerprint. At the next turn boundary they check whether `config.toml`
+changed. This avoids a permanent watcher thread on small devices while still
+making changes effective on the next user action. One-shot `ask` loads
+configuration once because it has no later turn.
+
+When the fingerprint changes:
+
+1. parse and validate the complete file;
+2. construct the replacement model client and runtime dependencies;
+3. atomically publish a last-known-good Agent runtime snapshot;
+4. make each session adopt that snapshot at its next turn boundary while
+   preserving messages and summary;
+5. continue channel polling without restarting the Gateway process.
+
+REPL performs the same reload before submitting the next non-empty prompt. It
+replaces the model and runtime dependencies while preserving the current
+conversation messages and summary.
+
+If parsing, validation, or model construction fails, the Gateway/REPL rejects
+the candidate, logs `config reload skipped`, and continues the current turn
+with the last-known-good runtime. A later file change retries reload. An
+invalid pending edit does not by itself mark the Agent unhealthy because the
+active runtime may still be usable.
+
+The default config path is `~/.colibri/config.toml`, including when the Gateway
+was started without an explicit `--config`. File appearance, replacement,
+content modification, and deletion all change the fingerprint.
+
+The hot-reload whitelist contains only `model`, `vision`, and `web_search`.
+All other sections are startup-scoped and require a process restart. Candidate
+files are still completely parsed and validated, but only the three whitelisted
+sections are copied into the active runtime snapshot.
+
+This narrow boundary keeps session limits/history behavior, permissions, tool
+availability, memory roots, Gateway worker/router topology, and channel
+lifecycles stable while a process is running.

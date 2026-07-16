@@ -152,6 +152,17 @@ impl AgentSession {
         self.media_sender = sender;
     }
 
+    pub fn adopt_runtime(
+        &mut self,
+        config: Arc<AgentConfig>,
+        model: Arc<Mutex<Box<dyn ModelClient>>>,
+    ) {
+        self.config = config;
+        self.model = model;
+        self.permission_policy =
+            PermissionPolicy::from_config(&self.config, std::path::PathBuf::new());
+    }
+
     pub fn submit_with_permission_prompter(
         &mut self,
         text: &str,

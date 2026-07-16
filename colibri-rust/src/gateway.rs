@@ -23,6 +23,7 @@ use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
 #[derive(Clone, Debug)]
 pub struct GatewayStatus {
     pub running: bool,
+    pub agent_status: String,
     pub pid: Option<String>,
     pub rss_kb: Option<String>,
     pub config_path: String,
@@ -44,6 +45,14 @@ pub struct GatewaySessionCache {
     /// Cloned independently of session ownership so receive can steer while
     /// the worker holds the session outside this cache mutex during submit.
     steer_handles: BTreeMap<String, SteerHandle>,
+    config_path: Option<PathBuf>,
+    config_fingerprint: Option<ConfigFingerprint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConfigFingerprint {
+    modified_ns: u128,
+    len: u64,
 }
 
 struct GatewaySessionEntry {
@@ -53,6 +62,16 @@ struct GatewaySessionEntry {
 
 impl GatewaySessionCache {
     pub fn new(config: AgentConfig) -> Result<Self, String> {
+        Self::new_with_config_path(config, None)
+    }
+
+    pub fn new_with_config_path(
+        config: AgentConfig,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let active_path = config_path
+            .unwrap_or_else(|| crate::config::expand_user_path(crate::config::DEFAULT_USER_CONFIG));
+        let config_fingerprint = config_fingerprint(&active_path);
         let config = Arc::new(config);
         let model = Arc::new(Mutex::new(build_model(&config.model)?));
         let transcript = if config.session.transcript {
@@ -84,7 +103,47 @@ impl GatewaySessionCache {
             history_loader,
             entries: BTreeMap::new(),
             steer_handles: BTreeMap::new(),
+            config_path: Some(active_path),
+            config_fingerprint,
         })
+    }
+
+    pub fn reload_if_changed(&mut self) {
+        let Some(path) = self.config_path.as_ref() else {
+            return;
+        };
+        let fingerprint = config_fingerprint(path);
+        if fingerprint == self.config_fingerprint {
+            return;
+        }
+        self.config_fingerprint = fingerprint;
+        let candidate = match AgentConfig::load(Some(path)) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("[colibri] config reload skipped: {}", error);
+                return;
+            }
+        };
+        let mut next = (*self.config).clone();
+        next.model = candidate.model;
+        next.vision = candidate.vision;
+        next.web_search = candidate.web_search;
+        let model = match build_model(&next.model) {
+            Ok(model) => Arc::new(Mutex::new(model)),
+            Err(error) => {
+                eprintln!("[colibri] config reload skipped: {}", error);
+                return;
+            }
+        };
+        let config = Arc::new(next);
+        self.config = Arc::clone(&config);
+        self.model = Arc::clone(&model);
+        for entry in self.entries.values_mut() {
+            entry
+                .session
+                .adopt_runtime(Arc::clone(&config), Arc::clone(&model));
+        }
+        eprintln!("[colibri] config reloaded: model={}", config.model.model);
     }
 
     pub fn get_or_create(&mut self, key: &str) -> Result<&mut AgentSession, String> {
@@ -172,6 +231,9 @@ impl GatewaySessionCache {
         self.evict_idle();
         if let Some(mut entry) = self.entries.remove(key) {
             entry.last_activity_at = Instant::now();
+            entry
+                .session
+                .adopt_runtime(Arc::clone(&self.config), Arc::clone(&self.model));
             entry.session.set_media_sender(media_sender);
             self.steer_handles
                 .insert(key.to_string(), entry.session.steer_handle());
@@ -290,6 +352,7 @@ impl GatewayStatus {
         if !state_path.is_file() {
             return Self {
                 running: false,
+                agent_status: "unhealthy".to_string(),
                 pid: None,
                 rss_kb: None,
                 config_path: "default".to_string(),
@@ -315,6 +378,11 @@ impl GatewayStatus {
             .map(|value| value.to_string());
         Self {
             running,
+            agent_status: if running {
+                json_field(&text, "agent_status").unwrap_or_else(|| "healthy".to_string())
+            } else {
+                "unhealthy".to_string()
+            },
             pid,
             rss_kb,
             config_path: json_field(&text, "config").unwrap_or_else(|| {
@@ -363,7 +431,7 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let started_at = beijing_timestamp_now();
     let state = format!(
-        "{{\"pid\":{},\"config\":\"{}\",\"cwd\":\"{}\",\"log\":\"{}\",\"started_at\":\"{}\"}}\n",
+        "{{\"pid\":{},\"agent_status\":\"healthy\",\"config\":\"{}\",\"cwd\":\"{}\",\"log\":\"{}\",\"started_at\":\"{}\"}}\n",
         process.id(),
         config_path
             .as_ref()
@@ -417,6 +485,7 @@ pub fn restart_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, St
 pub fn format_gateway_status(status: &GatewayStatus) -> Vec<String> {
     let mut lines = vec![
         format!("running={}", status.running),
+        format!("agent_status={}", status.agent_status),
         format!("pid={}", status.pid.as_deref().unwrap_or("unknown")),
         format!("rss_kb={}", status.rss_kb.as_deref().unwrap_or("unknown")),
         format!("config={}", status.config_path),
@@ -658,7 +727,7 @@ impl<T> InboundRouter<T> {
 }
 
 /// Foreground gateway: enabled channel pollers → inbound router → turn workers.
-pub fn run_gateway(config: AgentConfig) -> Result<i32, String> {
+pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<i32, String> {
     let channels = Arc::new(build_enabled_channels(&config)?);
     if channels.is_empty() {
         return Err("No gateway channels are enabled".to_string());
@@ -668,7 +737,10 @@ pub fn run_gateway(config: AgentConfig) -> Result<i32, String> {
     let router = Arc::new(InboundRouter::new(max_pending));
     let (error_tx, error_rx) = mpsc::channel::<String>();
     let waiters = Arc::new(ChannelPermissionWaiters::default());
-    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config.clone())?));
+    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new_with_config_path(
+        config.clone(),
+        config_path,
+    )?));
     let mut workers = Vec::with_capacity(max_turns);
     for _ in 0..max_turns {
         let worker_router = Arc::clone(&router);
@@ -774,6 +846,7 @@ fn run_turn_worker(
                 let mut guard = sessions
                     .lock()
                     .map_err(|_| "gateway session cache lock poisoned".to_string())?;
+                guard.reload_if_changed();
                 guard.take_or_create_with_metadata_and_media_sender(
                     &key,
                     BTreeMap::from([
@@ -812,7 +885,18 @@ fn run_turn_worker(
                 guard.put_back(&key, session);
                 guard.touch(&key);
             }
-            let response = response_result?;
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    update_gateway_agent_status("unhealthy");
+                    return Err(error);
+                }
+            };
+            update_gateway_agent_status(if response.error_type.is_some() {
+                "unhealthy"
+            } else {
+                "healthy"
+            });
             if !response.text.trim().is_empty() {
                 outbound.send_text(&response.text)?;
             }
@@ -822,6 +906,47 @@ fn run_turn_worker(
         turn_result?;
     }
     Ok(())
+}
+
+fn config_fingerprint(path: &std::path::Path) -> Option<ConfigFingerprint> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(ConfigFingerprint {
+        modified_ns,
+        len: metadata.len(),
+    })
+}
+
+fn update_gateway_agent_status(status: &str) {
+    if !matches!(status, "healthy" | "unhealthy") {
+        return;
+    }
+    let state_path = colibri_home().join("run/gateway.json");
+    let Ok(text) = fs::read_to_string(&state_path) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if value.get("pid").and_then(serde_json::Value::as_u64) != Some(std::process::id() as u64) {
+        return;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "agent_status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
+    let temporary = state_path.with_extension("json.tmp");
+    if fs::write(&temporary, format!("{}\n", value)).is_ok() {
+        let _ = fs::rename(temporary, state_path);
+    }
 }
 
 #[cfg(test)]
@@ -1086,10 +1211,7 @@ mod tests {
             .contains_key("other:user-1"));
         assert_eq!(
             *texts.lock().unwrap(),
-            vec![
-                MODEL_UNAVAILABLE_TEXT.to_string(),
-                "recovered".to_string()
-            ]
+            vec![MODEL_UNAVAILABLE_TEXT.to_string(), "recovered".to_string()]
         );
     }
 }

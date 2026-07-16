@@ -154,6 +154,8 @@ uv run python -m colibri.cli gateway status
 - `gateway stop`: stops the background gateway.
 - `gateway restart`: stop then start.
 - `gateway status`: prints process status, PID, RSS when available, config path, state path, and log path.
+- `gateway status` also prints `agent_status=healthy|unhealthy`. Process state and Agent health are independent.
+- Running Gateway and REPL processes reload `[model]`, `[vision]`, and `[web_search]` from the active config before the next turn. Invalid edits are rejected and the last-known-good runtime remains active. Other sections require a restart.
 
 Background state and logs:
 

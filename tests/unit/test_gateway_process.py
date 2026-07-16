@@ -49,6 +49,7 @@ def test_format_gateway_status_is_key_value(tmp_path):
     lines = format_gateway_status(status)
 
     assert "running=false" in lines
+    assert "agent_status=unhealthy" in lines
     assert f"state={manager.state_path}" in lines
 
 
