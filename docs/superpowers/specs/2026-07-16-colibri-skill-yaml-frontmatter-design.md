@@ -32,7 +32,7 @@ Every `SKILL.md` must begin with a YAML document bounded by `---` lines:
 
 ```markdown
 ---
-name: nas-sync
+name: memory-sync
 description: >
   Back up and restore Colibri data through NAS WebDAV.
 commands:
@@ -44,7 +44,7 @@ commands:
     read_only: false
 ---
 
-# NAS Sync
+# Memory Sync
 ```
 
 Fields:
@@ -97,7 +97,7 @@ underlying executable through shell.run.
 Each entry includes name, description, command names when present, and path:
 
 ```text
-- nas-sync: Back up and restore Colibri data through NAS WebDAV. Commands: upload, download [/home/user/.colibri/skills/nas-sync]
+- memory-sync: Back up and restore Colibri data through NAS WebDAV. Commands: upload, download [/home/user/.colibri/skills/memory-sync]
 ```
 
 Skills without commands omit the `Commands:` portion.
@@ -108,8 +108,8 @@ Skills without commands omit the `Commands:` portion.
 header additionally lists configured commands with descriptions:
 
 ```text
-[nas-sync]
-Base directory: /home/user/.colibri/skills/nas-sync
+[memory-sync]
+Base directory: /home/user/.colibri/skills/memory-sync
 Configured commands:
 - upload: Upload local Colibri data to NAS.
 - download: Restore Colibri data from NAS.
@@ -158,7 +158,7 @@ required structure explicit.
 All repository-owned and currently installed Colibri skills in scope are
 migrated to frontmatter:
 
-- `nas-sync` moves its description and commands into `SKILL.md`;
+- `memory-sync` moves its description and commands into `SKILL.md`;
 - its `skill.toml` is deleted;
 - test fixtures use frontmatter-only skills.
 
@@ -199,5 +199,5 @@ Python and Rust must match on:
   matching commands over `shell.run`.
 - `skill.read` exposes configured command descriptions and full instructions.
 - The builtin creation skill uses and teaches the new format.
-- `nas-sync` uses one `SKILL.md` and continues to support upload/download.
+- `memory-sync` uses one `SKILL.md` and continues to support upload/download.
 - Python and Rust focused tests and full test suites pass.
