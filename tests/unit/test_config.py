@@ -13,6 +13,8 @@ def test_default_config_uses_small_device_limits():
     assert config.model.api_key == ""
     assert config.model.max_output_tokens == 16384
     assert config.model.input_context_tokens == 48000
+    assert config.model.max_retries == 2
+    assert config.model.retry_backoff_ms == 500
     assert config.vision.model == ""
     assert config.vision.base_url == ""
     assert config.vision.api_key == ""

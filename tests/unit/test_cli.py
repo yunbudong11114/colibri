@@ -85,6 +85,31 @@ def test_repl_exits_on_quit(capsys):
     assert "fake: hello" in captured.out
 
 
+def test_repl_continues_after_model_error(monkeypatch, capsys):
+    class FailOnceModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools, system, limits):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelError("network down", category="transient_network")
+            from colibri.messages import ModelResponse
+
+            return ModelResponse(text="recovered")
+
+    model = FailOnceModel()
+    monkeypatch.setattr("colibri.cli.build_model_client", lambda config: model)
+    inputs = iter(["first", "second", "/quit"])
+
+    exit_code = main(["repl"], input_func=lambda _: next(inputs))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "模型暂时不可用，请检查网络后重试。" in captured.out
+    assert "recovered" in captured.out
+
+
 def test_repl_exits_on_idle_timeout(capsys):
     config = AgentConfig.default().with_overrides({"session": {"idle_exit_enabled": True, "idle_exit_seconds": 1}})
     times = iter([0.0, 2.0])
@@ -399,7 +424,7 @@ def test_main_returns_one_for_expected_model_errors(monkeypatch, capsys):
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert "Model error: boom" in captured.err
+    assert "模型暂时不可用，请检查网络后重试。" in captured.out
 
 
 class FakeTranscript:

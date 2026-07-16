@@ -20,6 +20,7 @@ from colibri.memory import MemoryContext
 from colibri.messages import AgentResponse, Message, ModelLimits, ModelResponse, ToolCall
 from colibri.media import MediaPart
 from colibri.model.base import ModelClient
+from colibri.model.errors import ModelError
 from colibri.skills import SkillIndex
 from colibri.steering import (
     SKIPPED_TOOL_RESULT,
@@ -38,6 +39,7 @@ SYSTEM_PROMPT = (
     "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. "
     "Prefer short, practical responses and respect low memory, battery, and tool limits. "
 )
+MODEL_UNAVAILABLE_TEXT = "模型暂时不可用，请检查网络后重试。"
 
 
 @dataclass
@@ -115,6 +117,8 @@ class AgentSession:
                 model_messages = self._model_messages_for_completion(memory_text, skill_text)
 
             return self._round_limit_response()
+        except ModelError as error:
+            return self._finish_model_error(error)
         finally:
             self._turn_active = False
             self._clear_steering_queue()
@@ -252,9 +256,17 @@ class AgentSession:
         )
         self.messages.append(Message(role="tool", content=self._tool_result_text(result), tool_call_id=call.id))
 
-    def _finish_response(self, text: str) -> AgentResponse:
+    def _finish_response(self, text: str, error_type: str | None = None) -> AgentResponse:
         self.last_activity_at = monotonic()
-        return AgentResponse(text=text, messages=list(self.messages))
+        return AgentResponse(text=text, messages=list(self.messages), error_type=error_type)
+
+    def _finish_model_error(self, error: ModelError) -> AgentResponse:
+        self.messages.append(Message(role="assistant", content=MODEL_UNAVAILABLE_TEXT))
+        self._write_transcript(
+            "assistant_message",
+            {"text": MODEL_UNAVAILABLE_TEXT, "tool_call_count": 0, "model_error": error.category},
+        )
+        return self._finish_response(MODEL_UNAVAILABLE_TEXT, error_type=error.category)
 
     def _round_limit_response(self) -> AgentResponse:
         limit_text = _round_limit_text(

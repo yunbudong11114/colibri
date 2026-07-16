@@ -4,6 +4,7 @@ from colibri.config import AgentConfig
 from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
+from colibri.model.errors import ModelError
 from colibri.permissions_store import UserPermissionStore
 from colibri.session import SYSTEM_PROMPT, AgentSession
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
@@ -20,6 +21,35 @@ def test_submit_records_user_and_assistant_messages():
     assert [message.role for message in session.messages] == ["user", "assistant"]
     assert session.messages[0].content == "hello"
     assert session.messages[1].content == "fake: hello"
+
+
+def test_submit_returns_failed_turn_and_session_recovers():
+    class FailOnceModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools, system, limits):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelError("network down", category="transient_network")
+            return ModelResponse(text="recovered")
+
+    session = AgentSession(config=AgentConfig.default(), model=FailOnceModel())
+
+    failed = session.submit("first")
+    recovered = session.submit("second")
+
+    assert failed.error_type == "transient_network"
+    assert failed.text == "模型暂时不可用，请检查网络后重试。"
+    assert recovered.error_type is None
+    assert recovered.text == "recovered"
+    assert not session.is_turn_active()
+    assert [message.role for message in session.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
 
 
 def test_submit_restores_history_once_before_new_user_message():

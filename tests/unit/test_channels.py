@@ -22,6 +22,8 @@ from colibri.gateway import GatewayRunner, GatewaySessionCache
 from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
+from colibri.model.errors import ModelError
+from colibri.messages import ModelResponse
 from colibri.tools.permissions import PermissionRequest, PermissionSubject
 from colibri.tools.registry import ToolRegistry
 
@@ -970,6 +972,36 @@ def test_gateway_runner_handles_message_with_weixin_permission_policy(tmp_path):
     reply = runner.handle_message(channel, InboundMessage(channel="weixin", sender_id="user-1", text="hi"))
 
     assert reply == "fake: hi"
+
+
+def test_gateway_runner_keeps_session_after_model_error(tmp_path):
+    class FailOnceModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools, system, limits):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelError("network down", category="transient_network")
+            return ModelResponse(text="recovered")
+
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "allow"}})
+    channel = FakeChannel("weixin", [])
+    runner = GatewayRunner(
+        config=config,
+        model=FailOnceModel(),
+        registry=ToolRegistry.from_config(config, cwd=tmp_path),
+    )
+
+    failed = runner.handle_message(
+        channel, InboundMessage(channel="weixin", sender_id="user-1", text="first")
+    )
+    recovered = runner.handle_message(
+        channel, InboundMessage(channel="weixin", sender_id="user-1", text="second")
+    )
+
+    assert failed == "模型暂时不可用，请检查网络后重试。"
+    assert recovered == "recovered"
 
 
 def test_gateway_runner_passes_inbound_media_paths_to_session(tmp_path):

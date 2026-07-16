@@ -35,3 +35,4 @@ class ModelResponse:
 class AgentResponse:
     text: str
     messages: list[Message]
+    error_type: str | None = None

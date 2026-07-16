@@ -212,6 +212,92 @@ def test_complete_rejects_empty_choices(monkeypatch):
         )
 
 
+def test_complete_retries_transient_error_then_succeeds(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="https://api.example.test/v1",
+        model="test-model",
+        api_key="test-key",
+        max_retries=2,
+        retry_backoff_ms=500,
+    )
+    attempts = []
+    delays = []
+
+    def fake_request(self, url, payload, timeout_seconds):
+        attempts.append(url)
+        if len(attempts) < 3:
+            raise ModelError("network down", category="transient_network")
+        return {"choices": [{"message": {"content": "recovered"}}]}
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+    monkeypatch.setattr("colibri.model.openai_compatible.sleep", delays.append)
+
+    response = client.complete(
+        messages=[Message(role="user", content="hello")],
+        tools=[],
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert response.text == "recovered"
+    assert len(attempts) == 3
+    assert delays == [0.5, 1.0]
+
+
+def test_complete_does_not_retry_permanent_error(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="https://api.example.test/v1",
+        model="test-model",
+        api_key="test-key",
+        max_retries=2,
+        retry_backoff_ms=500,
+    )
+    attempts = []
+
+    def fake_request(self, url, payload, timeout_seconds):
+        attempts.append(url)
+        raise ModelError("bad auth", category="client_error")
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    with pytest.raises(ModelError, match="bad auth"):
+        client.complete(
+            messages=[Message(role="user", content="hello")],
+            tools=[],
+            system="",
+            limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+        )
+
+    assert len(attempts) == 1
+
+
+def test_complete_respects_zero_retries(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="https://api.example.test/v1",
+        model="test-model",
+        api_key="test-key",
+        max_retries=0,
+        retry_backoff_ms=500,
+    )
+    attempts = []
+
+    def fake_request(self, url, payload, timeout_seconds):
+        attempts.append(url)
+        raise ModelError("network down", category="transient_network")
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    with pytest.raises(ModelError):
+        client.complete(
+            messages=[Message(role="user", content="hello")],
+            tools=[],
+            system="",
+            limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+        )
+
+    assert len(attempts) == 1
+
+
 def test_request_json_turns_http_error_into_model_error():
     client = make_client()
     body = json.dumps({"error": {"message": "bad auth"}}).encode("utf-8")
@@ -223,8 +309,39 @@ def test_request_json_turns_http_error_into_model_error():
         fp=FakeErrorBody(body),
     )
 
-    with pytest.raises(ModelError, match="HTTP 401"):
+    with pytest.raises(ModelError, match="HTTP 401") as caught:
         client._raise_http_error(error)
+
+    assert caught.value.category == "client_error"
+    assert not caught.value.retryable
+
+
+@pytest.mark.parametrize(
+    ("status", "category", "retryable"),
+    [
+        (408, "timeout", True),
+        (429, "rate_limit", True),
+        (500, "server_error", True),
+        (503, "server_error", True),
+        (400, "client_error", False),
+        (403, "client_error", False),
+    ],
+)
+def test_http_error_classification(status, category, retryable):
+    client = make_client()
+    error = urllib.error.HTTPError(
+        url="https://api.example.test/v1/chat/completions",
+        code=status,
+        msg="error",
+        hdrs={},
+        fp=FakeErrorBody(b"failure"),
+    )
+
+    with pytest.raises(ModelError) as caught:
+        client._raise_http_error(error)
+
+    assert caught.value.category == category
+    assert caught.value.retryable is retryable
 
 
 def test_request_json_preserves_chinese_utf8(monkeypatch):

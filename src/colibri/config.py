@@ -40,6 +40,8 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
             "timeout_seconds",
             "max_output_tokens",
             "input_context_tokens",
+            "max_retries",
+            "retry_backoff_ms",
         }
     ),
     "vision": frozenset(
@@ -134,6 +136,10 @@ class ModelConfig:
     max_output_tokens: int = 16384
     # 模型输入上下文 token 上限；达到 80% 时触发历史压缩。
     input_context_tokens: int = 48000
+    # 单次模型请求失败后的最大重试次数；0 表示不重试。
+    max_retries: int = 2
+    # 模型重试的初始退避时间，单位毫秒；后续按 2 倍增长。
+    retry_backoff_ms: int = 500
 
 
 @dataclass(frozen=True)

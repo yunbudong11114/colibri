@@ -121,8 +121,9 @@ def main(
         try:
             if args.command == "ask":
                 status.write("thinking")
-                print(format_answer_for_console(session.submit(args.text).text, config.console.plain_answer))
-                return 0
+                response = session.submit(args.text)
+                print(format_answer_for_console(response.text, config.console.plain_answer))
+                return 1 if response.error_type else 0
 
             if args.command == "repl":
                 return _run_repl(session, status=status, input_func=input_func, monotonic_func=monotonic_func)
@@ -234,7 +235,8 @@ def _run_repl(
             last_activity = monotonic_func()
         except ModelError as error:
             print(f"Model error: {error}", file=sys.stderr)
-            return 1
+            last_activity = monotonic_func()
+            continue
         finally:
             stop.set()
             if pump_thread is not None:
