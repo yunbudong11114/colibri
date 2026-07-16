@@ -229,7 +229,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "skill_index_parses_metadata_and_builds_catalog_like_python",
                 "skill_read_returns_bounded_body_like_python",
                 "skill_run_executes_configured_command",
-                "skill_toml_parses_multiline_description_like_python",
+                "skill_yaml_frontmatter_parses_multiline_description_like_python",
             ],
             status: "covered",
         },

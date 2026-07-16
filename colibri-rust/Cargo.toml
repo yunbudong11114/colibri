@@ -8,7 +8,9 @@ description = "Rust port of the Colibri lightweight agent runtime"
 aes = "0.8"
 libc = "0.2"
 md5 = "0.7"
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
 shell-words = "1"
 toml = "0.8"
 ureq = { version = "2", default-features = false, features = ["tls"] }

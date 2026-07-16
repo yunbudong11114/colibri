@@ -8,6 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
 use crate::tools::ToolContext;
+use serde::Deserialize;
 
 static SKILL_SCAN_CACHE: OnceLock<Mutex<HashMap<Vec<(String, Option<u128>)>, Arc<SkillIndex>>>> =
     OnceLock::new();
@@ -16,7 +17,12 @@ fn skill_scan_cache() -> &'static Mutex<HashMap<Vec<(String, Option<u128>)>, Arc
     SKILL_SCAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-const CREATE_COLIBRI_SKILL_CONTENT: &str = r#"# Create Colibri Skill
+const CREATE_COLIBRI_SKILL_CONTENT: &str = r#"---
+name: create-colibri-skill
+description: Guide creating, writing, adding, or designing a local Colibri skill.
+---
+
+# Create Colibri Skill
 
 Use this skill when the user wants to create, write, add, or design a local Colibri skill.
 
@@ -27,27 +33,48 @@ Create this layout:
 ```text
 ~/.colibri/skills/<skill-name>/
   SKILL.md
-  skill.toml        # optional
   scripts/...       # optional
 ```
 
-`SKILL.md` is required. Keep it focused on when to use the skill, what context to gather, and the exact workflow the assistant should follow. Prefer progressive disclosure: put the essential instructions in `SKILL.md`, and reference extra local files only when needed.
+`SKILL.md` is required and must start with YAML frontmatter. The `name` must match the skill directory name and `description` must clearly state when the skill is useful:
 
-Optional `skill.toml` can describe local commands for `skill.run`:
-
-```toml
-description = "Short description shown in the skill catalog."
-
-[[commands]]
-name = "check"
-description = "Run the local verification command."
-command = "python"
-args = ["scripts/check.py"]
-read_only = true
+```yaml
+---
+name: example-skill
+description: Use when the user needs the example workflow.
+commands:
+  - name: check
+    description: Run the local verification command.
+    command: python
+    args: [scripts/check.py]
+    read_only: true
+---
 ```
 
-After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. Keep command permissions explicit and avoid long resident processes on small devices.
+Keep the Markdown body focused on context gathering and the exact workflow. Prefer progressive disclosure and reference extra local files only when needed. Put reusable implementations under `scripts/`. Do not create `skill.toml`.
+
+After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. When a declared command matches the requested action, execute it with `skill.run`. Keep command permissions explicit and avoid long resident processes on small devices.
 "#;
+
+#[derive(Debug, Deserialize)]
+struct SkillDocumentMetadata {
+    name: String,
+    description: String,
+    #[serde(default)]
+    commands: Vec<SkillDocumentCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillDocumentCommand {
+    name: String,
+    #[serde(default)]
+    description: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    read_only: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillCommand {
@@ -103,16 +130,10 @@ impl SkillIndex {
                 let Ok(first_text) = fs::read_to_string(&skill_file) else {
                     continue;
                 };
-                let metadata = read_skill_toml(&path);
-                let description = metadata
-                    .get("description")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
-                        derive_description(&first_text).unwrap_or_else(|| name.clone())
-                    });
-                let commands = parse_commands(&metadata);
+                let Some((description, commands)) = parse_skill_document(&first_text, &name)
+                else {
+                    continue;
+                };
                 skills.push(SkillMetadata {
                     name: name.clone(),
                     description,
@@ -144,7 +165,9 @@ impl SkillIndex {
             return (String::new(), Vec::new(), false);
         }
         let mut lines = vec![
-            "Available skills (use skill.read with name when needed):".to_string(),
+            "Available skills:".to_string(),
+            String::new(),
+            "Use skill.read to load full instructions. When a skill has a configured command matching the requested action, use skill.run instead of invoking that command's underlying executable through shell.run.".to_string(),
             String::new(),
         ];
         let mut names = Vec::new();
@@ -157,9 +180,22 @@ impl SkillIndex {
             } else {
                 skill.root.display().to_string()
             };
+            let command_text = if skill.commands.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Commands: {}",
+                    skill
+                        .commands
+                        .iter()
+                        .map(|command| command.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             lines.push(format!(
-                "- {}: {} [{}]",
-                skill.name, skill.description, location
+                "- {}: {}{} [{}]",
+                skill.name, skill.description, command_text, location
             ));
             names.push(skill.name.clone());
         }
@@ -177,10 +213,28 @@ impl SkillIndex {
             .content
             .clone()
             .or_else(|| fs::read_to_string(&skill.skill_file).ok())?;
+        let command_text = if skill.commands.is_empty() {
+            String::new()
+        } else {
+            let lines = skill
+                .commands
+                .iter()
+                .map(|command| {
+                    if command.description.is_empty() {
+                        format!("- {}", command.name)
+                    } else {
+                        format!("- {}: {}", command.name, command.description)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\nConfigured commands:\n{lines}")
+        };
         let text = format!(
-            "[{}]\nBase directory: {}\n\n{}",
+            "[{}]\nBase directory: {}{}\n\n{}",
             skill.name,
             skill.root.display(),
+            command_text,
             content.trim()
         );
         let truncated = text.chars().count() > max_chars;
@@ -375,15 +429,13 @@ fn dir_fingerprint(skill_dir: &Path) -> Vec<(String, Option<u128>)> {
         if !path.is_dir() {
             continue;
         }
-        for name in ["SKILL.md", "skill.toml"] {
-            let file = path.join(name);
-            let resolved = file
-                .canonicalize()
-                .unwrap_or_else(|_| file.clone())
-                .to_string_lossy()
-                .into_owned();
-            parts.push((resolved, file_mtime(&file)));
-        }
+        let file = path.join("SKILL.md");
+        let resolved = file
+            .canonicalize()
+            .unwrap_or_else(|_| file.clone())
+            .to_string_lossy()
+            .into_owned();
+        parts.push((resolved, file_mtime(&file)));
     }
     parts
 }
@@ -399,78 +451,59 @@ fn file_mtime(path: &Path) -> Option<u128> {
 fn builtin_skills() -> Vec<SkillMetadata> {
     let name = "create-colibri-skill".to_string();
     let root = PathBuf::from("builtin");
+    let Some((description, commands)) =
+        parse_skill_document(CREATE_COLIBRI_SKILL_CONTENT, &name)
+    else {
+        return Vec::new();
+    };
     vec![SkillMetadata {
         name: name.clone(),
-        description: "Guide creating, writing, adding, or designing a local Colibri skill."
-            .to_string(),
+        description,
         skill_file: root.join(&name).join("SKILL.md"),
         root,
-        commands: Vec::new(),
+        commands,
         content: Some(CREATE_COLIBRI_SKILL_CONTENT.to_string()),
     }]
 }
 
-fn read_skill_toml(root: &std::path::Path) -> toml::Table {
-    let path = root.join("skill.toml");
-    let Ok(text) = fs::read_to_string(path) else {
-        return toml::Table::new();
-    };
-    text.parse::<toml::Table>().unwrap_or_default()
-}
-
-fn parse_commands(metadata: &toml::Table) -> Vec<SkillCommand> {
-    let Some(commands) = metadata.get("commands").and_then(|value| value.as_array()) else {
-        return Vec::new();
-    };
+fn parse_skill_document(content: &str, expected_name: &str) -> Option<(String, Vec<SkillCommand>)> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut frontmatter = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        frontmatter.push(line);
+    }
+    if !closed {
+        return None;
+    }
+    let metadata =
+        serde_yaml::from_str::<SkillDocumentMetadata>(&frontmatter.join("\n")).ok()?;
+    if metadata.name.trim() != expected_name || metadata.description.trim().is_empty() {
+        return None;
+    }
     let mut parsed = Vec::new();
-    for item in commands {
-        let Some(table) = item.as_table() else {
-            continue;
-        };
-        let Some(name) = table.get("name").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let Some(command) = table.get("command").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let args = match table.get("args") {
-            None => Vec::new(),
-            Some(value) => match value.as_array() {
-                Some(items) if items.iter().all(|item| item.as_str().is_some()) => items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
-                    .collect(),
-                _ => Vec::new(),
-            },
-        };
+    let mut seen = BTreeSet::new();
+    for item in metadata.commands {
+        if item.name.trim().is_empty()
+            || item.command.trim().is_empty()
+            || !seen.insert(item.name.clone())
+        {
+            return None;
+        }
         parsed.push(SkillCommand {
-            name: name.to_string(),
-            description: table
-                .get("description")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string(),
-            command: command.to_string(),
-            args,
-            read_only: table
-                .get("read_only")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
+            name: item.name,
+            description: item.description,
+            command: item.command,
+            args: item.args,
+            read_only: item.read_only,
         });
     }
-    parsed
-}
-
-fn derive_description(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty() {
-            continue;
-        }
-        if stripped.starts_with('#') {
-            return Some(stripped.trim_start_matches('#').trim().to_string());
-        }
-        return Some(stripped.to_string());
-    }
-    None
+    Some((metadata.description, parsed))
 }

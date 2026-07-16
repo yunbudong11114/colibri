@@ -169,7 +169,7 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
         ));
         specs.push(openai_tool(
             "skill.run",
-            "Run a configured local skill command.",
+            "Run a command declared in a skill's SKILL.md YAML frontmatter. Prefer this tool whenever a configured command matches the requested action; do not invoke the underlying executable through shell.run.",
             serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["skill","command"]}),
         ));
     }

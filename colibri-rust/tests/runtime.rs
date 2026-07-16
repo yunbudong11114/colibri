@@ -1207,33 +1207,33 @@ fn memory_context_replaces_invalid_utf8_like_python() {
 }
 
 #[test]
-fn skill_toml_parses_multiline_description_like_python() {
-    let temp = temp_dir("skill-toml-multiline");
+fn skill_yaml_frontmatter_parses_multiline_description_like_python() {
+    let temp = temp_dir("skill-yaml-multiline");
     let skill_dir = temp.join("skills/release");
     fs::create_dir_all(&skill_dir).unwrap();
-    fs::write(skill_dir.join("SKILL.md"), "# Release\n").unwrap();
     fs::write(
-        skill_dir.join("skill.toml"),
-        r#"
-description = """
-Release helper
-with details
-"""
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: release
+description: >
+  Release helper
+  with details.
+commands:
+  - name: render
+    description: Render notes
+    command: python
+    args: [scripts/render.py, --verbose]
+    read_only: true
+---
 
-[[commands]]
-name = "render"
-description = "Render notes"
-command = "python"
-args = ["scripts/render.py", "--verbose"]
-read_only = true
+# Release
 "#,
     )
     .unwrap();
     let index = SkillIndex::scan(&temp.join("skills"));
     let release = index.get("release").unwrap();
 
-    assert!(release.description.contains("Release helper"));
-    assert!(release.description.contains("with details"));
+    assert_eq!(release.description, "Release helper with details.\n");
     assert_eq!(release.commands[0].name, "render");
     assert_eq!(
         release.commands[0].args,
@@ -2128,16 +2128,20 @@ fn skill_run_executes_configured_command() {
     let temp = temp_dir("skill-run");
     let skill = temp.join("skills/release");
     fs::create_dir_all(skill.join("scripts")).unwrap();
-    fs::write(skill.join("SKILL.md"), "# Release\n").unwrap();
     fs::write(skill.join("scripts/render.sh"), "printf rendered\n").unwrap();
     fs::write(
-        skill.join("skill.toml"),
-        r#"
-[[commands]]
-name = "render"
-command = "sh"
-args = ["scripts/render.sh"]
-read_only = false
+        skill.join("SKILL.md"),
+        r#"---
+name: release
+description: Release helper
+commands:
+  - name: render
+    command: sh
+    args: [scripts/render.sh]
+    read_only: false
+---
+
+# Release
 "#,
     )
     .unwrap();
@@ -2163,7 +2167,17 @@ fn skill_catalog_includes_builtin_and_local_like_python() {
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
         skill_dir.join("SKILL.md"),
-        "# Release Notes\n\nUse this for release summaries.\n",
+        r#"---
+name: release
+description: Use this for release summaries.
+commands:
+  - name: render
+    description: Render notes
+    command: python
+---
+
+# Release Notes
+"#,
     )
     .unwrap();
     let mut config = AgentConfig::default();
@@ -2177,7 +2191,9 @@ fn skill_catalog_includes_builtin_and_local_like_python() {
     assert!(text.starts_with("Available skills"));
     assert!(text.contains("skill.read"));
     assert!(text.contains("release:"));
-    assert!(!text.contains("Use this for release summaries"));
+    assert!(text.contains("Commands: render"));
+    assert!(text.contains("use skill.run"));
+    assert!(text.contains("shell.run"));
     assert!(!text.contains("[release]"));
     assert!(!truncated);
 }
@@ -2189,7 +2205,10 @@ fn skill_read_returns_bounded_body_like_python() {
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
         skill_dir.join("SKILL.md"),
-        format!("# Release Notes\n\n{}", "release ".repeat(100)),
+        format!(
+            "---\nname: release\ndescription: Release helper\n---\n\n# Release Notes\n\n{}",
+            "release ".repeat(100)
+        ),
     )
     .unwrap();
     let mut config = AgentConfig::default();
@@ -2212,20 +2231,18 @@ fn skill_index_parses_metadata_and_builds_catalog_like_python() {
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
         skill_dir.join("SKILL.md"),
-        "# Release Notes\n\nrelease ".repeat(100),
-    )
-    .unwrap();
-    fs::write(
-        skill_dir.join("skill.toml"),
-        r#"
-description = "Release helper"
+        r#"---
+name: release
+description: Release helper
+commands:
+  - name: render
+    description: Render notes
+    command: python
+    args: [scripts/render.py]
+    read_only: false
+---
 
-[[commands]]
-name = "render"
-description = "Render notes"
-command = "python"
-args = ["scripts/render.py"]
-read_only = false
+# Release Notes
 "#,
     )
     .unwrap();
@@ -2250,6 +2267,73 @@ read_only = false
     assert!(text.starts_with("Available skills"));
     assert!(skills.len() <= 2);
     assert!(truncated);
+}
+
+#[test]
+fn skill_index_skips_invalid_yaml_frontmatter_like_python() {
+    let documents = [
+        "# Missing frontmatter\n",
+        "---\ndescription: missing name\n---\n",
+        "---\nname: other\ndescription: mismatch\n---\n",
+        "---\nname: release\ndescription: ''\n---\n",
+        "---\nname: release\ndescription: ok\ncommands: invalid\n---\n",
+        "---\nname: release\ndescription: ok\ncommands:\n  - name: render\n---\n",
+        "---\nname: release\ndescription: ok\ncommands:\n  - name: render\n    command: python\n  - name: render\n    command: python\n---\n",
+    ];
+    for (index, document) in documents.iter().enumerate() {
+        let temp = temp_dir(&format!("invalid-skill-yaml-{index}"));
+        let skill_dir = temp.join("skills/release");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), document).unwrap();
+
+        let skills = SkillIndex::scan(&temp.join("skills"));
+
+        assert!(skills.get("release").is_none(), "document {index} was accepted");
+    }
+}
+
+#[test]
+fn skill_read_lists_configured_commands_like_python() {
+    let temp = temp_dir("skill-read-commands");
+    let skill_dir = temp.join("skills/release");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: release
+description: Release helper
+commands:
+  - name: render
+    description: Render notes
+    command: python
+---
+
+# Release
+"#,
+    )
+    .unwrap();
+    let mut config = AgentConfig::default();
+    config.skills.dir = temp.join("skills");
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool("skill.read", r#"{"name":"release"}"#, &context).unwrap();
+
+    assert!(result.ok);
+    assert!(result
+        .text
+        .contains("Configured commands:\n- render: Render notes"));
+}
+
+#[test]
+fn builtin_creation_skill_uses_yaml_frontmatter_like_python() {
+    let temp = temp_dir("builtin-yaml-skill");
+    let index = SkillIndex::scan(&temp.join("missing"));
+    let skill = index.get("create-colibri-skill").unwrap();
+    let content = skill.content.as_ref().unwrap();
+
+    assert!(content.starts_with("---\nname: create-colibri-skill\n"));
+    assert!(content.contains("commands:"));
+    assert!(content.contains("Do not create `skill.toml`."));
 }
 
 #[test]
@@ -3127,7 +3211,11 @@ fn skill_scan_cache_reuses_arc_until_mtime_changes() {
     let temp = temp_dir("skill-arc-cache");
     let skill_dir = temp.join("skills/release");
     fs::create_dir_all(&skill_dir).unwrap();
-    fs::write(skill_dir.join("SKILL.md"), "# Release\n\nfirst\n").unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: release\ndescription: Release\n---\n\n# Release\n\nfirst\n",
+    )
+    .unwrap();
 
     let first = SkillIndex::scan(&temp.join("skills"));
     let second = SkillIndex::scan(&temp.join("skills"));
@@ -3135,7 +3223,11 @@ fn skill_scan_cache_reuses_arc_until_mtime_changes() {
     assert_eq!(first.get("release").unwrap().description, "Release");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
-    fs::write(skill_dir.join("SKILL.md"), "# Release Notes\n\nsecond\n").unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: release\ndescription: Release Notes\n---\n\n# Release Notes\n\nsecond\n",
+    )
+    .unwrap();
     let third = SkillIndex::scan(&temp.join("skills"));
     assert!(!Arc::ptr_eq(&first, &third));
     assert_eq!(third.get("release").unwrap().description, "Release Notes");
