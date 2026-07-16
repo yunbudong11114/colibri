@@ -11,6 +11,8 @@ pub struct ModelConfig {
     pub timeout_seconds: u64,
     pub max_output_tokens: usize,
     pub input_context_tokens: usize,
+    pub max_retries: usize,
+    pub retry_backoff_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +137,8 @@ impl Default for AgentConfig {
                 timeout_seconds: 60,
                 max_output_tokens: 16384,
                 input_context_tokens: 48000,
+                max_retries: 2,
+                retry_backoff_ms: 500,
             },
             vision: VisionConfig {
                 model: String::new(),
@@ -325,6 +329,12 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
         }
         if let Some(value) = get_usize(table, "input_context_tokens") {
             config.model.input_context_tokens = value;
+        }
+        if let Some(value) = get_usize(table, "max_retries") {
+            config.model.max_retries = value;
+        }
+        if let Some(value) = get_u64(table, "retry_backoff_ms") {
+            config.model.retry_backoff_ms = value;
         }
     }
     if let Some(table) = value.get("vision") {
@@ -527,6 +537,8 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
             "timeout_seconds",
             "max_output_tokens",
             "input_context_tokens",
+            "max_retries",
+            "retry_backoff_ms",
         ],
         &[],
     )?;

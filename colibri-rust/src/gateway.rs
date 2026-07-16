@@ -838,6 +838,7 @@ mod tests {
     use crate::config::AgentConfig;
     use crate::messages::{MediaPart, Message, ModelLimits, ModelResponse};
     use crate::model::ModelClient;
+    use crate::session::MODEL_UNAVAILABLE_TEXT;
 
     struct RecordingSink {
         texts: Arc<Mutex<Vec<String>>>,
@@ -862,9 +863,11 @@ mod tests {
         polled: AtomicBool,
     }
 
-    struct FailingModel;
+    struct FailOnceModel {
+        calls: usize,
+    }
 
-    impl ModelClient for FailingModel {
+    impl ModelClient for FailOnceModel {
         fn complete(
             &mut self,
             _messages: &[Message],
@@ -872,7 +875,14 @@ mod tests {
             _system: &str,
             _limits: &ModelLimits,
         ) -> Result<ModelResponse, String> {
-            Err("model failed".to_string())
+            self.calls += 1;
+            if self.calls == 1 {
+                return Err("model_error:transient_network:model failed".to_string());
+            }
+            Ok(ModelResponse {
+                text: "recovered".to_string(),
+                tool_calls: Vec::new(),
+            })
         }
     }
 
@@ -1023,11 +1033,13 @@ mod tests {
     }
 
     #[test]
-    fn generic_turn_worker_returns_taken_session_after_model_error() {
+    fn generic_turn_worker_continues_after_model_error() {
         let texts = Arc::new(Mutex::new(Vec::new()));
-        let channel: Arc<dyn GatewayChannel> = Arc::new(FakeChannel { texts });
+        let channel: Arc<dyn GatewayChannel> = Arc::new(FakeChannel {
+            texts: Arc::clone(&texts),
+        });
         let channels = Arc::new(build_channel_registry(vec![channel]).unwrap());
-        let router = Arc::new(InboundRouter::new(1));
+        let router = Arc::new(InboundRouter::new(2));
         router
             .try_enqueue(
                 "other:user-1".to_string(),
@@ -1042,22 +1054,42 @@ mod tests {
                 },
             )
             .unwrap();
+        router
+            .try_enqueue(
+                "other:user-1".to_string(),
+                InboundEnvelope {
+                    channel: "other".to_string(),
+                    sender_id: "user-1".to_string(),
+                    text: "again".to_string(),
+                    message_id: "message-2".to_string(),
+                    media: Vec::new(),
+                    media_refs: Vec::new(),
+                    context: BTreeMap::new(),
+                },
+            )
+            .unwrap();
         router.close();
         let waiters = Arc::new(ChannelPermissionWaiters::default());
         let mut config = AgentConfig::default();
         config.session.transcript = false;
         config.session.restore_transcript = false;
         let mut cache = GatewaySessionCache::new(config).unwrap();
-        cache.model = Arc::new(Mutex::new(Box::new(FailingModel)));
+        cache.model = Arc::new(Mutex::new(Box::new(FailOnceModel { calls: 0 })));
         let sessions = Arc::new(Mutex::new(cache));
 
-        let error = run_turn_worker(router, channels, waiters, Arc::clone(&sessions)).unwrap_err();
+        run_turn_worker(router, channels, waiters, Arc::clone(&sessions)).unwrap();
 
-        assert_eq!(error, "model failed");
         assert!(sessions
             .lock()
             .unwrap()
             .entries
             .contains_key("other:user-1"));
+        assert_eq!(
+            *texts.lock().unwrap(),
+            vec![
+                MODEL_UNAVAILABLE_TEXT.to_string(),
+                "recovered".to_string()
+            ]
+        );
     }
 }

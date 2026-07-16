@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::thread;
+use std::time::Duration;
 
 use crate::config::ModelConfig;
 use crate::http::request_json;
@@ -92,6 +94,49 @@ impl OpenAiCompatibleModel {
         }
         Ok(Self { config: cloned })
     }
+
+    fn request_with_retry(
+        &self,
+        url: &str,
+        payload: &str,
+        timeout_seconds: u64,
+    ) -> Result<String, String> {
+        for attempt in 0..=self.config.max_retries {
+            let result = request_json(
+                "POST",
+                url,
+                &[("Authorization", format!("Bearer {}", self.config.api_key))],
+                Some(payload),
+                timeout_seconds,
+            );
+            let failure = match result {
+                Ok(response) if response.status.is_none_or(|status| status < 400) => {
+                    return Ok(response.body);
+                }
+                Ok(response) => model_failure_for_status(
+                    response.status.unwrap_or(500),
+                    format!("model request failed: {}", response.body),
+                ),
+                Err(error) => model_failure_for_transport(error),
+            };
+            if !failure.retryable || attempt >= self.config.max_retries {
+                return Err(failure.encoded());
+            }
+            let delay_ms = retry_delay_ms(self.config.retry_backoff_ms, attempt);
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+        Err("model_error:invalid_response:unreachable".to_string())
+    }
+}
+
+fn retry_delay_ms(base_ms: u64, retry_index: usize) -> u64 {
+    base_ms.saturating_mul(
+        1u64
+            .checked_shl(retry_index as u32)
+            .unwrap_or(u64::MAX),
+    )
 }
 
 impl ModelClient for OpenAiCompatibleModel {
@@ -113,17 +158,8 @@ impl ModelClient for OpenAiCompatibleModel {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let response = request_json(
-            "POST",
-            &url,
-            &[("Authorization", format!("Bearer {}", self.config.api_key))],
-            Some(&payload),
-            limits.timeout_seconds,
-        )?;
-        if response.status.is_some_and(|status| status >= 400) {
-            return Err(format!("model request failed: {}", response.body));
-        }
-        parse_chat_response(&response.body)
+        let body = self.request_with_retry(&url, &payload, limits.timeout_seconds)?;
+        parse_chat_response(&body)
     }
 
     fn complete_image(
@@ -142,17 +178,48 @@ impl ModelClient for OpenAiCompatibleModel {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let response = request_json(
-            "POST",
-            &url,
-            &[("Authorization", format!("Bearer {}", self.config.api_key))],
-            Some(&payload),
-            limits.timeout_seconds,
-        )?;
-        if response.status.is_some_and(|status| status >= 400) {
-            return Err(format!("model request failed: {}", response.body));
-        }
-        parse_chat_response(&response.body)
+        let body = self.request_with_retry(&url, &payload, limits.timeout_seconds)?;
+        parse_chat_response(&body)
+    }
+}
+
+struct ModelFailure {
+    category: &'static str,
+    message: String,
+    retryable: bool,
+}
+
+impl ModelFailure {
+    fn encoded(self) -> String {
+        format!("model_error:{}:{}", self.category, self.message)
+    }
+}
+
+fn model_failure_for_status(status: u16, message: String) -> ModelFailure {
+    let (category, retryable) = match status {
+        408 => ("timeout", true),
+        429 => ("rate_limit", true),
+        500..=599 => ("server_error", true),
+        _ => ("client_error", false),
+    };
+    ModelFailure {
+        category,
+        message,
+        retryable,
+    }
+}
+
+fn model_failure_for_transport(message: String) -> ModelFailure {
+    let lower = message.to_ascii_lowercase();
+    let category = if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout"
+    } else {
+        "transient_network"
+    };
+    ModelFailure {
+        category,
+        message,
+        retryable: true,
     }
 }
 
@@ -251,13 +318,13 @@ fn api_message(message: &Message) -> serde_json::Value {
 
 fn parse_chat_response(body: &str) -> Result<ModelResponse, String> {
     let data: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| format!("Model response was not valid JSON: {}", error))?;
+        .map_err(|error| format!("model_error:invalid_response:Model response was not valid JSON: {}", error))?;
     let message = data
         .get("choices")
         .and_then(|choices| choices.as_array())
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .ok_or_else(|| "Model response missing choices".to_string())?;
+        .ok_or_else(|| "model_error:invalid_response:Model response missing choices".to_string())?;
     let text = message
         .get("content")
         .and_then(|value| value.as_str())
@@ -300,6 +367,19 @@ fn parse_tool_call(value: &serde_json::Value) -> ToolCall {
             .unwrap_or("")
             .to_string(),
         arguments,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_delay_ms;
+
+    #[test]
+    fn retry_delay_uses_deterministic_exponential_backoff() {
+        assert_eq!(retry_delay_ms(500, 0), 500);
+        assert_eq!(retry_delay_ms(500, 1), 1000);
+        assert_eq!(retry_delay_ms(500, 2), 2000);
+        assert_eq!(retry_delay_ms(0, 4), 0);
     }
 }
 

@@ -77,6 +77,7 @@ pub struct ModelResponse {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentResponse {
     pub text: String,
+    pub error_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -77,6 +77,8 @@ fn vision_model(config: &AgentConfig) -> Result<Box<dyn ModelClient>, String> {
         timeout_seconds: vision.timeout_seconds,
         max_output_tokens: config.model.max_output_tokens,
         input_context_tokens: config.model.input_context_tokens,
+        max_retries: config.model.max_retries,
+        retry_backoff_ms: config.model.retry_backoff_ms,
     };
     build_model(&model_config)
 }

@@ -44,6 +44,31 @@ use std::time::{Duration, Instant};
 
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
+struct OneByteReader {
+    bytes: Vec<u8>,
+    index: usize,
+}
+
+impl OneByteReader {
+    fn new(text: &str) -> Self {
+        Self {
+            bytes: text.as_bytes().to_vec(),
+            index: 0,
+        }
+    }
+}
+
+impl Read for OneByteReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.index >= self.bytes.len() || buffer.is_empty() {
+            return Ok(0);
+        }
+        buffer[0] = self.bytes[self.index];
+        self.index += 1;
+        Ok(1)
+    }
+}
+
 impl Write for SharedBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(buf)
@@ -99,6 +124,8 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.model.model, "fake-colibri-model");
     assert_eq!(config.model.max_output_tokens, 16384);
     assert_eq!(config.model.input_context_tokens, 48000);
+    assert_eq!(config.model.max_retries, 2);
+    assert_eq!(config.model.retry_backoff_ms, 500);
     assert_eq!(config.vision.model, "");
     assert_eq!(config.vision.base_url, "");
     assert_eq!(config.vision.api_key, "");
@@ -279,6 +306,39 @@ fn ask_prints_fake_response_and_status() {
     assert_eq!(stdout.trim(), "fake: status");
     assert!(stderr.contains("[colibri] ready model=fake-colibri-model"));
     assert!(stderr.contains("[colibri] thinking"));
+}
+
+#[test]
+fn ask_returns_nonzero_for_exhausted_model_error() {
+    let _guard = env_lock().lock().unwrap();
+    let server = start_http_server(|_base_url, _requests| {
+        |_request| TestHttpResponse {
+            status: 503,
+            headers: Vec::new(),
+            body: b"temporary".to_vec(),
+        }
+    });
+    let temp = temp_dir("ask-model-error");
+    let config_path = temp.join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            "[model]\nprovider = \"openai_compatible\"\nbase_url = \"{}\"\nmodel = \"test\"\napi_key = \"key\"\nmax_retries = 0\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    let args = vec![
+        "--config".to_string(),
+        config_path.display().to_string(),
+        "ask".to_string(),
+        "hello".to_string(),
+    ];
+
+    let (code, stdout, _stderr) = run_cli_raw(&args, "");
+
+    assert_eq!(code, 1);
+    assert!(stdout.contains("模型暂时不可用，请检查网络后重试。"));
 }
 
 #[test]
@@ -649,6 +709,59 @@ fn repl_exits_on_quit_like_python_cli() {
 }
 
 #[test]
+fn repl_continues_after_model_error_like_python() {
+    let _guard = env_lock().lock().unwrap();
+    let attempts = Arc::new(Mutex::new(0usize));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = start_http_server(move |_base_url, _requests| {
+        move |_request| {
+            let mut count = attempts_for_handler.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                TestHttpResponse {
+                    status: 503,
+                    headers: Vec::new(),
+                    body: b"temporary".to_vec(),
+                }
+            } else {
+                TestHttpResponse::json(
+                    r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
+                )
+            }
+        }
+    });
+    let temp = temp_dir("repl-model-recovery");
+    let config_path = temp.join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            "[model]\nprovider = \"openai_compatible\"\nbase_url = \"{}\"\nmodel = \"test\"\napi_key = \"key\"\nmax_retries = 0\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    let args = vec![
+        "--config".to_string(),
+        config_path.display().to_string(),
+        "repl".to_string(),
+    ];
+
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let code = run_with_io(
+        args,
+        OneByteReader::new("first\nsecond\n/quit\n"),
+        SharedBuf(Arc::clone(&stdout)),
+        SharedBuf(Arc::clone(&stderr)),
+    );
+    let stdout = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
+
+    assert_eq!(code, 0);
+    assert!(stdout.contains("模型暂时不可用，请检查网络后重试。"));
+    assert!(stdout.contains("recovered"), "{stdout}");
+}
+
+#[test]
 fn repl_line_editor_backspace_removes_cjk_and_redraws_like_python() {
     let mut stdout = Vec::new();
     {
@@ -778,6 +891,46 @@ fn session_records_fake_response() {
     assert_eq!(session.messages.len(), 2);
     assert_eq!(session.messages[0].role, "user");
     assert_eq!(session.messages[1].role, "assistant");
+}
+
+#[test]
+fn session_returns_failed_turn_and_recovers_like_python() {
+    struct FailOnceModel {
+        calls: usize,
+    }
+
+    impl ModelClient for FailOnceModel {
+        fn complete(
+            &mut self,
+            _messages: &[Message],
+            _tools: &[serde_json::Value],
+            _system: &str,
+            _limits: &ModelLimits,
+        ) -> Result<colibri_rust::messages::ModelResponse, String> {
+            self.calls += 1;
+            if self.calls == 1 {
+                return Err("model_error:transient_network:network down".to_string());
+            }
+            Ok(colibri_rust::messages::ModelResponse {
+                text: "recovered".to_string(),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    let mut config = AgentConfig::default();
+    config.memory.enabled = false;
+    config.session.transcript = false;
+    let mut session = AgentSession::new(config, Box::new(FailOnceModel { calls: 0 }));
+
+    let failed = session.submit("first").unwrap();
+    let recovered = session.submit("second").unwrap();
+
+    assert_eq!(failed.error_type.as_deref(), Some("transient_network"));
+    assert_eq!(failed.text, "模型暂时不可用，请检查网络后重试。");
+    assert_eq!(recovered.error_type, None);
+    assert_eq!(recovered.text, "recovered");
+    assert_eq!(session.messages.len(), 4);
 }
 
 #[test]
@@ -2400,6 +2553,91 @@ fn openai_compatible_serializes_and_parses_tool_calls() {
     assert!(body.contains("\"tool_calls\""));
     assert!(body.contains("\"files.read\""));
     assert!(body.contains("\"tools\""));
+}
+
+#[test]
+fn openai_compatible_retries_transient_http_error_then_succeeds() {
+    let attempts = Arc::new(Mutex::new(0usize));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = start_http_server(move |_base_url, _requests| {
+        move |_request| {
+            let mut count = attempts_for_handler.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                TestHttpResponse {
+                    status: 503,
+                    headers: Vec::new(),
+                    body: b"temporary".to_vec(),
+                }
+            } else {
+                TestHttpResponse::json(
+                    r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
+                )
+            }
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.base_url = server.base_url;
+    config.model = "test-model".to_string();
+    config.api_key = "test-key".to_string();
+    config.max_retries = 1;
+    config.retry_backoff_ms = 0;
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+
+    let response = model
+        .complete(
+            &[Message::new("user", "hello")],
+            &[],
+            "",
+            &ModelLimits {
+                timeout_seconds: 2,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(response.text, "recovered");
+    assert_eq!(*attempts.lock().unwrap(), 2);
+}
+
+#[test]
+fn openai_compatible_does_not_retry_permanent_http_error() {
+    let attempts = Arc::new(Mutex::new(0usize));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = start_http_server(move |_base_url, _requests| {
+        move |_request| {
+            *attempts_for_handler.lock().unwrap() += 1;
+            TestHttpResponse {
+                status: 401,
+                headers: Vec::new(),
+                body: b"bad auth".to_vec(),
+            }
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.base_url = server.base_url;
+    config.model = "test-model".to_string();
+    config.api_key = "test-key".to_string();
+    config.max_retries = 2;
+    config.retry_backoff_ms = 0;
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+
+    let error = model
+        .complete(
+            &[Message::new("user", "hello")],
+            &[],
+            "",
+            &ModelLimits {
+                timeout_seconds: 2,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.contains("client_error"));
+    assert_eq!(*attempts.lock().unwrap(), 1);
 }
 
 #[test]

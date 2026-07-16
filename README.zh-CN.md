@@ -282,6 +282,18 @@ commands:
 
 内置 `create-colibri-skill` 仍是指导 skill，不从磁盘扫描。
 
+## 模型网络恢复
+
+临时模型故障（网络/DNS 错误、超时、HTTP 408/429 和 5xx）会进行有界指数退避重试。默认重试两次，等待 500ms 和 1000ms：
+
+```toml
+[model]
+max_retries = 2
+retry_backoff_ms = 500
+```
+
+重试耗尽后只结束当前 turn。REPL 会重新显示提示符，gateway session 仍可处理后续消息。Channel adapter 只负责传输，不包含模型重试策略。
+
 ## 上下文与内存相关默认值
 
 ```toml
@@ -289,6 +301,8 @@ commands:
 max_output_tokens = 16384
 timeout_seconds = 60
 input_context_tokens = 48000
+max_retries = 2
+retry_backoff_ms = 500
 
 [session]
 max_tool_rounds = 32

@@ -9,6 +9,10 @@ model = "gpt-4.1-mini"
 api_key = ""
 # 单次模型请求超时时间，单位秒。
 timeout_seconds = 60
+# 临时网络、超时、限流和 5xx 错误的最大重试次数。
+max_retries = 2
+# 首次重试退避毫秒数；后续按 2 倍增长。
+retry_backoff_ms = 500
 # 单次模型回复的最大输出 token 数。
 max_output_tokens = 16384
 # 模型输入上下文 token 上限；达到 80% 时触发历史压缩。

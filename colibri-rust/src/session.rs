@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
+pub const MODEL_UNAVAILABLE_TEXT: &str = "模型暂时不可用，请检查网络后重试。";
 
 pub struct AgentSession {
     pub config: Arc<AgentConfig>,
@@ -227,7 +228,7 @@ impl AgentSession {
     ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
             let model_messages = self.model_messages_for_completion(memory_text, skill_text);
-            let response = {
+            let response_result = {
                 let mut model = self
                     .model
                     .lock()
@@ -240,7 +241,11 @@ impl AgentSession {
                         timeout_seconds: self.config.model.timeout_seconds,
                         max_output_tokens: self.config.model.max_output_tokens,
                     },
-                )?
+                )
+            };
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) => return Ok(self.finish_model_error(&error)),
             };
             let assistant_text = bound_text(&response.text, self.config.tools.max_result_chars);
             let mut assistant = Message::new("assistant", &assistant_text);
@@ -258,6 +263,7 @@ impl AgentSession {
                 }
                 return Ok(AgentResponse {
                     text: assistant_text,
+                    error_type: None,
                 });
             }
 
@@ -285,7 +291,32 @@ impl AgentSession {
             "round_limit",
             serde_json::json!({"max_tool_rounds":self.config.session.max_tool_rounds,"text":text}),
         );
-        Ok(AgentResponse { text })
+        Ok(AgentResponse {
+            text,
+            error_type: None,
+        })
+    }
+
+    fn finish_model_error(&mut self, error: &str) -> AgentResponse {
+        let category = model_error_category(error);
+        self.write_transcript(
+            "model_error",
+            serde_json::json!({"error_type":category,"message":error}),
+        );
+        self.messages
+            .push(Message::new("assistant", MODEL_UNAVAILABLE_TEXT));
+        self.write_transcript(
+            "assistant_message",
+            serde_json::json!({
+                "text":MODEL_UNAVAILABLE_TEXT,
+                "tool_call_count":0,
+                "model_error":category
+            }),
+        );
+        AgentResponse {
+            text: MODEL_UNAVAILABLE_TEXT.to_string(),
+            error_type: Some(category.to_string()),
+        }
     }
 
     fn execute_tool_call(
@@ -610,6 +641,15 @@ impl AgentSession {
             let _ = writer.write(event_type, payload);
         }
     }
+}
+
+fn model_error_category(error: &str) -> &str {
+    error
+        .strip_prefix("model_error:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(category, _)| category)
+        .filter(|category| !category.is_empty())
+        .unwrap_or("invalid_response")
 }
 
 fn owned_transcript(config: &AgentConfig) -> Option<Arc<Mutex<TranscriptWriter>>> {

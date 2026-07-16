@@ -298,6 +298,22 @@ Colibri injects a bounded skill catalog containing each skill's name, descriptio
 
 Colibri also ships the built-in `create-colibri-skill` guidance skill (not scanned from disk).
 
+## Model Network Recovery
+
+Transient model failures (network/DNS errors, timeouts, HTTP 408/429, and 5xx)
+are retried with bounded exponential backoff. The defaults are two retries at
+500ms and 1000ms:
+
+```toml
+[model]
+max_retries = 2
+retry_backoff_ms = 500
+```
+
+After retries are exhausted, only the current turn fails. REPL returns to the
+prompt and gateway sessions remain available for later messages. Channel
+adapters remain transport-only and do not implement model retry policy.
+
 ## Context And Memory Limits
 
 Important defaults:
@@ -307,6 +323,8 @@ Important defaults:
 max_output_tokens = 16384
 timeout_seconds = 60
 input_context_tokens = 48000
+max_retries = 2
+retry_backoff_ms = 500
 
 [session]
 max_tool_rounds = 32

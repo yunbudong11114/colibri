@@ -166,7 +166,7 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
                     format_answer_for_console(&response.text, plain_answer)
                 )
                 .map_err(|error| error.to_string())?;
-                Ok(0)
+                Ok(if response.error_type.is_some() { 1 } else { 0 })
             })();
             session.close();
             result
