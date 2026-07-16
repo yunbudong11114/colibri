@@ -337,16 +337,30 @@ def _redirection_target(argv: list[str]) -> str | None:
     redirect_ops = {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"}
     for index, token in enumerate(argv):
         if token in redirect_ops and index + 1 < len(argv):
-            return argv[index + 1]
+            target = argv[index + 1]
+            if not _is_non_file_redirection_target(target):
+                return target
         for op in sorted(redirect_ops, key=len, reverse=True):
             if token.startswith(op) and len(token) > len(op):
-                return token[len(op) :]
+                target = token[len(op) :]
+                if not _is_non_file_redirection_target(target):
+                    return target
     if argv and argv[0] == "tee":
         for token in argv[1:]:
             if token.startswith("-"):
                 continue
-            return token
+            if not _is_non_file_redirection_target(token):
+                return token
     return None
+
+
+def _is_non_file_redirection_target(target: str) -> bool:
+    if target == "/dev/null":
+        return True
+    if not target.startswith("&"):
+        return False
+    descriptor = target[1:]
+    return descriptor == "-" or descriptor.isdigit()
 
 
 def _decision(

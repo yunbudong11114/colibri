@@ -671,11 +671,18 @@ fn redirection_target(argv: &[String]) -> Option<String> {
     let redirect_ops = [">>", "1>>", "2>>", "&>>", ">", "1>", "2>", "&>"];
     for (index, token) in argv.iter().enumerate() {
         if redirect_ops.contains(&token.as_str()) {
-            return argv.get(index + 1).cloned();
+            if let Some(target) = argv.get(index + 1) {
+                if !is_non_file_redirection_target(target) {
+                    return Some(target.clone());
+                }
+            }
         }
         for op in redirect_ops {
             if token.starts_with(op) && token.len() > op.len() {
-                return Some(token[op.len()..].to_string());
+                let target = &token[op.len()..];
+                if !is_non_file_redirection_target(target) {
+                    return Some(target.to_string());
+                }
             }
         }
     }
@@ -683,10 +690,23 @@ fn redirection_target(argv: &[String]) -> Option<String> {
         return argv
             .iter()
             .skip(1)
-            .find(|token| !token.starts_with('-'))
+            .find(|token| {
+                !token.starts_with('-') && !is_non_file_redirection_target(token.as_str())
+            })
             .cloned();
     }
     None
+}
+
+fn is_non_file_redirection_target(target: &str) -> bool {
+    if target == "/dev/null" {
+        return true;
+    }
+    let Some(descriptor) = target.strip_prefix('&') else {
+        return false;
+    };
+    descriptor == "-"
+        || (!descriptor.is_empty() && descriptor.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn grant_root_for(path: &Path) -> PathBuf {

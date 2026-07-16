@@ -431,6 +431,55 @@ def test_shell_redirection_to_out_of_root_path_prompts_as_file_path(tmp_path):
     assert prompter.requests[0].subject.shell_command is not None
 
 
+def test_shell_descriptor_and_null_redirections_keep_shell_permissions(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "confirm"}})
+    commands = [
+        "brew install rclone 2>&1 | tail -10",
+        "printf error 1>&2",
+        "printf quiet 2>&-",
+        "which rclone 2>/dev/null",
+        "printf quiet > /dev/null",
+    ]
+
+    for command in commands:
+        prompter = FakePrompter(replies=["0"], requests=[])
+        policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+
+        result = policy.decide(
+            ShellRunTool(),
+            {"command": command},
+            tool_context(config, tmp_path),
+        )
+
+        assert not result.allowed
+        assert result.subject_kind == "shell"
+        assert result.file_path is None
+        assert prompter.requests[0].subject.kind == "shell"
+
+
+def test_shell_inline_file_redirection_still_prompts_as_file_path(tmp_path):
+    config = AgentConfig.default().with_overrides({"tools": {"default_permission": "confirm"}})
+    cases = [
+        ("printf error 2>errors.log", "errors.log"),
+        ("printf error 2>&1 >combined.log", "combined.log"),
+    ]
+
+    for command, target in cases:
+        prompter = FakePrompter(replies=["0"], requests=[])
+        policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+
+        result = policy.decide(
+            ShellRunTool(),
+            {"command": command},
+            tool_context(config, tmp_path),
+        )
+
+        assert not result.allowed
+        assert result.subject_kind == "file_path"
+        assert result.file_path == str((tmp_path / target).resolve())
+
+
 def test_files_under_startup_cwd_are_allowed_without_prompt(tmp_path):
     config = AgentConfig.default().with_overrides({"files": {"roots": []}})
     prompter = FakePrompter(replies=["0"], requests=[])

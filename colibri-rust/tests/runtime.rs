@@ -1879,6 +1879,73 @@ fn permission_policy_classifies_shell_redirection_as_file_path() {
 }
 
 #[test]
+fn permission_policy_keeps_descriptor_and_null_redirections_as_shell() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("permission-shell-descriptor-redirection");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "confirm".to_string();
+    let context = ToolContext::new(config.clone(), temp.clone());
+    let shell = ToolInfo::new("shell.run", false);
+    let commands = [
+        "brew install rclone 2>&1 | tail -10",
+        "printf error 1>&2",
+        "printf quiet 2>&-",
+        "which rclone 2>/dev/null",
+        "printf quiet > /dev/null",
+    ];
+
+    for command in commands {
+        let mut prompter = FakePermissionPrompter::new(vec!["0"]);
+        let mut policy = PermissionPolicy::from_config(&config, temp.clone());
+        let mut args = BTreeMap::new();
+        args.insert("command".to_string(), command.to_string());
+
+        let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.subject_kind, "shell", "command: {command}");
+        assert_eq!(decision.file_path, None, "command: {command}");
+        assert_eq!(
+            prompter.requests[0].subject_kind, "shell",
+            "command: {command}"
+        );
+    }
+    restore_home(old_home);
+}
+
+#[test]
+fn permission_policy_keeps_inline_file_redirection_as_file_path() {
+    let temp = temp_dir("permission-shell-inline-redirection");
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "confirm".to_string();
+    let context = ToolContext::new(config.clone(), temp.clone());
+    let shell = ToolInfo::new("shell.run", false);
+    let cases = [
+        ("printf error 2>errors.log", "errors.log"),
+        ("printf error 2>&1 >combined.log", "combined.log"),
+    ];
+
+    for (command, target) in cases {
+        let mut prompter = FakePermissionPrompter::new(vec!["0"]);
+        let mut policy = PermissionPolicy::from_config(&config, temp.clone());
+        let mut args = BTreeMap::new();
+        args.insert("command".to_string(), command.to_string());
+
+        let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.subject_kind, "file_path", "command: {command}");
+        assert_eq!(
+            decision.file_path,
+            Some(temp.join(target).display().to_string()),
+            "command: {command}"
+        );
+    }
+}
+
+#[test]
 fn permission_policy_hard_deny_wins_over_shell_redirection_file_path() {
     let temp = temp_dir("permission-hard-deny-redirection");
     let config = AgentConfig::default();

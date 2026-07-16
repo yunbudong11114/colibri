@@ -161,6 +161,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
             rust_tests: &[
                 "permission_policy_matches_python_session_and_user_grants",
                 "permission_policy_classifies_shell_redirection_as_file_path",
+                "permission_policy_keeps_descriptor_and_null_redirections_as_shell",
+                "permission_policy_keeps_inline_file_redirection_as_file_path",
                 "permission_policy_hard_deny_wins_over_shell_redirection_file_path",
                 "permission_policy_classifies_out_of_root_file_paths",
             ],
@@ -467,6 +469,8 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_in_root_files_write_prompts_with_absolute_path_and_content_summary",
             "test_memory_write_prompt_summarizes_content_without_absolute_path",
             "test_shell_redirection_to_out_of_root_path_prompts_as_file_path",
+            "test_shell_descriptor_and_null_redirections_keep_shell_permissions",
+            "test_shell_inline_file_redirection_still_prompts_as_file_path",
             "test_files_under_startup_cwd_are_allowed_without_prompt",
             "test_file_path_session_grant_allows_same_resolved_path_without_prompt",
             "test_file_path_session_grant_allows_children_under_same_directory",
