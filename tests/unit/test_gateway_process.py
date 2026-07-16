@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
+import re
 
+from colibri.gateway_logging import format_gateway_log
 from colibri.gateway_process import GatewayAgentHealth, GatewayProcessManager, format_gateway_status
 
 
@@ -111,3 +113,12 @@ def test_gateway_agent_health_persists_only_on_state_change(monkeypatch):
     health.report("healthy")
 
     assert writes == ["unhealthy", "healthy"]
+
+
+def test_gateway_log_lines_include_beijing_timestamp():
+    line = format_gateway_log("started pid=123")
+
+    assert re.fullmatch(
+        r"\[20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\+08:00\] \[gateway\] started pid=123",
+        line,
+    )

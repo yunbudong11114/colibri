@@ -108,6 +108,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "gateway_stop_refuses_unverified_pid_like_python",
                 "python_rust_gateway_usage_output_matches",
                 "agent_health_persists_only_on_state_change",
+                "gateway_log_lines_include_beijing_timestamp",
             ],
             status: "covered",
         },
@@ -407,6 +408,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_gateway_process_stop_refuses_unverified_pid",
             "test_gateway_process_stop_terminates_verified_gateway_pid",
             "test_gateway_agent_health_persists_only_on_state_change",
+            "test_gateway_log_lines_include_beijing_timestamp",
         ],
         "test_gateway_steering.py" => &[
             "test_try_steer_returns_false_when_no_session",

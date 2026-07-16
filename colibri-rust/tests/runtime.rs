@@ -15,7 +15,8 @@ use colibri_rust::channel_registry::build_enabled_channels;
 use colibri_rust::cli::{run_steering_pump, run_with_io};
 use colibri_rust::config::{expand_user_path, AgentConfig};
 use colibri_rust::gateway::{
-    format_gateway_status, GatewayAgentHealth, GatewaySessionCache, GatewayStatus,
+    format_gateway_log, format_gateway_status, GatewayAgentHealth, GatewaySessionCache,
+    GatewayStatus,
 };
 use colibri_rust::memory::MemoryContext;
 use colibri_rust::messages::{MediaPart, Message, ModelLimits, ToolCall};
@@ -3092,6 +3093,14 @@ fn agent_health_persists_only_on_state_change() {
     health.report("healthy");
 
     assert_eq!(writes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn gateway_log_lines_include_beijing_timestamp() {
+    let line = format_gateway_log("started pid=123");
+
+    assert!(line.starts_with("[20"));
+    assert!(line.contains("+08:00] [gateway] started pid=123"));
 }
 
 #[test]

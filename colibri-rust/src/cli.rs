@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use crate::config::{expand_user_path, rss_kb, AgentConfig, DEFAULT_USER_CONFIG};
 use crate::console::format_answer_for_console;
 use crate::gateway::{
-    format_gateway_status, restart_gateway, run_gateway, start_gateway, stop_gateway, GatewayStatus,
+    format_gateway_log, format_gateway_status, restart_gateway, run_gateway, start_gateway,
+    stop_gateway, GatewayStatus,
 };
 use crate::model::build_model;
 use crate::permissions::{PermissionPrompter, PermissionRequest};
@@ -265,6 +266,7 @@ fn run_gateway_foreground(
     config_path: Option<PathBuf>,
 ) -> Result<i32, String> {
     run_gateway(config, config_path)
+        .map_err(|error| format_gateway_log(&format!("stopped: {}", error)))
 }
 
 /// Background loop: forward stdin lines to `session.steer` while a turn runs.

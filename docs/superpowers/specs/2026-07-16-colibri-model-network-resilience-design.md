@@ -261,3 +261,19 @@ session-scoped grants. The three hot-reloaded sections do not change permission
 rules, so they must never clear or reconstruct session authorization. A normal
 next turn and the first turn after a successful reload must both retain
 session-level command, executable, tool, file-root, and file-path grants.
+
+## 14. Gateway Log Timestamps
+
+Gateway-owned runtime log events use a single timestamped formatter in Python
+and Rust. Each line starts with a Beijing-time timestamp and identifies the
+event, including:
+
+- Gateway process startup and PID;
+- config reload success/rejection;
+- inbound queue drops;
+- final supervisor errors.
+
+The background log remains append-only across restarts, so every startup emits
+an explicit timestamped boundary line. Raw multi-line tracebacks or dependency
+output may retain their native format, but the Gateway event that precedes or
+summarizes them must be timestamped.

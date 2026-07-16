@@ -72,6 +72,14 @@ impl GatewayAgentHealth {
     }
 }
 
+pub fn format_gateway_log(message: &str) -> String {
+    format!("[{}] [gateway] {}", beijing_timestamp_now(), message)
+}
+
+fn gateway_log(message: impl AsRef<str>) {
+    eprintln!("{}", format_gateway_log(message.as_ref()));
+}
+
 pub struct GatewaySessionCache {
     config: Arc<AgentConfig>,
     model: Arc<Mutex<Box<dyn ModelClient>>>,
@@ -148,7 +156,7 @@ impl GatewaySessionCache {
         let snapshot = match self.runtime_reloader.reload_if_changed() {
             RuntimeReloadResult::Unchanged => return,
             RuntimeReloadResult::Rejected(error) => {
-                eprintln!("[colibri] config reload skipped: {}", error);
+                gateway_log(format!("config reload skipped: {}", error));
                 return;
             }
             RuntimeReloadResult::Reloaded(snapshot) => snapshot,
@@ -160,10 +168,10 @@ impl GatewaySessionCache {
                 .session
                 .adopt_runtime(Arc::clone(&snapshot.config), Arc::clone(&snapshot.model));
         }
-        eprintln!(
-            "[colibri] config reloaded: model={}",
+        gateway_log(format!(
+            "config reloaded model={}",
             snapshot.config.model.model
-        );
+        ));
     }
 
     pub fn get_or_create(&mut self, key: &str) -> Result<&mut AgentSession, String> {
@@ -750,6 +758,11 @@ impl<T> InboundRouter<T> {
 
 /// Foreground gateway: enabled channel pollers → inbound router → turn workers.
 pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<i32, String> {
+    gateway_log(format!(
+        "started pid={} model={}",
+        std::process::id(),
+        config.model.model
+    ));
     let channels = Arc::new(build_enabled_channels(&config)?);
     if channels.is_empty() {
         return Err("No gateway channels are enabled".to_string());
@@ -780,12 +793,14 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
                 worker_sessions,
                 worker_health,
             ) {
+                gateway_log(format!("turn worker failed: {}", error));
                 let _ = worker_error_tx.send(error);
             }
         }));
     }
     let mut pollers = Vec::new();
     for channel in channels.values().cloned() {
+        let channel_name = channel.name().to_string();
         let poll_router = Arc::clone(&router);
         let poll_waiters = Arc::clone(&waiters);
         let poll_sessions = Arc::clone(&sessions);
@@ -794,6 +809,7 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
             if let Err(error) =
                 run_channel_poll_loop(channel, poll_router, poll_waiters, poll_sessions)
             {
+                gateway_log(format!("channel={} poller failed: {}", channel_name, error));
                 let _ = poll_error_tx.send(error);
             }
         }));
@@ -805,7 +821,8 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
             }
             thread::sleep(Duration::from_millis(50));
             if pollers.iter().all(|poller| poller.is_finished()) {
-                return Err("gateway channel poller stopped".to_string());
+                let error = "gateway channel poller stopped".to_string();
+                return Err(error);
             }
         }
     })();
@@ -845,7 +862,7 @@ fn run_channel_poll_loop(
                 }
             }
             if router.try_enqueue(key, envelope).is_err() {
-                eprintln!("[colibri] inbound queue full; dropping message");
+                gateway_log("inbound queue full; dropping message");
             }
         }
     }

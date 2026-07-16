@@ -3,7 +3,7 @@ from __future__ import annotations
 import queue
 from dataclasses import dataclass
 from pathlib import Path
-import sys
+import os
 import threading
 from time import monotonic
 from typing import Callable
@@ -13,6 +13,7 @@ from colibri.channels.registry import build_channel_registry, build_enabled_chan
 from colibri.config import AgentConfig, ConfigError
 from colibri.config import DEFAULT_USER_CONFIG, expand_user_path
 from colibri.gateway_process import GatewayAgentHealth
+from colibri.gateway_logging import gateway_log
 from colibri.model.factory import build_model_client
 from colibri.runtime_reload import PartialRuntimeReloader
 from colibri.inbound_router import InboundRouter
@@ -246,6 +247,7 @@ class GatewayRunner:
         return self.sessions.try_steer(key, text)
 
     def run(self, stop_requested: Callable[[], bool] = lambda: False) -> None:
+        gateway_log(f"started pid={os.getpid()} model={self.config.model.model}")
         channels = self._build_channels()
         if not channels:
             raise ConfigError("No gateway channels are enabled")
@@ -293,6 +295,7 @@ class GatewayRunner:
                                     return
                         return
                     continue
+                gateway_log(f"supervisor error: {error}")
                 raise error
         finally:
             stop_event.set()
@@ -326,6 +329,7 @@ class GatewayRunner:
         try:
             channel.run_poll(offer, channel_context)
         except BaseException as error:
+            gateway_log(f"channel={channel.name} poller failed: {error}")
             errors.put(error)
             stop_event.set()
             router.close()
@@ -356,6 +360,7 @@ class GatewayRunner:
                 finally:
                     router.release(key)
         except BaseException as error:
+            gateway_log(f"turn worker failed: {error}")
             errors.put(error)
             stop_event.set()
             router.close()
@@ -401,7 +406,7 @@ class GatewayRunner:
         with self._runtime_lock:
             result = self._runtime_reloader.reload_if_changed()
             if result.error is not None:
-                print(f"[colibri] config reload skipped: {result.error}", file=sys.stderr)
+                gateway_log(f"config reload skipped: {result.error}")
                 return
             if result.snapshot is None:
                 return
@@ -412,7 +417,7 @@ class GatewayRunner:
             self.model = model
             self.registry = registry
             self.sessions.apply_runtime(config, model, registry)
-            print(f"[colibri] config reloaded: model={config.model.model}", file=sys.stderr)
+            gateway_log(f"config reloaded model={config.model.model}")
 
     def _build_channels(self) -> list[Channel]:
         return build_enabled_channels(self.config)

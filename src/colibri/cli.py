@@ -14,6 +14,7 @@ from colibri.config import DEFAULT_USER_CONFIG, AgentConfig, ConfigError, expand
 from colibri.channels.weixin import WeixinChannelError, perform_weixin_auth
 from colibri.diagnostics import build_diagnostics
 from colibri.gateway import GatewayRunner
+from colibri.gateway_logging import gateway_log
 from colibri.gateway_process import GatewayProcessManager, format_gateway_status
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
@@ -97,13 +98,16 @@ def main(
             return 0
 
         if args.command == "gateway" and args.gateway_action == "run":
-            _write_ready_status(config, status)
-            GatewayRunner(
-                config=config,
-                model=build_model_client(config.model),
-                config_path=_active_config_path(args.config),
-            ).run()
-            return 0
+            try:
+                GatewayRunner(
+                    config=config,
+                    model=build_model_client(config.model),
+                    config_path=_active_config_path(args.config),
+                ).run()
+                return 0
+            except Exception as error:
+                gateway_log(f"stopped: {error}")
+                return 1
 
         transcript = (
             TranscriptWriter.default(
