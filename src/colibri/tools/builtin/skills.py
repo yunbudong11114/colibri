@@ -44,7 +44,11 @@ class SkillReadTool:
 class SkillRunTool:
     spec = ToolSpec(
         name="skill.run",
-        description="Run a configured local skill command.",
+        description=(
+            "Run a command declared in a skill's SKILL.md YAML frontmatter. "
+            "Prefer this tool whenever a configured command matches the requested action; "
+            "do not invoke the underlying executable through shell.run."
+        ),
         input_schema={
             "type": "object",
             "properties": {

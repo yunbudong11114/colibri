@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-import tomllib
+import yaml
 
 from colibri.config import SkillsConfig
 from colibri.textutil import bound_text
 
 
-CREATE_COLIBRI_SKILL_CONTENT = """# Create Colibri Skill
+CREATE_COLIBRI_SKILL_CONTENT = """---
+name: create-colibri-skill
+description: Guide creating, writing, adding, or designing a local Colibri skill.
+---
+
+# Create Colibri Skill
 
 Use this skill when the user wants to create, write, add, or design a local Colibri skill.
 
@@ -20,26 +24,27 @@ Create this layout:
 ```text
 ~/.colibri/skills/<skill-name>/
   SKILL.md
-  skill.toml        # optional
   scripts/...       # optional
 ```
 
-`SKILL.md` is required. Keep it focused on when to use the skill, what context to gather, and the exact workflow the assistant should follow. Prefer progressive disclosure: put the essential instructions in `SKILL.md`, and reference extra local files only when needed.
+`SKILL.md` is required and must start with YAML frontmatter. The `name` must match the skill directory name and `description` must clearly state when the skill is useful:
 
-Optional `skill.toml` can describe local commands for `skill.run`:
-
-```toml
-description = "Short description shown in the skill catalog."
-
-[[commands]]
-name = "check"
-description = "Run the local verification command."
-command = "python"
-args = ["scripts/check.py"]
-read_only = true
+```yaml
+---
+name: example-skill
+description: Use when the user needs the example workflow.
+commands:
+  - name: check
+    description: Run the local verification command.
+    command: python
+    args: [scripts/check.py]
+    read_only: true
+---
 ```
 
-After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. Keep command permissions explicit and avoid long resident processes on small devices.
+Keep the Markdown body focused on context gathering and the exact workflow. Prefer progressive disclosure and reference extra local files only when needed. Put reusable implementations under `scripts/`. Do not create `skill.toml`.
+
+After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. When a declared command matches the requested action, execute it with `skill.run`. Keep command permissions explicit and avoid long resident processes on small devices.
 """
 
 
@@ -98,9 +103,10 @@ class SkillIndex:
                 first_text = skill_file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            metadata = _read_skill_toml(entry)
-            description = str(metadata.get("description") or _derive_description(first_text) or name)
-            commands = _parse_commands(metadata)
+            parsed = _parse_skill_document(first_text, name)
+            if parsed is None:
+                continue
+            description, commands = parsed
             skills.append(
                 SkillMetadata(
                     name=name,
@@ -126,10 +132,24 @@ class SkillIndex:
         if not selected:
             return SkillContext(text="", skills=[])
 
-        lines = ["Available skills (use skill.read with name when needed):", ""]
+        lines = [
+            "Available skills:",
+            "",
+            (
+                "Use skill.read to load full instructions. When a skill has a configured command "
+                "matching the requested action, use skill.run instead of invoking that command's "
+                "underlying executable through shell.run."
+            ),
+            "",
+        ]
         for skill in selected:
             location = "[builtin]" if skill.root.name == "builtin" and skill.content is not None else str(skill.root)
-            lines.append(f"- {skill.name}: {skill.description} [{location}]")
+            command_text = (
+                f" Commands: {', '.join(command.name for command in skill.commands)}"
+                if skill.commands
+                else ""
+            )
+            lines.append(f"- {skill.name}: {skill.description}{command_text} [{location}]")
         text = "\n".join(lines).strip()
         truncated = False
         if len(text) > config.max_catalog_chars:
@@ -146,7 +166,17 @@ class SkillIndex:
                 content = skill.skill_file.read_text(encoding="utf-8")
             except OSError:
                 return None, False
-        text = f"[{skill.name}]\nBase directory: {skill.root}\n\n{content.strip()}"
+        command_text = ""
+        if skill.commands:
+            command_lines = [
+                f"- {command.name}: {command.description}".rstrip(": ")
+                for command in skill.commands
+            ]
+            command_text = "\nConfigured commands:\n" + "\n".join(command_lines)
+        text = (
+            f"[{skill.name}]\nBase directory: {skill.root}"
+            f"{command_text}\n\n{content.strip()}"
+        )
         if len(text) > max_chars:
             return bound_text(text, max_chars), True
         return text, False
@@ -169,70 +199,86 @@ def _dir_fingerprint(skill_dir: Path) -> tuple:
     for entry in entries:
         if not entry.is_dir():
             continue
-        for name in ("SKILL.md", "skill.toml"):
-            path = entry / name
-            try:
-                parts.append((str(path.resolve()), path.stat().st_mtime))
-            except OSError:
-                parts.append((str(path), None))
+        path = entry / "SKILL.md"
+        try:
+            parts.append((str(path.resolve()), path.stat().st_mtime))
+        except OSError:
+            parts.append((str(path), None))
     return tuple(parts)
 
 
-def _read_skill_toml(root: Path) -> dict[str, Any]:
-    path = root / "skill.toml"
+def _parse_skill_document(content: str, expected_name: str) -> tuple[str, list[SkillCommand]] | None:
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
-
-
-def _parse_commands(metadata: dict[str, Any]) -> list[SkillCommand]:
+        closing = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    try:
+        metadata = yaml.safe_load("\n".join(lines[1:closing]))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    name = metadata.get("name")
+    description = metadata.get("description")
+    if not isinstance(name, str) or name.strip() != expected_name:
+        return None
+    if not isinstance(description, str) or not description.strip():
+        return None
     commands = metadata.get("commands", [])
     if not isinstance(commands, list):
-        return []
+        return None
     parsed: list[SkillCommand] = []
+    seen: set[str] = set()
     for item in commands:
         if not isinstance(item, dict):
-            continue
+            return None
         name = item.get("name")
         command = item.get("command")
-        if not isinstance(name, str) or not isinstance(command, str):
-            continue
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or name in seen
+            or not isinstance(command, str)
+            or not command.strip()
+        ):
+            return None
         args = item.get("args", [])
         if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
-            args = []
+            return None
+        command_description = item.get("description", "")
+        read_only = item.get("read_only", False)
+        if not isinstance(command_description, str) or not isinstance(read_only, bool):
+            return None
         parsed.append(
             SkillCommand(
                 name=name,
-                description=str(item.get("description") or ""),
+                description=command_description,
                 command=command,
                 args=args,
-                read_only=bool(item.get("read_only", False)),
+                read_only=read_only,
             )
         )
-    return parsed
+        seen.add(name)
+    return description, parsed
 
 
 def _builtin_skills() -> list[SkillMetadata]:
     name = "create-colibri-skill"
     root = Path("builtin")
+    parsed = _parse_skill_document(CREATE_COLIBRI_SKILL_CONTENT, name)
+    if parsed is None:
+        return []
+    description, commands = parsed
     return [
         SkillMetadata(
             name=name,
-            description="Guide creating, writing, adding, or designing a local Colibri skill.",
+            description=description,
             root=root,
             skill_file=root / name / "SKILL.md",
+            commands=commands,
             content=CREATE_COLIBRI_SKILL_CONTENT,
         )
     ]
-
-
-def _derive_description(content: str) -> str:
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            return stripped.lstrip("#").strip()
-        return stripped
-    return ""

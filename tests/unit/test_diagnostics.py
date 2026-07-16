@@ -5,7 +5,10 @@ from colibri.diagnostics import build_diagnostics, rss_kb
 def test_build_diagnostics_reports_core_fields(tmp_path):
     skill_dir = tmp_path / "skills" / "release"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Release\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: release\ndescription: Release helper\n---\n\n# Release\n",
+        encoding="utf-8",
+    )
     config = AgentConfig.default().with_overrides(
         {
             "memory": {"root": str(tmp_path / "memory")},

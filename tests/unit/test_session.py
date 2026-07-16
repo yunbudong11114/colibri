@@ -4,6 +4,7 @@ from colibri.config import AgentConfig
 from colibri.media import MediaPart
 from colibri.messages import Message, ModelResponse, ToolCall
 from colibri.model.fake import FakeModelClient
+from colibri.permissions_store import UserPermissionStore
 from colibri.session import SYSTEM_PROMPT, AgentSession
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
 from colibri.tools.permissions import PermissionPolicy
@@ -814,21 +815,26 @@ def test_skill_run_uses_permission_confirmation(tmp_path):
     skill_dir = tmp_path / "skills" / "release"
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Release Notes\n", encoding="utf-8")
     (scripts_dir / "render.py").write_text("print('rendered')\n", encoding="utf-8")
-    (skill_dir / "skill.toml").write_text(
-        f"""
-[[commands]]
-name = "render"
-command = "{sys.executable}"
-args = ["scripts/render.py"]
-read_only = false
-""".strip(),
+    (skill_dir / "SKILL.md").write_text(
+        f"""---
+name: release
+description: Release helper
+commands:
+  - name: render
+    command: {sys.executable}
+    args: [scripts/render.py]
+    read_only: false
+---
+
+# Release Notes
+""",
         encoding="utf-8",
     )
     config = AgentConfig.default().with_overrides({"skills": {"dir": str(tmp_path / "skills")}})
     prompter = FakePrompter(reply="1")
-    policy = PermissionPolicy.from_config(config, prompter=prompter)
+    policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
+    policy.user_store = UserPermissionStore(tmp_path / "permissions.toml")
     session = AgentSession(
         config=config,
         model=ScriptedSkillRunModel(),
@@ -890,7 +896,16 @@ def test_session_logs_memory_context_event(tmp_path):
 def test_session_injects_skill_catalog_without_persisting_it(tmp_path):
     skill_dir = tmp_path / "skills" / "release"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# Release Notes\n\nUse this when writing release notes.\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: release
+description: Use this when writing release notes.
+---
+
+# Release Notes
+""",
+        encoding="utf-8",
+    )
     config = AgentConfig.default().with_overrides({"skills": {"dir": str(tmp_path / "skills")}})
     transcript = MemoryTranscript()
     model = SkillAwareModel()
@@ -901,7 +916,7 @@ def test_session_injects_skill_catalog_without_persisting_it(tmp_path):
     assert response.text == "skill used"
     assert any(message.role == "system" and "Available skills" in message.content for message in model.first_messages)
     assert any(message.role == "system" and "release:" in message.content for message in model.first_messages)
-    assert all("Use this when writing release notes" not in message.content for message in model.first_messages)
+    assert all("# Release Notes" not in message.content for message in model.first_messages)
     assert all("Available skills" not in message.content for message in session.messages)
     assert (
         "skill_catalog",
