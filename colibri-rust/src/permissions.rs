@@ -328,16 +328,21 @@ impl PermissionPolicy {
             if contains_opt(&self.session_shell_commands, subject.shell_command.as_ref()) {
                 return Some(decision(true, "allow", "session", subject, ""));
             }
-            if contains_opt(
+            if shell_command_matches_executables(
+                subject.shell_command.as_deref(),
+                &self.session_shell_commands,
                 &self.session_shell_executables,
-                subject.shell_executable.as_ref(),
             ) {
                 return Some(decision(true, "allow", "session_executable", subject, ""));
             }
             if contains_opt(&grants.shell_commands, subject.shell_command.as_ref()) {
                 return Some(decision(true, "allow", "user", subject, ""));
             }
-            if shell_command_matches_user_executables(subject.shell_command.as_deref(), grants) {
+            if shell_command_matches_executables(
+                subject.shell_command.as_deref(),
+                &grants.shell_commands,
+                &grants.shell_executables,
+            ) {
                 return Some(decision(true, "allow", "user_executable", subject, ""));
             }
             return None;
@@ -397,18 +402,16 @@ impl PermissionPolicy {
             return decision(true, "allow", scope, subject, "");
         }
         if choice == "3" && subject.kind == "shell" {
-            push_unique_opt(
-                &mut self.session_shell_executables,
-                subject.shell_executable.clone(),
-            );
+            for executable in subject_shell_executables(subject) {
+                push_unique(&mut self.session_shell_executables, executable);
+            }
             return decision(true, "allow", "session_executable", subject, "");
         }
         if choice == "5" && subject.kind == "shell" {
             let mut delta = UserGrants::default();
-            push_unique_opt(
-                &mut delta.shell_executables,
-                subject.shell_executable.clone(),
-            );
+            for executable in subject_shell_executables(subject) {
+                push_unique(&mut delta.shell_executables, executable);
+            }
             if self.user_store.merge(&delta).is_err() {
                 return decision(false, "deny", "none", subject, "persist_error");
             }
@@ -559,11 +562,29 @@ fn decision(
     }
 }
 
-fn shell_command_matches_user_executables(command: Option<&str>, grants: &UserGrants) -> bool {
+fn subject_shell_executables(subject: &PermissionSubject) -> Vec<String> {
+    let mut executables = subject
+        .shell_command
+        .as_deref()
+        .map(crate::shell_policy::shell_executables)
+        .unwrap_or_default();
+    if executables.is_empty() {
+        if let Some(executable) = subject.shell_executable.clone() {
+            executables.push(executable);
+        }
+    }
+    sorted_dedup(executables)
+}
+
+fn shell_command_matches_executables(
+    command: Option<&str>,
+    commands: &[String],
+    executables: &[String],
+) -> bool {
     let Some(command) = command else {
         return false;
     };
-    if grants.shell_executables.is_empty() {
+    if executables.is_empty() {
         return false;
     }
     if crate::shell_policy::has_dangerous_shell_features(command) {
@@ -574,9 +595,8 @@ fn shell_command_matches_user_executables(command: Option<&str>, grants: &UserGr
         return false;
     }
     segments.iter().all(|segment| {
-        grants.shell_commands.contains(segment)
-            || grants
-                .shell_executables
+        commands.contains(segment)
+            || executables
                 .iter()
                 .any(|executable| command_executable_matches(segment, executable))
     })

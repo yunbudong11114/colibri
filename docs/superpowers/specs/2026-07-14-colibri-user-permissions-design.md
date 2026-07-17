@@ -19,8 +19,18 @@ Python and Rust must keep matching behavior.
   - tool: tool name in `[tools].names`
 - `5` applies only to shell subjects and saves the parsed shell executable in `[shell].executables`.
 - `5 user-executable` and `3 session-executable` intentionally use the same granularity:
-  - `3` allows the executable for the current session only.
-  - `5` allows the executable persistently at user level.
+  - `3` allows every parsed executable in the approved command for the current
+    session only.
+  - `5` allows every parsed executable in the approved command persistently at
+    user level.
+  - A pipeline or compound command is auto-allowed only when every parsed
+    executable is covered by the corresponding executable grants or an exact
+    command-segment grant.
+  - This prevents an approval loop where approving `curl ... | head ...` stores
+    only `curl`, then asks again forever because `head` can never be stored.
+  - `shell.deny` remains stronger than every grant: every executable in every
+    compound segment is checked against the deny list before grants are
+    considered.
 - `[shell].executables` is the only supported executable-grant key. The obsolete
   `[shell].prefixes` key is ignored and its compatibility code is removed.
 - Shell executable matching rejects commands with dangerous shell features before checking executable grants.
@@ -29,5 +39,7 @@ Python and Rust must keep matching behavior.
 ## Verification
 
 - Python unit tests cover user command, user executable, user file root, store path, and numeric prompt choices.
+- Python and Rust tests cover storing every executable from an approved
+  pipeline or compound command and reusing that grant without another prompt.
 - Rust runtime tests cover matching behavior and persistence.
 - Existing parity tests must be updated to the new test names and continue to pass.

@@ -1819,6 +1819,35 @@ fn permission_policy_matches_python_session_and_user_grants() {
     assert_eq!(second.scope, "session");
     assert_eq!(prompter.requests.len(), 1);
 
+    let mut session_executable_prompter = FakePermissionPrompter::new(vec!["3 session-executable"]);
+    let mut session_executable_policy = PermissionPolicy::from_config(&config, temp.clone());
+    let mut first_pipeline_args = BTreeMap::new();
+    first_pipeline_args.insert(
+        "command".to_string(),
+        "curl https://example.com/one | head -10".to_string(),
+    );
+    let mut second_pipeline_args = BTreeMap::new();
+    second_pipeline_args.insert(
+        "command".to_string(),
+        "curl https://example.com/two | head -20".to_string(),
+    );
+    let first_pipeline = session_executable_policy.decide(
+        &shell,
+        &first_pipeline_args,
+        &context,
+        Some(&mut session_executable_prompter),
+    );
+    let second_pipeline = session_executable_policy.decide(
+        &shell,
+        &second_pipeline_args,
+        &context,
+        Some(&mut session_executable_prompter),
+    );
+    assert!(first_pipeline.allowed);
+    assert!(second_pipeline.allowed);
+    assert_eq!(second_pipeline.scope, "session_executable");
+    assert_eq!(session_executable_prompter.requests.len(), 1);
+
     let store = UserPermissionStore::for_user();
     store
         .save(&UserGrants {
@@ -1951,20 +1980,36 @@ fn permission_policy_matches_python_session_and_user_grants() {
     let mut user_executable_prompter = FakePermissionPrompter::new(vec!["5 user-executable"]);
     let mut user_executable_policy = PermissionPolicy::from_config(&config, temp.clone());
     let mut user_executable_args = BTreeMap::new();
-    user_executable_args.insert("command".to_string(), "node --version".to_string());
+    user_executable_args.insert(
+        "command".to_string(),
+        "curl https://example.com/one | head -10".to_string(),
+    );
     let user_executable_decision = user_executable_policy.decide(
         &shell,
         &user_executable_args,
         &context,
         Some(&mut user_executable_prompter),
     );
+    let mut reused_user_executable_args = BTreeMap::new();
+    reused_user_executable_args.insert(
+        "command".to_string(),
+        "curl https://example.com/two | head -20".to_string(),
+    );
+    let reused_user_executable_decision = user_executable_policy.decide(
+        &shell,
+        &reused_user_executable_args,
+        &context,
+        Some(&mut user_executable_prompter),
+    );
     drop(user_executable_policy);
     assert!(user_executable_decision.allowed);
     assert_eq!(user_executable_decision.scope, "user_executable");
-    assert!(UserPermissionStore::for_user()
-        .load()
-        .shell_executables
-        .contains(&"node".to_string()));
+    assert!(reused_user_executable_decision.allowed);
+    assert_eq!(reused_user_executable_decision.scope, "user_executable");
+    assert_eq!(user_executable_prompter.requests.len(), 1);
+    let persisted_executables = UserPermissionStore::for_user().load().shell_executables;
+    assert!(persisted_executables.contains(&"curl".to_string()));
+    assert!(persisted_executables.contains(&"head".to_string()));
     restore_home(old_home);
 }
 

@@ -658,7 +658,8 @@ def test_denied_tool_call_adds_result_without_running_tool(tmp_path):
     )
 
 
-def test_session_returns_user_denial_to_model(tmp_path):
+def test_session_returns_user_denial_to_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default()
     prompter = FakePrompter(reply="0")
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
@@ -760,7 +761,8 @@ def test_session_writes_transcript_events(tmp_path):
     ]
 
 
-def test_session_logs_dynamic_permission_payload(tmp_path):
+def test_session_logs_dynamic_permission_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default()
     transcript = MemoryTranscript()
     prompter = FakePrompter(reply="1")

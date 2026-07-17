@@ -14,6 +14,7 @@ from colibri.tools.shell_policy import (
     first_shell_executable,
     has_dangerous_shell_features,
     shell_command_segments,
+    shell_executables,
 )
 
 
@@ -128,11 +129,19 @@ class PermissionPolicy:
         if subject.kind == "shell":
             if subject.shell_command in self.session_shell_commands:
                 return _decision(True, "allow", "session", subject)
-            if subject.shell_executable in self.session_shell_executables:
+            if _shell_command_matches_executables(
+                subject.shell_command,
+                self.session_shell_commands,
+                self.session_shell_executables,
+            ):
                 return _decision(True, "allow", "session_executable", subject)
             if subject.shell_command in user_grants.shell_commands:
                 return _decision(True, "allow", "user", subject)
-            if _shell_command_matches_user_executables(subject.shell_command, user_grants):
+            if _shell_command_matches_executables(
+                subject.shell_command,
+                user_grants.shell_commands,
+                user_grants.shell_executables,
+            ):
                 return _decision(True, "allow", "user_executable", subject)
             return None
         if subject.kind == "file_path":
@@ -178,10 +187,10 @@ class PermissionPolicy:
             scope = "session_file_root" if subject.kind == "file_path" else "session"
             return _decision(True, "allow", scope, subject)
         if choice == "3" and subject.kind == "shell" and subject.shell_executable is not None:
-            self.session_shell_executables.add(subject.shell_executable)
+            self.session_shell_executables.update(_subject_shell_executables(subject))
             return _decision(True, "allow", "session_executable", subject)
         if choice == "5" and subject.kind == "shell" and subject.shell_executable is not None:
-            self.user_store.merge(UserGrants(shell_executables={subject.shell_executable}))
+            self.user_store.merge(UserGrants(shell_executables=_subject_shell_executables(subject)))
             return _decision(True, "allow", "user_executable", subject)
         if choice == "4":
             if subject.kind == "shell" and subject.shell_command is not None:
@@ -263,8 +272,19 @@ def _shell_write_path(command_text: str, argv: list[str], context: ToolContext |
     return resolve_file_path(target, context.cwd)
 
 
-def _shell_command_matches_user_executables(command: str | None, grants: UserGrants) -> bool:
-    if command is None or not grants.shell_executables:
+def _subject_shell_executables(subject: PermissionSubject) -> set[str]:
+    executables = set(shell_executables(subject.shell_command or ""))
+    if not executables and subject.shell_executable is not None:
+        executables.add(subject.shell_executable)
+    return executables
+
+
+def _shell_command_matches_executables(
+    command: str | None,
+    commands: set[str],
+    executables: set[str],
+) -> bool:
+    if command is None or not executables:
         return False
     if has_dangerous_shell_features(command):
         return False
@@ -272,8 +292,8 @@ def _shell_command_matches_user_executables(command: str | None, grants: UserGra
     if not segments:
         return False
     return all(
-        segment in grants.shell_commands
-        or any(_command_executable_matches(segment, executable) for executable in grants.shell_executables)
+        segment in commands
+        or any(_command_executable_matches(segment, executable) for executable in executables)
         for segment in segments
     )
 

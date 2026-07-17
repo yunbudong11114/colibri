@@ -141,7 +141,8 @@ def test_allow_read_confirm_write_confirms_non_read_only_tool(tmp_path):
     assert prompter.requests[0].read_only is False
 
 
-def test_shell_command_prompts_when_no_grant(tmp_path):
+def test_shell_command_prompts_when_no_grant(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default()
     prompter = FakePrompter(replies=["1"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
@@ -154,7 +155,8 @@ def test_shell_command_prompts_when_no_grant(tmp_path):
     assert prompter.requests[0].subject.shell_command == "pwd"
 
 
-def test_shell_session_command_grant_allows_second_call_without_prompt(tmp_path):
+def test_shell_session_command_grant_allows_second_call_without_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default()
     prompter = FakePrompter(replies=["2"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
@@ -169,14 +171,15 @@ def test_shell_session_command_grant_allows_second_call_without_prompt(tmp_path)
     assert len(prompter.requests) == 1
 
 
-def test_shell_session_executable_grant_allows_same_executable(tmp_path):
+def test_shell_session_executable_grant_allows_same_executable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     config = AgentConfig.default()
     prompter = FakePrompter(replies=["3"], requests=[])
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
-    first = policy.decide(ShellRunTool(), {"command": "git status"}, context)
-    second = policy.decide(ShellRunTool(), {"command": "git log"}, context)
+    first = policy.decide(ShellRunTool(), {"command": "curl https://example.com/one | head -10"}, context)
+    second = policy.decide(ShellRunTool(), {"command": "curl https://example.com/two | head -20"}, context)
 
     assert first.allowed
     assert second.allowed
@@ -191,15 +194,15 @@ def test_shell_user_executable_choice_persists_executable(tmp_path, monkeypatch)
     policy = PermissionPolicy.from_config(config, prompter=prompter, cwd=tmp_path)
     context = tool_context(config, tmp_path)
 
-    first = policy.decide(ShellRunTool(), {"command": "git status --short"}, context)
-    second = policy.decide(ShellRunTool(), {"command": "git diff --stat"}, context)
+    first = policy.decide(ShellRunTool(), {"command": "curl https://example.com/one | head -10"}, context)
+    second = policy.decide(ShellRunTool(), {"command": "curl https://example.com/two | head -20"}, context)
     grants = UserPermissionStore.for_user().load()
 
     assert first.allowed
     assert first.scope == "user_executable"
     assert second.allowed
     assert second.scope == "user_executable"
-    assert grants.shell_executables == {"git"}
+    assert grants.shell_executables == {"curl", "head"}
     assert len(prompter.requests) == 1
 
 

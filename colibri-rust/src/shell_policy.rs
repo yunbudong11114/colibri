@@ -20,7 +20,7 @@ pub(crate) fn first_shell_executable(command: &str) -> Option<String> {
     shell_executables(command).into_iter().next()
 }
 
-fn shell_executables(command: &str) -> Vec<String> {
+pub(crate) fn shell_executables(command: &str) -> Vec<String> {
     shell_command_segments(command)
         .into_iter()
         .filter_map(|segment| {
