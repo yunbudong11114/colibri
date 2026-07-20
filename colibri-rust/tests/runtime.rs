@@ -2792,6 +2792,146 @@ fn web_search_requires_configured_baidu_api_key() {
 }
 
 #[test]
+fn web_search_calls_aliyun_streamable_http_mcp() {
+    let _guard = env_lock().lock().unwrap();
+    let old_key = std::env::var_os("DASHSCOPE_API_KEY");
+    std::env::set_var("DASHSCOPE_API_KEY", "dashscope-key");
+    let temp = temp_dir("web-search-aliyun-mcp");
+    let server = start_http_server(|_base_url, _requests| {
+        |request| {
+            if request.method == "DELETE" {
+                return TestHttpResponse {
+                    status: 204,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                };
+            }
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            match body.get("method").and_then(|value| value.as_str()) {
+                Some("initialize") => TestHttpResponse {
+                    status: 200,
+                    headers: vec![
+                        ("Content-Type".to_string(), "application/json".to_string()),
+                        ("Mcp-Session-Id".to_string(), "session-1".to_string()),
+                    ],
+                    body: br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"WebSearch","version":"1"}}}"#.to_vec(),
+                },
+                Some("notifications/initialized") => TestHttpResponse {
+                    status: 202,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                },
+                Some("tools/list") => TestHttpResponse {
+                    status: 200,
+                    headers: vec![(
+                        "Content-Type".to_string(),
+                        "text/event-stream".to_string(),
+                    )],
+                    body: br#"event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"bailian_web_search","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer"}}}}]}}
+
+"#
+                    .to_vec(),
+                },
+                Some("tools/call") => TestHttpResponse::json(
+                    r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[{\"title\":\"杭州天气\",\"url\":\"https://example.test/weather\"}]"}]}}"#,
+                ),
+                other => panic!("unexpected MCP method: {other:?}"),
+            }
+        }
+    });
+
+    let mut config = AgentConfig::default();
+    config.web_search.engine = "aliyun_mcp".to_string();
+    config.web_search.api_key.clear();
+    config.web_search.endpoint = format!("{}/mcp", server.base_url);
+    config.web_search.timeout_seconds = 3;
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool(
+        "web.search",
+        r#"{"query":"杭州天气","count":"30","freshness":"pd"}"#,
+        &context,
+    )
+    .unwrap();
+
+    restore_env_var("DASHSCOPE_API_KEY", old_key);
+    assert!(result.ok);
+    assert!(result.text.contains("杭州天气"));
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["POST", "POST", "POST", "POST", "DELETE"]
+    );
+    let initialized_header = requests[1]
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Mcp-Session-Id"))
+        .map(|(_, value)| value.as_str());
+    assert_eq!(initialized_header, Some("session-1"));
+    let authorization = requests[3]
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
+        .map(|(_, value)| value.as_str());
+    assert_eq!(authorization, Some("Bearer dashscope-key"));
+    let call: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+    assert_eq!(call["method"], "tools/call");
+    assert_eq!(call["params"]["name"], "bailian_web_search");
+    assert_eq!(call["params"]["arguments"]["query"], "杭州天气");
+    assert_eq!(call["params"]["arguments"]["count"], 20);
+    assert!(call["params"]["arguments"].get("freshness").is_none());
+}
+
+#[test]
+fn web_search_aliyun_mcp_requires_key() {
+    let _guard = env_lock().lock().unwrap();
+    let old_key = std::env::var_os("DASHSCOPE_API_KEY");
+    std::env::remove_var("DASHSCOPE_API_KEY");
+    let temp = temp_dir("web-search-aliyun-mcp-missing-key");
+    let mut config = AgentConfig::default();
+    config.web_search.engine = "aliyun_mcp".to_string();
+    config.web_search.api_key.clear();
+    config.web_search.endpoint =
+        "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp".to_string();
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool("web.search", r#"{"query":"hello"}"#, &context).unwrap();
+
+    restore_env_var("DASHSCOPE_API_KEY", old_key);
+    assert!(!result.ok);
+    assert_eq!(result.error_type.as_deref(), Some("invalid_config"));
+    assert!(result.text.contains("DASHSCOPE_API_KEY"));
+}
+
+#[test]
+fn web_search_aliyun_mcp_maps_jsonrpc_error() {
+    let temp = temp_dir("web-search-aliyun-mcp-jsonrpc-error");
+    let server = start_http_server(|_base_url, _requests| {
+        |_request| {
+            TestHttpResponse::json(
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid api key"}}"#,
+            )
+        }
+    });
+    let mut config = AgentConfig::default();
+    config.web_search.engine = "aliyun_mcp".to_string();
+    config.web_search.api_key = "bad-key".to_string();
+    config.web_search.endpoint = format!("{}/mcp", server.base_url);
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool("web.search", r#"{"query":"hello"}"#, &context).unwrap();
+
+    assert!(!result.ok);
+    assert_eq!(result.error_type.as_deref(), Some("api_error"));
+    assert_eq!(result.text, "invalid api key");
+}
+
+#[test]
 fn session_writes_transcript_events() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("session-transcript");
@@ -4455,6 +4595,7 @@ fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
 struct CapturedHttpRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -4542,6 +4683,12 @@ fn read_http_request(mut stream: TcpStream) -> Result<CapturedHttpRequest, Strin
         .find(|(key, _)| key.eq_ignore_ascii_case("Content-Length"))
         .and_then(|(_, value)| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
+    let captured_headers = headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect();
     let body_start = header_end + 4;
     while data.len().saturating_sub(body_start) < content_length {
         let read = stream
@@ -4555,6 +4702,7 @@ fn read_http_request(mut stream: TcpStream) -> Result<CapturedHttpRequest, Strin
     Ok(CapturedHttpRequest {
         method,
         path,
+        headers: captured_headers,
         body: data[body_start..body_start + content_length.min(data.len() - body_start)].to_vec(),
     })
 }

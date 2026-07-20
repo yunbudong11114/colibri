@@ -17,6 +17,9 @@ use crate::shell_policy::denied_shell_executable;
 use crate::skills::run_skill_command;
 
 static TOOL_SPECS_CACHE: Mutex<Option<(Vec<String>, Vec<serde_json::Value>)>> = Mutex::new(None);
+const BAIDU_DEFAULT_SEARCH_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_search";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const ALIYUN_MCP_TOOL_NAME: &str = "bailian_web_search";
 
 #[derive(Clone)]
 pub struct ToolContext {
@@ -741,7 +744,10 @@ fn valid_topic_name(value: &str) -> bool {
 }
 
 fn web_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    if context.config.web_search.engine != "baidu" {
+    if !matches!(
+        context.config.web_search.engine.as_str(),
+        "baidu" | "aliyun_mcp"
+    ) {
         return ToolResult::error(
             "invalid_config",
             format!(
@@ -773,6 +779,36 @@ fn web_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
         Ok(value) => value,
         Err(error) => return ToolResult::error("invalid_arguments", error),
     };
+    let text = if context.config.web_search.engine == "baidu" {
+        match baidu_web_search(&query, count, search_filter, context) {
+            Ok(text) => text,
+            Err((kind, text)) => return ToolResult::error(kind, text),
+        }
+    } else {
+        match aliyun_mcp_web_search(
+            query.trim(),
+            count,
+            args.get("freshness")
+                .map(String::as_str)
+                .filter(|value| !value.is_empty()),
+            context,
+        ) {
+            Ok(text) => text,
+            Err((kind, text)) => return ToolResult::error(kind, text),
+        }
+    };
+    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
+    let mut result = ToolResult::ok(text);
+    result.truncated = truncated;
+    result
+}
+
+fn baidu_web_search(
+    query: &str,
+    count: usize,
+    search_filter: serde_json::Value,
+    context: &ToolContext,
+) -> Result<String, (&'static str, String)> {
     let body = serde_json::to_string(&serde_json::json!({
         "messages":[{"content":query.trim(),"role":"user"}],
         "search_source":"baidu_search_v2",
@@ -782,7 +818,7 @@ fn web_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     .unwrap_or_else(|_| "{}".to_string());
     let (url, headers) = match baidu_url_and_headers(context) {
         Ok(value) => value,
-        Err(error) => return ToolResult::error("invalid_config", error),
+        Err(error) => return Err(("invalid_config", error)),
     };
     let response = match request_json(
         "POST",
@@ -796,31 +832,24 @@ fn web_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     ) {
         Ok(response) => response,
         Err(error) if error.contains("(28)") || error.to_lowercase().contains("timed out") => {
-            return ToolResult::error("timeout", "web.search request timed out")
+            return Err(("timeout", "web.search request timed out".to_string()))
         }
         Err(error) => {
-            return ToolResult::error(
+            return Err((
                 "network_error",
                 format!("web.search request failed: {}", error),
-            )
+            ))
         }
     };
     if let Some(status) = response.status {
         if status >= 400 {
-            return ToolResult::error(
+            return Err((
                 "http_error",
                 format!("web.search failed with HTTP {}: {}", status, response.body),
-            );
+            ));
         }
     }
-    let text = match format_baidu_references(&response.body) {
-        Ok(text) => text,
-        Err((kind, text)) => return ToolResult::error(kind, text),
-    };
-    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
+    format_baidu_references(&response.body)
 }
 
 fn image_understand(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
@@ -957,6 +986,368 @@ fn baidu_url_and_headers(context: &ToolContext) -> Result<(String, Vec<(String, 
     ));
     headers.push(("X-Appbuilder-From".to_string(), "openclaw".to_string()));
     Ok((context.config.web_search.endpoint.clone(), headers))
+}
+
+fn aliyun_mcp_web_search(
+    query: &str,
+    count: usize,
+    freshness: Option<&str>,
+    context: &ToolContext,
+) -> Result<String, (&'static str, String)> {
+    let endpoint = context.config.web_search.endpoint.trim();
+    if endpoint.is_empty() || endpoint == BAIDU_DEFAULT_SEARCH_ENDPOINT {
+        return Err((
+            "invalid_config",
+            "Missing Aliyun WebSearch MCP endpoint: set web_search.endpoint".to_string(),
+        ));
+    }
+    let api_key = if context.config.web_search.api_key.is_empty() {
+        std::env::var("DASHSCOPE_API_KEY").unwrap_or_default()
+    } else {
+        context.config.web_search.api_key.clone()
+    };
+    if api_key.is_empty() {
+        return Err((
+            "invalid_config",
+            "Missing Aliyun WebSearch MCP API key: set web_search.api_key or DASHSCOPE_API_KEY"
+                .to_string(),
+        ));
+    }
+
+    let mut session_id = None;
+    let result = (|| {
+        let initialize = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "protocolVersion":MCP_PROTOCOL_VERSION,
+                "capabilities":{},
+                "clientInfo":{"name":"colibri","version":"0.1.0"}
+            }
+        });
+        let (messages, initialized_session) =
+            mcp_post(endpoint, &api_key, &initialize, None, false, context)?;
+        session_id = initialized_session;
+        mcp_result(&messages, 1)?;
+
+        mcp_post(
+            endpoint,
+            &api_key,
+            &serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            session_id.as_deref(),
+            true,
+            context,
+        )?;
+        let (messages, _) = mcp_post(
+            endpoint,
+            &api_key,
+            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+            session_id.as_deref(),
+            false,
+            context,
+        )?;
+        let listed = mcp_result(&messages, 2)?;
+        let tool = select_mcp_search_tool(&listed)?;
+        let tool_name = tool
+            .get("name")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                (
+                    "invalid_response",
+                    "web.search MCP tool was missing name".to_string(),
+                )
+            })?;
+        let properties = tool
+            .get("inputSchema")
+            .and_then(|value| value.get("properties"))
+            .and_then(|value| value.as_object());
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "query".to_string(),
+            serde_json::Value::String(query.to_string()),
+        );
+        if properties.is_some_and(|properties| properties.contains_key("count")) {
+            arguments.insert(
+                "count".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(count.min(20))),
+            );
+        }
+        if let Some(freshness) = freshness {
+            if properties.is_some_and(|properties| properties.contains_key("freshness")) {
+                arguments.insert(
+                    "freshness".to_string(),
+                    serde_json::Value::String(freshness.to_string()),
+                );
+            }
+        }
+        let (messages, _) = mcp_post(
+            endpoint,
+            &api_key,
+            &serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{"name":tool_name,"arguments":arguments}
+            }),
+            session_id.as_deref(),
+            false,
+            context,
+        )?;
+        mcp_tool_text(&mcp_result(&messages, 3)?)
+    })();
+
+    if let Some(session_id) = session_id {
+        mcp_delete(endpoint, &api_key, &session_id, context);
+    }
+    result
+}
+
+fn mcp_post(
+    endpoint: &str,
+    api_key: &str,
+    payload: &serde_json::Value,
+    session_id: Option<&str>,
+    allow_empty: bool,
+    context: &ToolContext,
+) -> Result<(Vec<serde_json::Value>, Option<String>), (&'static str, String)> {
+    let mut headers = vec![
+        ("Authorization".to_string(), format!("Bearer {}", api_key)),
+        (
+            "Accept".to_string(),
+            "application/json, text/event-stream".to_string(),
+        ),
+        (
+            "MCP-Protocol-Version".to_string(),
+            MCP_PROTOCOL_VERSION.to_string(),
+        ),
+    ];
+    if let Some(session_id) = session_id {
+        headers.push(("Mcp-Session-Id".to_string(), session_id.to_string()));
+    }
+    let body = serde_json::to_string(payload).map_err(|error| {
+        (
+            "invalid_arguments",
+            format!("web.search MCP request was not valid JSON: {}", error),
+        )
+    })?;
+    let response = request_json(
+        "POST",
+        endpoint,
+        &headers
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect::<Vec<_>>(),
+        Some(&body),
+        context.config.web_search.timeout_seconds,
+    )
+    .map_err(mcp_transport_error)?;
+    if response.status.is_some_and(|status| status >= 400) {
+        return Err((
+            "http_error",
+            format!(
+                "web.search MCP failed with HTTP {}: {}",
+                response.status.unwrap_or_default(),
+                response.body
+            ),
+        ));
+    }
+    let response_session = response
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Mcp-Session-Id"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| session_id.map(ToString::to_string));
+    if response.body.trim().is_empty() {
+        if allow_empty {
+            return Ok((Vec::new(), response_session));
+        }
+        return Err((
+            "invalid_response",
+            "web.search MCP response was empty".to_string(),
+        ));
+    }
+    let content_type = response
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Content-Type"))
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("");
+    Ok((
+        mcp_messages(&response.body, content_type)?,
+        response_session,
+    ))
+}
+
+fn mcp_delete(endpoint: &str, api_key: &str, session_id: &str, context: &ToolContext) {
+    let headers = [
+        ("Authorization", format!("Bearer {}", api_key)),
+        ("Accept", "application/json, text/event-stream".to_string()),
+        ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION.to_string()),
+        ("Mcp-Session-Id", session_id.to_string()),
+    ];
+    let _ = request_json(
+        "DELETE",
+        endpoint,
+        &headers,
+        None,
+        context.config.web_search.timeout_seconds,
+    );
+}
+
+fn mcp_transport_error(error: String) -> (&'static str, String) {
+    if error.contains("(28)") || error.to_ascii_lowercase().contains("timed out") {
+        ("timeout", "web.search MCP request timed out".to_string())
+    } else {
+        (
+            "network_error",
+            format!("web.search MCP request failed: {}", error),
+        )
+    }
+}
+
+fn mcp_messages(
+    body: &str,
+    content_type: &str,
+) -> Result<Vec<serde_json::Value>, (&'static str, String)> {
+    let is_sse = content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+        || body.trim_start().starts_with("data:")
+        || body.trim_start().starts_with("event:");
+    if !is_sse {
+        let parsed = serde_json::from_str::<serde_json::Value>(body).map_err(|_| {
+            (
+                "invalid_response",
+                "web.search MCP response was not valid JSON or SSE".to_string(),
+            )
+        })?;
+        return match parsed {
+            serde_json::Value::Array(values) if values.iter().all(serde_json::Value::is_object) => {
+                Ok(values)
+            }
+            value if value.is_object() => Ok(vec![value]),
+            _ => Err((
+                "invalid_response",
+                "web.search MCP response was not valid JSON or SSE".to_string(),
+            )),
+        };
+    }
+
+    let normalized = body.replace("\r\n", "\n");
+    let mut messages = Vec::new();
+    for event in normalized.split("\n\n") {
+        let data = event
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<serde_json::Value>(&data).map_err(|_| {
+            (
+                "invalid_response",
+                "web.search MCP response was not valid JSON or SSE".to_string(),
+            )
+        })?;
+        if value.is_object() {
+            messages.push(value);
+        }
+    }
+    if messages.is_empty() {
+        return Err((
+            "invalid_response",
+            "web.search MCP response contained no JSON-RPC message".to_string(),
+        ));
+    }
+    Ok(messages)
+}
+
+fn mcp_result(
+    messages: &[serde_json::Value],
+    request_id: i64,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    let response = messages
+        .iter()
+        .find(|message| message.get("id").and_then(|value| value.as_i64()) == Some(request_id))
+        .ok_or_else(|| {
+            (
+                "invalid_response",
+                "web.search MCP response was missing the requested result".to_string(),
+            )
+        })?;
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("MCP request failed");
+        return Err(("api_error", message.to_string()));
+    }
+    response.get("result").cloned().ok_or_else(|| {
+        (
+            "invalid_response",
+            "web.search MCP response was missing result".to_string(),
+        )
+    })
+}
+
+fn select_mcp_search_tool(
+    result: &serde_json::Value,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    let tools = result
+        .get("tools")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            (
+                "invalid_response",
+                "web.search MCP tools/list response was invalid".to_string(),
+            )
+        })?;
+    let candidates = tools
+        .iter()
+        .filter(|tool| tool.get("name").and_then(|value| value.as_str()).is_some())
+        .collect::<Vec<_>>();
+    if let Some(tool) = candidates.iter().find(|tool| {
+        tool.get("name").and_then(|value| value.as_str()) == Some(ALIYUN_MCP_TOOL_NAME)
+    }) {
+        return Ok((*tool).clone());
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates[0].clone());
+    }
+    Err((
+        "invalid_response",
+        "web.search MCP did not advertise a unique search tool".to_string(),
+    ))
+}
+
+fn mcp_tool_text(result: &serde_json::Value) -> Result<String, (&'static str, String)> {
+    if result.get("isError").and_then(|value| value.as_bool()) == Some(true) {
+        return Err((
+            "api_error",
+            "Aliyun WebSearch MCP tool returned an error".to_string(),
+        ));
+    }
+    if let Some(content) = result.get("content").and_then(|value| value.as_array()) {
+        let text = content
+            .iter()
+            .filter(|block| block.get("type").and_then(|value| value.as_str()) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+    }
+    if let Some(structured) = result.get("structuredContent") {
+        return serde_json::to_string_pretty(structured)
+            .map_err(|error| ("invalid_response", error.to_string()));
+    }
+    Err((
+        "invalid_response",
+        "Aliyun WebSearch MCP result contained no usable content".to_string(),
+    ))
 }
 
 fn valid_date_range(value: &str) -> bool {

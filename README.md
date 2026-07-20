@@ -78,7 +78,7 @@ If `--config` is omitted, the Rust binary follows the Python runtime and reads `
 env HOME=/tmp/colibri-rust-smoke ./colibri-rust/target/release/colibri ask "hello"
 ```
 
-Rust supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through a Rust-native blocking HTTP client, markdown memory, transcripts, transcript restore, built-in local tools for files, file sending, shell, image understanding, memory, skills, and Baidu web search, plus Weixin QR auth/API, inbound and outbound Weixin media, and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[vision]`, `[session]`, and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by validating shell quoting, scanning each unquoted compound command segment against `shell.deny`, checking user exact command and executable shell grants, and executing the original command through the platform shell. `files.send` returns the same media result shape and requires an active channel media sender. `image.understand` uses the same vision defaults and fake-model response path as Python. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling is channel-neutral: enabled adapters are assembled by the channel registry, feed bounded per-session queues, and provide media, outbound, and optional interactive-permission behavior without transport branches in the gateway. Permission replies are keyed by the complete `channel:sender_id` session key, and idle shutdown waits for active turns before closing sessions. MCP is not exposed by the current Python runtime, so the Rust config surface also omits top-level MCP defaults.
+Rust supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through a Rust-native blocking HTTP client, markdown memory, transcripts, transcript restore, built-in local tools for files, file sending, shell, image understanding, memory, skills, Baidu web search, and Aliyun Bailian hosted WebSearch MCP, plus Weixin QR auth/API, inbound and outbound Weixin media, and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[vision]`, `[session]`, and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by validating shell quoting, scanning each unquoted compound command segment against `shell.deny`, checking user exact command and executable shell grants, and executing the original command through the platform shell. `files.send` returns the same media result shape and requires an active channel media sender. `image.understand` uses the same vision defaults and fake-model response path as Python. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling is channel-neutral: enabled adapters are assembled by the channel registry, feed bounded per-session queues, and provide media, outbound, and optional interactive-permission behavior without transport branches in the gateway. Permission replies are keyed by the complete `channel:sender_id` session key, and idle shutdown waits for active turns before closing sessions. The hosted MCP integration is scoped to the existing `web.search` tool and does not add a general top-level MCP runtime.
 
 The Rust test suite is derived from the Python unit suite. `colibri-rust/tests/parity.rs` scans every Python `tests/unit/test_*.py::test_*` function, requires every function to appear in the coverage map, verifies every named Rust counterpart exists, records file-level coverage as `covered` or `partial`, and directly compares Python/Rust CLI output for deterministic commands such as `ask`, `diagnostics`, and `gateway` usage. Runtime tests cover the matching Rust library behavior for config, tools, permissions, memory, transcript, transcript restore, models, gateway, channel registration, permission-waiter isolation, web search, skills, vision, media sending, Weixin auth, and Weixin media download/upload.
 
@@ -123,6 +123,21 @@ api_key = ""
 ```
 
 `model.api_key` takes precedence. If it is empty, Colibri reads `COLIBRI_API_KEY`.
+
+## Web Search
+
+The default `web.search` backend remains Baidu. To use Aliyun Bailian's hosted WebSearch MCP instead:
+
+```toml
+[web_search]
+engine = "aliyun_mcp"
+endpoint = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
+api_key = ""
+max_results = 10
+timeout_seconds = 10
+```
+
+`web_search.api_key` takes precedence. If it is empty, Colibri reads `DASHSCOPE_API_KEY`. This is a hosted Streamable HTTP MCP endpoint: Colibri performs the MCP lifecycle over HTTPS for each search and does not start a local MCP process. The existing `[web_search]` hot reload behavior applies.
 
 ## CLI
 
