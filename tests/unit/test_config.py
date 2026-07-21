@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from colibri.config import AgentConfig, ConfigError, expand_user_path
+from colibri.config import AgentConfig, ConfigError, HardwareDeviceConfig, expand_user_path
 
 
 def test_default_config_uses_small_device_limits():
@@ -50,6 +50,11 @@ def test_default_config_uses_small_device_limits():
     assert config.web_search.endpoint == "https://qianfan.baidubce.com/v2/ai_search/web_search"
     assert config.web_search.max_results == 10
     assert config.web_search.timeout_seconds == 10
+    assert not config.hardware.enabled
+    assert config.hardware.discovery == "on_demand"
+    assert config.hardware.operation_timeout_seconds == 2.0
+    assert config.hardware.max_transfer_bytes == 4096
+    assert config.hardware.devices == []
     assert config.gateway.enabled_channels == ["weixin"]
     assert config.gateway.max_sessions == 4
     assert config.gateway.session_idle_seconds == 600
@@ -172,6 +177,79 @@ auth_timeout_seconds = 22
     assert config.channels.weixin.auth_timeout_seconds == 22
 
 
+def test_hardware_device_config_loads_strict_allowlist(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[hardware]
+enabled = true
+operation_timeout_seconds = 3.5
+max_transfer_bytes = 2048
+
+[[hardware.devices]]
+name = "controller"
+path = "/dev/ttyACM0"
+transport = "serial_json"
+baud_rate = 115200
+capabilities = ["serial", "gpio", "i2c", "spi"]
+allow_write = true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.load(config_path)
+
+    assert config.hardware.operation_timeout_seconds == 3.5
+    assert config.hardware.max_transfer_bytes == 2048
+    assert config.hardware.devices == [
+        HardwareDeviceConfig(
+            name="controller",
+            path=Path("/dev/ttyACM0"),
+            capabilities=["serial", "gpio", "i2c", "spi"],
+            allow_write=True,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("hardware_toml", "message"),
+    [
+        ('enabled = "true"', "hardware.enabled must be a boolean"),
+        ('operation_timeout_seconds = "slow"', "operation_timeout_seconds must be a number"),
+        ('max_transfer_bytes = "large"', "max_transfer_bytes must be an integer"),
+        ('operation_timeout_seconds = 0', "operation_timeout_seconds"),
+        ('max_transfer_bytes = 0', "max_transfer_bytes"),
+        ('devices = "bad"', "array of tables"),
+        (
+            '[[hardware.devices]]\nname = "../bad"\npath = "/dev/ttyACM0"',
+            "invalid hardware device name",
+        ),
+        (
+            '[[hardware.devices]]\nname = "controller"\npath = "/tmp/ttyACM0"',
+            "path must be below /dev",
+        ),
+        (
+            '[[hardware.devices]]\nname = "controller"\npath = "/dev/ttyACM0"\ntransport = "native"',
+            "transport must be serial_json",
+        ),
+        (
+            '[[hardware.devices]]\nname = "controller"\npath = "/dev/ttyACM0"\ncapabilities = ["gpio", "gpio"]',
+            "duplicate hardware capability",
+        ),
+        (
+            '[[hardware.devices]]\nname = "controller"\npath = "/dev/ttyACM0"\nextra = true',
+            "hardware.devices.extra",
+        ),
+    ],
+)
+def test_hardware_device_config_rejects_unsafe_values(tmp_path, hardware_toml, message):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(f"[hardware]\n{hardware_toml}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        AgentConfig.load(config_path)
+
+
 def test_legacy_model_input_char_limit_is_rejected(tmp_path):
     config_path = tmp_path / "agent.toml"
     config_path.write_text(
@@ -279,6 +357,35 @@ max_recall_chars = 1234
     assert config.memory.max_recall_chars == 1234
     assert not hasattr(config.memory, "max_recall_topics")
     assert not hasattr(config, "mcp")
+
+
+def test_load_config_overrides_hardware_values(tmp_path):
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[hardware]
+enabled = true
+discovery = "on_demand"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.load(config_path)
+
+    assert config.hardware.enabled
+    assert config.hardware.discovery == "on_demand"
+
+
+def test_hardware_rejects_unknown_field_and_discovery_mode(tmp_path):
+    unknown_path = tmp_path / "unknown.toml"
+    unknown_path.write_text("[hardware]\nport = \"/dev/ttyACM0\"\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown config field: hardware.port"):
+        AgentConfig.load(unknown_path)
+
+    invalid_path = tmp_path / "invalid.toml"
+    invalid_path.write_text("[hardware]\ndiscovery = \"watch\"\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="hardware.discovery must be on_demand"):
+        AgentConfig.load(invalid_path)
 
 
 def test_unknown_top_level_section_is_rejected(tmp_path):

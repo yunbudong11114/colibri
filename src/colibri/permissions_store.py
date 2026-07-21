@@ -19,6 +19,7 @@ class UserGrants:
     shell_executables: set[str] = field(default_factory=set)
     tool_names: set[str] = field(default_factory=set)
     file_roots: set[str] = field(default_factory=set)
+    hardware_devices: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -61,11 +62,13 @@ class UserPermissionStore:
         shell = data.get("shell", {})
         tools = data.get("tools", {})
         files = data.get("files", {})
+        hardware = data.get("hardware", {})
         return UserGrants(
             shell_commands=_string_set(shell.get("commands")),
             shell_executables=_string_set(shell.get("executables")),
             tool_names=_string_set(tools.get("names")),
             file_roots=_string_set(files.get("roots")),
+            hardware_devices=_string_set(hardware.get("devices")),
         )
 
     def save(self, grants: UserGrants) -> None:
@@ -83,6 +86,7 @@ class UserPermissionStore:
                 shell_executables=set(current.shell_executables) | set(delta.shell_executables),
                 tool_names=set(current.tool_names) | set(delta.tool_names),
                 file_roots=set(current.file_roots) | set(delta.file_roots),
+                hardware_devices=set(current.hardware_devices) | set(delta.hardware_devices),
             )
             self._write_atomic(merged)
             self._set_cache(merged, self._fingerprint())
@@ -150,6 +154,9 @@ class UserPermissionStore:
         lines.append("[files]")
         lines.append(f"roots = {_toml_string_list(sorted(grants.file_roots))}")
         lines.append("")
+        lines.append("[hardware]")
+        lines.append(f"devices = {_toml_string_list(sorted(grants.hardware_devices))}")
+        lines.append("")
         return "\n".join(lines)
 
 
@@ -170,4 +177,5 @@ def _copy_grants(grants: UserGrants) -> UserGrants:
         shell_executables=set(grants.shell_executables),
         tool_names=set(grants.tool_names),
         file_roots=set(grants.file_roots),
+        hardware_devices=set(grants.hardware_devices),
     )

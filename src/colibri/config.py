@@ -25,6 +25,7 @@ _ALLOWED_TOP_LEVEL = frozenset(
         "console",
         "memory",
         "web_search",
+        "hardware",
         "gateway",
         "channels",
     }
@@ -91,6 +92,15 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
             "endpoint",
             "max_results",
             "timeout_seconds",
+        }
+    ),
+    "hardware": frozenset(
+        {
+            "enabled",
+            "discovery",
+            "operation_timeout_seconds",
+            "max_transfer_bytes",
+            "devices",
         }
     ),
     "gateway": frozenset(
@@ -259,6 +269,36 @@ class WebSearchConfig:
 
 
 @dataclass(frozen=True)
+class HardwareDeviceConfig:
+    # 模型可见的稳定设备别名。
+    name: str
+    # 仅由配置提供的绝对 /dev 路径。
+    path: Path
+    # 当前仅支持 newline-delimited JSON 串口控制器。
+    transport: str = "serial_json"
+    # 串口波特率。
+    baud_rate: int = 115200
+    # 设备通过控制器提供的能力。
+    capabilities: list[str] = field(default_factory=lambda: ["serial"])
+    # 是否允许任何带副作用的硬件操作；权限授权不能绕过此开关。
+    allow_write: bool = False
+
+
+@dataclass(frozen=True)
+class HardwareConfig:
+    # 是否允许向模型暴露硬件工具。
+    enabled: bool = False
+    # 硬件发现策略；当前仅支持按需探测，不启动后台监听。
+    discovery: str = "on_demand"
+    # 单次设备操作超时，单位秒。
+    operation_timeout_seconds: float = 2.0
+    # 单次串口请求、响应或原始传输的最大字节数。
+    max_transfer_bytes: int = 4096
+    # 允许硬件工具访问的设备别名表。
+    devices: list[HardwareDeviceConfig] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     # gateway 启用的 channel 列表。
     enabled_channels: list[str] = field(default_factory=lambda: ["weixin"])
@@ -316,6 +356,8 @@ class AgentConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # Web 搜索工具配置。
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    # 硬件探测和后续硬件工具配置。
+    hardware: HardwareConfig = field(default_factory=HardwareConfig)
     # gateway 运行配置。
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     # 各 channel 配置集合。
@@ -338,7 +380,7 @@ class AgentConfig:
 
     def with_overrides(self, data: dict[str, Any]) -> "AgentConfig":
         _validate_config_fields(data)
-        return replace(
+        config = replace(
             self,
             model=_replace_dataclass(self.model, data.get("model", {})),
             vision=_replace_dataclass(self.vision, data.get("vision", {})),
@@ -350,9 +392,14 @@ class AgentConfig:
             console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(dict(data.get("memory", {})), "root")),
             web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
+            hardware=_replace_hardware(self.hardware, data.get("hardware", {})),
             gateway=_replace_dataclass(self.gateway, data.get("gateway", {})),
             channels=_replace_channels(self.channels, data.get("channels", {})),
         )
+        if config.hardware.discovery != "on_demand":
+            raise ConfigError("hardware.discovery must be on_demand")
+        _validate_hardware_config(config.hardware)
+        return config
 
 
 def _validate_config_fields(data: dict[str, Any]) -> None:
@@ -411,3 +458,87 @@ def _replace_channels(instance: ChannelsConfig, overrides: dict[str, Any]) -> Ch
     if not overrides:
         return instance
     return replace(instance, weixin=_replace_dataclass(instance.weixin, overrides.get("weixin", {})))
+
+
+def _replace_hardware(instance: HardwareConfig, overrides: dict[str, Any]) -> HardwareConfig:
+    if not overrides:
+        return instance
+    copied = dict(overrides)
+    raw_devices = copied.pop("devices", None)
+    devices = instance.devices
+    if raw_devices is not None:
+        if not isinstance(raw_devices, list):
+            raise ConfigError("hardware.devices must be an array of tables")
+        parsed: list[HardwareDeviceConfig] = []
+        allowed = {"name", "path", "transport", "baud_rate", "capabilities", "allow_write"}
+        for index, value in enumerate(raw_devices):
+            if not isinstance(value, dict):
+                raise ConfigError(f"hardware.devices[{index}] must be a table")
+            unknown = next((key for key in value if key not in allowed), None)
+            if unknown is not None:
+                raise ConfigError(f"unknown config field: hardware.devices.{unknown}")
+            try:
+                parsed.append(
+                    HardwareDeviceConfig(
+                        name=value["name"],
+                        path=Path(value["path"]),
+                        transport=value.get("transport", "serial_json"),
+                        baud_rate=value.get("baud_rate", 115200),
+                        capabilities=list(value.get("capabilities", ["serial"])),
+                        allow_write=value.get("allow_write", False),
+                    )
+                )
+            except (KeyError, TypeError):
+                raise ConfigError(f"hardware.devices[{index}] requires name and path") from None
+        devices = parsed
+    return replace(instance, devices=devices, **copied)
+
+
+def _validate_hardware_config(config: HardwareConfig) -> None:
+    if not isinstance(config.enabled, bool):
+        raise ConfigError("hardware.enabled must be a boolean")
+    if not isinstance(config.discovery, str):
+        raise ConfigError("hardware.discovery must be on_demand")
+    if not isinstance(config.operation_timeout_seconds, (int, float)) or isinstance(
+        config.operation_timeout_seconds, bool
+    ):
+        raise ConfigError("hardware.operation_timeout_seconds must be a number")
+    if not 0 < float(config.operation_timeout_seconds) <= 60:
+        raise ConfigError("hardware.operation_timeout_seconds must be > 0 and <= 60")
+    if not isinstance(config.max_transfer_bytes, int) or isinstance(config.max_transfer_bytes, bool):
+        raise ConfigError("hardware.max_transfer_bytes must be an integer")
+    if not 1 <= config.max_transfer_bytes <= 65536:
+        raise ConfigError("hardware.max_transfer_bytes must be between 1 and 65536")
+
+    names: set[str] = set()
+    allowed_capabilities = {"serial", "gpio", "i2c", "spi"}
+    allowed_baud_rates = {9600, 19200, 38400, 57600, 115200, 230400}
+    for device in config.devices:
+        if not _valid_hardware_name(device.name):
+            raise ConfigError(f"invalid hardware device name: {device.name}")
+        if device.name in names:
+            raise ConfigError(f"duplicate hardware device name: {device.name}")
+        names.add(device.name)
+        if not device.path.is_absolute() or device.path == Path("/dev") or not device.path.is_relative_to("/dev"):
+            raise ConfigError(f"hardware device path must be below /dev: {device.path}")
+        if ".." in device.path.parts:
+            raise ConfigError(f"hardware device path must be below /dev: {device.path}")
+        if device.transport != "serial_json":
+            raise ConfigError("hardware device transport must be serial_json")
+        if not isinstance(device.baud_rate, int) or device.baud_rate not in allowed_baud_rates:
+            raise ConfigError(f"unsupported hardware baud_rate: {device.baud_rate}")
+        if not isinstance(device.allow_write, bool):
+            raise ConfigError("hardware device allow_write must be a boolean")
+        if not device.capabilities or any(
+            not isinstance(capability, str) or capability not in allowed_capabilities
+            for capability in device.capabilities
+        ):
+            raise ConfigError(f"invalid hardware capabilities for device: {device.name}")
+        if len(device.capabilities) != len(set(device.capabilities)):
+            raise ConfigError(f"duplicate hardware capability for device: {device.name}")
+
+
+def _valid_hardware_name(value: object) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= 64 or not value[0].isalnum():
+        return False
+    return value.isascii() and all(ch.isalnum() or ch in "._-" for ch in value)

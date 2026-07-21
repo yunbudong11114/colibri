@@ -14,6 +14,7 @@ def test_user_permission_store_loads_missing_file_as_empty(tmp_path, monkeypatch
     assert grants.shell_executables == set()
     assert grants.tool_names == set()
     assert grants.file_roots == set()
+    assert grants.hardware_devices == set()
 
 
 def test_user_permission_store_saves_and_loads_deduplicated_toml(tmp_path, monkeypatch):
@@ -26,6 +27,7 @@ def test_user_permission_store_saves_and_loads_deduplicated_toml(tmp_path, monke
             shell_executables={"cargo", "git", "cargo"},
             tool_names={"files.list", "files.read", "files.list"},
             file_roots={"/tmp/workspace", "/tmp/workspace"},
+            hardware_devices={"controller", "controller"},
         )
     )
     grants = store.load()
@@ -34,6 +36,7 @@ def test_user_permission_store_saves_and_loads_deduplicated_toml(tmp_path, monke
     assert grants.shell_executables == {"cargo", "git"}
     assert grants.tool_names == {"files.list", "files.read"}
     assert grants.file_roots == {"/tmp/workspace"}
+    assert grants.hardware_devices == {"controller"}
     text = (tmp_path / ".colibri" / "permissions.toml").read_text(encoding="utf-8")
     assert "[shell]" in text
     assert 'commands = ["git status", "pwd"]' in text
@@ -42,6 +45,8 @@ def test_user_permission_store_saves_and_loads_deduplicated_toml(tmp_path, monke
     assert 'names = ["files.list", "files.read"]' in text
     assert "[files]" in text
     assert 'roots = ["/tmp/workspace"]' in text
+    assert "[hardware]" in text
+    assert 'devices = ["controller"]' in text
     assert "paths =" not in text
 
 
@@ -123,7 +128,9 @@ def test_user_permission_store_merge_preserves_concurrent_stale_grants(tmp_path,
 
     first.merge(UserGrants(shell_commands={"git status"}))
     second.merge(UserGrants(shell_executables={"cargo"}))
+    second.merge(UserGrants(hardware_devices={"controller"}))
 
     grants = UserPermissionStore.for_user().load()
     assert grants.shell_commands == {"git status"}
     assert grants.shell_executables == {"cargo"}
+    assert grants.hardware_devices == {"controller"}

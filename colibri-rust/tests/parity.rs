@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 #[derive(Clone, Debug)]
 struct ParityEntry {
@@ -70,6 +71,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "load_config_overrides_nested_values",
                 "load_without_path_reads_user_default_config",
                 "load_without_path_falls_back_when_user_default_missing",
+                "hardware_config_overrides_and_rejects_invalid_values",
             ],
             status: "covered",
         },
@@ -118,6 +120,22 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "gateway_get_existing_does_not_create_session",
                 "gateway_try_steer_enqueues_when_turn_active",
                 "gateway_try_steer_works_while_session_taken_for_submit",
+            ],
+            status: "covered",
+        },
+        ParityEntry {
+            python_file: "test_hardware.py",
+            rust_tests: &[
+                "hardware_probe_detects_standard_linux_nodes_like_python",
+                "hardware_probe_tool_requires_both_config_gates_like_python",
+                "hardware_probe_cli_prints_json",
+                "configured_hardware_devices_exposes_alias_not_path_like_python",
+                "hardware_simulator_round_trips_gpio_i2c_and_spi_like_python",
+                "serial_json_transport_round_trips_over_pty_like_python",
+                "hardware_simulator_cli_reads_and_writes_ndjson_like_python",
+                "hardware_tools_enforce_capability_write_and_transfer_limits_like_python",
+                "python_rust_hardware_tool_schemas_match",
+                "python_rust_hardware_simulator_output_matches",
             ],
             status: "covered",
         },
@@ -175,6 +193,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "permission_policy_keeps_inline_file_redirection_as_file_path",
                 "permission_policy_hard_deny_wins_over_shell_redirection_file_path",
                 "permission_policy_classifies_out_of_root_file_paths",
+                "hardware_device_session_and_user_permissions_match_python",
+                "hardware_allow_write_hard_deny_wins_over_user_grant_like_python",
             ],
             status: "partial",
         },
@@ -375,12 +395,16 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
         "test_config.py" => &[
             "test_default_config_uses_small_device_limits",
             "test_load_config_overrides_nested_values",
+            "test_hardware_device_config_loads_strict_allowlist",
+            "test_hardware_device_config_rejects_unsafe_values",
             "test_load_without_path_reads_user_default_config",
             "test_load_without_path_falls_back_when_user_default_missing",
             "test_explicit_config_path_overrides_user_default",
             "test_legacy_model_input_char_limit_is_rejected",
             "test_legacy_model_input_byte_limit_is_rejected",
             "test_load_config_overrides_memory_values",
+            "test_load_config_overrides_hardware_values",
+            "test_hardware_rejects_unknown_field_and_discovery_mode",
             "test_unknown_top_level_section_is_rejected",
             "test_deprecated_max_recall_topics_is_rejected",
             "test_unknown_nested_field_is_rejected",
@@ -422,6 +446,18 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_worker_skips_send_on_empty_reply",
             "test_handle_message_steers_when_turn_active",
         ],
+        "test_hardware.py" => &[
+            "test_probe_hardware_detects_standard_linux_nodes",
+            "test_probe_hardware_returns_compact_empty_inventory",
+            "test_hardware_probe_tool_requires_both_config_gates",
+            "test_hardware_probe_cli_prints_json",
+            "test_configured_hardware_devices_exposes_alias_not_path",
+            "test_hardware_simulator_round_trips_gpio_i2c_and_spi",
+            "test_serial_json_transport_round_trips_over_pty",
+            "test_hardware_tools_use_alias_and_controller_protocol",
+            "test_hardware_tools_enforce_capability_write_and_transfer_limits",
+            "test_hardware_simulator_cli_reads_and_writes_ndjson",
+        ],
         "test_inbound_router.py" => &[
             "test_inbound_router_bounds_global_pending_and_orders_per_session",
             "test_inbound_router_same_session_not_concurrent",
@@ -430,6 +466,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
         "test_channel_permission.py" => &[
             "test_channel_text_permission_prompter_is_transport_agnostic",
             "test_format_channel_permission_prompt_includes_choices",
+            "test_format_channel_permission_prompt_uses_device_scopes",
         ],
         "test_memory.py" => &[
             "test_context_loads_memory_and_user_files",
@@ -476,6 +513,8 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
         ],
         "test_permissions.py" => &[
             "test_read_only_tool_is_allowed_under_default_policy",
+            "test_hardware_device_session_and_user_grants_are_device_scoped",
+            "test_hardware_allow_write_hard_deny_wins_over_persisted_grant",
             "test_confirm_policy_calls_prompter",
             "test_numeric_session_choice_allows_tool_for_current_session",
             "test_concurrent_user_grants_merge_after_prompt_interleaving",
@@ -654,6 +693,7 @@ fn python_test_coverage_map_covers_all_unit_files() {
         "test_diagnostics.py",
         "test_gateway_process.py",
         "test_gateway_steering.py",
+        "test_hardware.py",
         "test_inbound_router.py",
         "test_channel_permission.py",
         "test_memory.py",
@@ -738,6 +778,83 @@ fn python_rust_gateway_usage_output_matches() {
     assert_same_output("gateway usage", &python, &rust);
 }
 
+#[test]
+fn python_rust_hardware_simulator_output_matches() {
+    let fixture = CliFixture::new("hardware-simulator", false);
+    let input = concat!(
+        "{\"id\":\"1\",\"cmd\":\"gpio_write\",\"args\":{\"pin\":2,\"value\":1}}\n",
+        "{\"id\":\"2\",\"cmd\":\"gpio_read\",\"args\":{\"pin\":2}}\n",
+    );
+
+    let mut python_command = Command::new(uv_bin());
+    python_command
+        .arg("run")
+        .arg("python")
+        .arg("-m")
+        .arg("colibri.cli")
+        .arg("--config")
+        .arg(&fixture.config_path)
+        .args(["hardware", "simulate"])
+        .current_dir(repo_root())
+        .env("HOME", &fixture.home);
+    let mut rust_command = Command::new(env!("CARGO_BIN_EXE_colibri"));
+    rust_command
+        .arg("--config")
+        .arg(&fixture.config_path)
+        .args(["hardware", "simulate"])
+        .current_dir(repo_root())
+        .env("HOME", &fixture.home);
+
+    let python = run_command_with_input(python_command, input);
+    let rust = run_command_with_input(rust_command, input);
+
+    assert_same_output("hardware simulator", &python, &rust);
+}
+
+#[test]
+fn python_rust_hardware_tool_schemas_match() {
+    let script = concat!(
+        "import json\n",
+        "from dataclasses import replace\n",
+        "from colibri.config import AgentConfig\n",
+        "from colibri.tools.registry import ToolRegistry\n",
+        "c=AgentConfig.default()\n",
+        "c=replace(c,tools=replace(c.tools,enabled=[*c.tools.enabled,'hardware']),",
+        "hardware=replace(c.hardware,enabled=True))\n",
+        "print(json.dumps([s for s in ToolRegistry.from_config(c).specs() ",
+        "if s['function']['name'].split('.')[0] in {'hardware','serial','gpio','i2c','spi'}]))\n",
+    );
+    let python = Command::new(uv_bin())
+        .args(["run", "python", "-c", script])
+        .current_dir(repo_root())
+        .output()
+        .expect("run Python hardware schema export");
+    assert!(
+        python.status.success(),
+        "{}",
+        String::from_utf8_lossy(&python.stderr)
+    );
+    let python_specs: serde_json::Value =
+        serde_json::from_slice(&python.stdout).expect("parse Python hardware specs");
+
+    let mut config = colibri_rust::config::AgentConfig::default();
+    config.hardware.enabled = true;
+    config.tools.enabled.push("hardware".to_string());
+    let rust_specs = colibri_rust::tools::tool_specs_for_config(&config)
+        .into_iter()
+        .filter(|spec| {
+            spec["function"]["name"]
+                .as_str()
+                .and_then(|name| name.split('.').next())
+                .is_some_and(|prefix| {
+                    matches!(prefix, "hardware" | "serial" | "gpio" | "i2c" | "spi")
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(python_specs, serde_json::Value::Array(rust_specs));
+}
+
 struct CliFixture {
     home: PathBuf,
     config_path: PathBuf,
@@ -792,6 +909,22 @@ fn run_rust_cli(fixture: &CliFixture, args: &[&str]) -> Output {
         .current_dir(repo_root())
         .env("HOME", &fixture.home);
     command.output().expect("run Rust CLI")
+}
+
+fn run_command_with_input(mut command: Command, input: &str) -> Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn parity command");
+    child
+        .stdin
+        .take()
+        .expect("parity stdin")
+        .write_all(input.as_bytes())
+        .expect("write parity stdin");
+    child.wait_with_output().expect("wait for parity command")
 }
 
 fn assert_same_output(label: &str, python: &Output, rust: &Output) {

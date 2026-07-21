@@ -12,7 +12,7 @@ Colibri is designed to run as a small, headless agent on a Linux card server. It
 - Standard-library runtime: third-party packages are only needed for development tests.
 - OpenAI-compatible model adapter plus a deterministic fake model for tests.
 - Bounded tool loop with dynamic permissions.
-- Built-in tools for files, shell, memory, web search, and local skills.
+- Built-in tools for files, shell, memory, web search, local skills, and opt-in read-only hardware discovery.
 - Markdown-backed persistent memory with bounded recall injection.
 - Local skills with progressive disclosure.
 - Context compacting with model summaries and deterministic fallback.
@@ -25,7 +25,7 @@ Colibri is designed to run as a small, headless agent on a Linux card server. It
 ```mermaid
 flowchart TD
     User["User / Channel"] --> CLI["colibri.cli"]
-    CLI --> Commands["ask / repl / diagnostics / auth / gateway"]
+    CLI --> Commands["ask / repl / diagnostics / hardware / auth / gateway"]
     Commands --> Session["AgentSession"]
     Commands --> GatewayProc["GatewayProcessManager"]
     GatewayProc --> GatewayRun["gateway run"]
@@ -145,10 +145,37 @@ timeout_seconds = 10
 uv run python -m colibri.cli ask "hello"
 uv run python -m colibri.cli repl
 uv run python -m colibri.cli diagnostics
+uv run python -m colibri.cli hardware probe
+uv run python -m colibri.cli hardware simulate
 uv run python -m colibri.cli auth weixin
 ```
 
-`ask` runs one request and exits. `repl` keeps a multi-turn local session. `diagnostics` prints environment, paths, RSS, and context limits. `auth weixin` starts iLink QR login and writes the Weixin token to the active config file.
+`ask` runs one request and exits. `repl` keeps a multi-turn local session. `diagnostics` prints environment, paths, RSS, and context limits. `hardware probe` lists standard host device nodes without opening them or starting a watcher. `hardware simulate` runs the GPIO/I2C/SPI NDJSON protocol simulator on stdin/stdout for development without a device. `auth weixin` starts iLink QR login and writes the Weixin token to the active config file.
+
+To expose hardware tools to the model, enable both gates and configure an explicit device allowlist:
+
+```toml
+[tools]
+enabled = ["shell", "files", "web", "image", "memory", "skills", "hardware"]
+
+[hardware]
+enabled = true
+discovery = "on_demand"
+operation_timeout_seconds = 2.0
+max_transfer_bytes = 4096
+
+[[hardware.devices]]
+name = "controller"
+path = "/dev/ttyACM0"
+transport = "serial_json"
+baud_rate = 115200
+capabilities = ["serial", "gpio", "i2c", "spi"]
+allow_write = false
+```
+
+The model can use only the configured `name` alias, never an arbitrary device path. Tools include `hardware.probe`, `hardware.devices`, `serial.read/write`, `gpio.read/write`, `i2c.scan/read/write`, and `spi.transfer`. GPIO, I2C, and SPI currently use a bounded newline-delimited JSON serial controller protocol; native Linux bus backends remain deferred until the real device interfaces are confirmed.
+
+Side effects require both `allow_write = true` and normal permission approval. Hardware prompts offer `once`, `session-device`, `user-device`, and `deny`; persistent grants are stored in `[hardware].devices` inside `permissions.toml`. Grants cannot override the configured device, capability, timeout, or transfer-size boundaries. Devices are opened per operation and immediately closed, with no resident discovery loop or device handle.
 
 During a long `repl` turn on a TTY, you can type a new line while tools are still running to **steer** the session (skip remaining tools and inject your text). No full-screen TUI — just type and press Enter. Steering is disabled while a permission prompt is active.
 

@@ -19,6 +19,7 @@ pub struct UserGrants {
     pub shell_executables: Vec<String>,
     pub tool_names: Vec<String>,
     pub file_roots: Vec<String>,
+    pub hardware_devices: Vec<String>,
 }
 
 pub struct UserPermissionStore {
@@ -80,6 +81,7 @@ impl UserPermissionStore {
             shell_executables: string_list_at(&value, &["shell", "executables"]),
             tool_names: string_list_at(&value, &["tools", "names"]),
             file_roots: string_list_at(&value, &["files", "roots"]),
+            hardware_devices: string_list_at(&value, &["hardware", "devices"]),
         }
     }
 
@@ -101,6 +103,7 @@ impl UserPermissionStore {
             shell_executables: union_strings(&current.shell_executables, &delta.shell_executables),
             tool_names: union_strings(&current.tool_names, &delta.tool_names),
             file_roots: union_strings(&current.file_roots, &delta.file_roots),
+            hardware_devices: union_strings(&current.hardware_devices, &delta.hardware_devices),
         };
         self.write_atomic(&merged)?;
         self.set_cache(&merged, self.fingerprint());
@@ -222,6 +225,7 @@ pub struct PermissionRequest {
     pub shell_executable: Option<String>,
     pub file_path: Option<String>,
     pub file_root: Option<String>,
+    pub hardware_device: Option<String>,
 }
 
 pub trait PermissionPrompter {
@@ -237,6 +241,7 @@ pub struct PermissionDecision {
     pub subject_kind: String,
     pub file_path: Option<String>,
     pub file_root: Option<String>,
+    pub hardware_device: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +252,7 @@ struct PermissionSubject {
     shell_executable: Option<String>,
     file_path: Option<String>,
     file_root: Option<String>,
+    hardware_device: Option<String>,
     read_only: bool,
 }
 
@@ -257,6 +263,7 @@ pub struct PermissionPolicy {
     session_shell_commands: Vec<String>,
     session_shell_executables: Vec<String>,
     session_file_roots: Vec<String>,
+    session_hardware_devices: Vec<String>,
 }
 
 impl PermissionPolicy {
@@ -269,6 +276,7 @@ impl PermissionPolicy {
             session_shell_commands: Vec::new(),
             session_shell_executables: Vec::new(),
             session_file_roots: Vec::new(),
+            session_hardware_devices: Vec::new(),
         }
     }
 
@@ -288,6 +296,24 @@ impl PermissionPolicy {
                 .shell_executable
                 .as_ref()
                 .is_some_and(|executable| context.config.shell.deny.contains(executable))
+        } else if subject.kind == "hardware_device" {
+            let device = subject.hardware_device.as_ref().and_then(|name| {
+                context
+                    .config
+                    .hardware
+                    .devices
+                    .iter()
+                    .find(|candidate| &candidate.name == name)
+            });
+            device.is_none_or(|device| !device.allow_write)
+                || hardware_write_capability(&subject.tool_name).is_some_and(|capability| {
+                    device.is_none_or(|device| {
+                        !device
+                            .capabilities
+                            .iter()
+                            .any(|candidate| candidate == capability)
+                    })
+                })
         } else {
             false
         };
@@ -312,6 +338,7 @@ impl PermissionPolicy {
             shell_executable: subject.shell_executable.clone(),
             file_path: subject.file_path.clone(),
             file_root: subject.file_root.clone(),
+            hardware_device: subject.hardware_device.clone(),
         };
         let choice = prompter
             .map(|prompter| prompter.confirm(request))
@@ -356,6 +383,18 @@ impl PermissionPolicy {
             }
             return None;
         }
+        if subject.kind == "hardware_device" {
+            if contains_opt(
+                &self.session_hardware_devices,
+                subject.hardware_device.as_ref(),
+            ) {
+                return Some(decision(true, "allow", "session_device", subject, ""));
+            }
+            if contains_opt(&grants.hardware_devices, subject.hardware_device.as_ref()) {
+                return Some(decision(true, "allow", "user_device", subject, ""));
+            }
+            return None;
+        }
         if self.session_tool_grants.contains(&subject.tool_name) {
             return Some(decision(true, "allow", "session", subject, ""));
         }
@@ -391,13 +430,18 @@ impl PermissionPolicy {
                 );
             } else if subject.kind == "file_path" {
                 push_unique_opt(&mut self.session_file_roots, subject.file_root.clone());
+            } else if subject.kind == "hardware_device" {
+                push_unique_opt(
+                    &mut self.session_hardware_devices,
+                    subject.hardware_device.clone(),
+                );
             } else {
                 push_unique(&mut self.session_tool_grants, subject.tool_name.clone());
             }
-            let scope = if subject.kind == "file_path" {
-                "session_file_root"
-            } else {
-                "session"
+            let scope = match subject.kind.as_str() {
+                "file_path" => "session_file_root",
+                "hardware_device" => "session_device",
+                _ => "session",
             };
             return decision(true, "allow", scope, subject, "");
         }
@@ -423,16 +467,18 @@ impl PermissionPolicy {
                 push_unique_opt(&mut delta.shell_commands, subject.shell_command.clone());
             } else if subject.kind == "file_path" {
                 push_unique_opt(&mut delta.file_roots, subject.file_root.clone());
+            } else if subject.kind == "hardware_device" {
+                push_unique_opt(&mut delta.hardware_devices, subject.hardware_device.clone());
             } else {
                 push_unique(&mut delta.tool_names, subject.tool_name.clone());
             }
             if self.user_store.merge(&delta).is_err() {
                 return decision(false, "deny", "none", subject, "persist_error");
             }
-            let scope = if subject.kind == "file_path" {
-                "user_file_root"
-            } else {
-                "user"
+            let scope = match subject.kind.as_str() {
+                "file_path" => "user_file_root",
+                "hardware_device" => "user_device",
+                _ => "user",
             };
             return decision(true, "allow", scope, subject, "");
         }
@@ -464,6 +510,7 @@ pub fn permission_subject_for(
         shell_executable: subject.shell_executable,
         file_path: subject.file_path,
         file_root: subject.file_root,
+        hardware_device: subject.hardware_device,
     }
 }
 
@@ -472,6 +519,20 @@ fn permission_subject_for_internal(
     arguments: &BTreeMap<String, String>,
     context: &ToolContext,
 ) -> PermissionSubject {
+    if hardware_write_capability(&tool.name).is_some() {
+        if let Some(device) = arguments.get("device").filter(|value| !value.is_empty()) {
+            return PermissionSubject {
+                kind: "hardware_device".to_string(),
+                tool_name: tool.name.clone(),
+                shell_command: None,
+                shell_executable: None,
+                file_path: None,
+                file_root: None,
+                hardware_device: Some(device.clone()),
+                read_only: false,
+            };
+        }
+    }
     if tool.name == "shell.run" {
         let command = arguments
             .get("command")
@@ -488,6 +549,7 @@ fn permission_subject_for_internal(
                 shell_executable: executable,
                 file_path: Some(write_path.display().to_string()),
                 file_root: Some(root.display().to_string()),
+                hardware_device: None,
                 read_only: false,
             };
         }
@@ -498,6 +560,7 @@ fn permission_subject_for_internal(
             shell_executable: executable,
             file_path: None,
             file_root: None,
+            hardware_device: None,
             read_only: false,
         };
     }
@@ -517,6 +580,7 @@ fn permission_subject_for_internal(
                     shell_executable: None,
                     file_path: Some(resolved.display().to_string()),
                     file_root: Some(root.display().to_string()),
+                    hardware_device: None,
                     read_only: tool.read_only,
                 };
             }
@@ -529,6 +593,7 @@ fn permission_subject_for_internal(
         shell_executable: None,
         file_path: None,
         file_root: None,
+        hardware_device: None,
         read_only: tool.read_only,
     }
 }
@@ -559,6 +624,7 @@ fn decision(
         subject_kind: subject.kind.clone(),
         file_path: subject.file_path.clone(),
         file_root: subject.file_root.clone(),
+        hardware_device: subject.hardware_device.clone(),
     }
 }
 
@@ -652,12 +718,14 @@ fn format_grants(grants: &UserGrants) -> String {
     let mut shell_executables = grants.shell_executables.clone();
     let mut tool_names = grants.tool_names.clone();
     let mut file_roots = grants.file_roots.clone();
+    let mut hardware_devices = grants.hardware_devices.clone();
     format!(
-        "[shell]\ncommands = [{}]\nexecutables = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n",
+        "[shell]\ncommands = [{}]\nexecutables = [{}]\n\n[tools]\nnames = [{}]\n\n[files]\nroots = [{}]\n\n[hardware]\ndevices = [{}]\n",
         toml_array(&mut shell_commands),
         toml_array(&mut shell_executables),
         toml_array(&mut tool_names),
-        toml_array(&mut file_roots)
+        toml_array(&mut file_roots),
+        toml_array(&mut hardware_devices)
     )
 }
 
@@ -667,6 +735,17 @@ fn normalize_grants(grants: &UserGrants) -> UserGrants {
         shell_executables: sorted_dedup(grants.shell_executables.clone()),
         tool_names: sorted_dedup(grants.tool_names.clone()),
         file_roots: sorted_dedup(grants.file_roots.clone()),
+        hardware_devices: sorted_dedup(grants.hardware_devices.clone()),
+    }
+}
+
+fn hardware_write_capability(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "serial.write" => Some("serial"),
+        "gpio.write" => Some("gpio"),
+        "i2c.write" => Some("i2c"),
+        "spi.transfer" => Some("spi"),
+        _ => None,
     }
 }
 

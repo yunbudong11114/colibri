@@ -378,7 +378,8 @@ impl AgentSession {
                 "reason":decision.reason,
                 "shell_command":execution_arguments.get("command"),
                 "file_path":decision.file_path,
-                "file_root":decision.file_root
+                "file_root":decision.file_root,
+                "hardware_device":decision.hardware_device
             }),
         );
         let result = if decision.allowed {

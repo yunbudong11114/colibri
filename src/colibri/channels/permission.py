@@ -61,6 +61,8 @@ def format_channel_permission_prompt(request: PermissionRequest) -> str:
         )
     elif request.subject.kind == "file_path":
         lines.extend(["1. once", "2. session-dir", "4. user-dir", "0. deny"])
+    elif request.subject.kind == "hardware_device":
+        lines.extend(["1. once", "2. session-device", "4. user-device", "0. deny"])
     else:
         lines.extend(["1. once", "2. session", "4. user", "0. deny"])
     return "\n".join(lines)

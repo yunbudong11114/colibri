@@ -16,6 +16,7 @@ from colibri.diagnostics import build_diagnostics
 from colibri.gateway import GatewayRunner
 from colibri.gateway_logging import gateway_log
 from colibri.gateway_process import GatewayProcessManager, format_gateway_status
+from colibri.hardware import HardwareSimulator, probe_hardware
 from colibri.model.errors import ModelError
 from colibri.model.factory import build_model_client
 from colibri.repl_input import _is_selectable, read_repl_line, try_read_line
@@ -35,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("repl")
     subparsers.add_parser("diagnostics")
+    hardware = subparsers.add_parser("hardware")
+    hardware_subparsers = hardware.add_subparsers(dest="hardware_action", required=True)
+    hardware_subparsers.add_parser("probe")
+    hardware_subparsers.add_parser("simulate")
     gateway = subparsers.add_parser("gateway")
     gateway_subparsers = gateway.add_subparsers(dest="gateway_action")
     for action in ("run", "start", "stop", "restart", "status"):
@@ -81,6 +86,38 @@ def main(
         if args.command == "diagnostics":
             for line in build_diagnostics(config, args.config):
                 print(line)
+            return 0
+
+        if args.command == "hardware" and args.hardware_action == "probe":
+            print(json.dumps(probe_hardware(), ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "hardware" and args.hardware_action == "simulate":
+            simulator = HardwareSimulator()
+            for line in sys.stdin:
+                if not line.strip():
+                    continue
+                if len(line.encode("utf-8")) > config.hardware.max_transfer_bytes:
+                    response = json.dumps(
+                        {"id": None, "ok": False, "error": "request exceeds max_transfer_bytes"},
+                        separators=(",", ":"),
+                    )
+                else:
+                    response = simulator.handle_line(line)
+                    if len(response.encode("utf-8")) > config.hardware.max_transfer_bytes:
+                        try:
+                            request_id = json.loads(line).get("id")
+                        except (AttributeError, json.JSONDecodeError):
+                            request_id = None
+                        response = json.dumps(
+                            {
+                                "id": request_id,
+                                "ok": False,
+                                "error": "response exceeds max_transfer_bytes",
+                            },
+                            separators=(",", ":"),
+                        )
+                print(response, flush=True)
             return 0
 
         if args.command == "auth" and args.auth_provider == "weixin":

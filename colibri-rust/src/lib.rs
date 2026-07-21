@@ -5,6 +5,7 @@ pub mod config;
 pub mod console;
 pub mod context;
 pub mod gateway;
+pub mod hardware;
 pub mod http;
 pub mod memory;
 pub mod messages;

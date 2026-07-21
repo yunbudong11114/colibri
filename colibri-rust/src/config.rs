@@ -91,6 +91,25 @@ pub struct WebSearchConfig {
     pub timeout_seconds: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HardwareDeviceConfig {
+    pub name: String,
+    pub path: PathBuf,
+    pub transport: String,
+    pub baud_rate: u32,
+    pub capabilities: Vec<String>,
+    pub allow_write: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct HardwareConfig {
+    pub enabled: bool,
+    pub discovery: String,
+    pub operation_timeout_seconds: f64,
+    pub max_transfer_bytes: usize,
+    pub devices: Vec<HardwareDeviceConfig>,
+}
+
 #[derive(Clone, Debug)]
 pub struct GatewayConfig {
     pub enabled_channels: Vec<String>,
@@ -122,6 +141,7 @@ pub struct AgentConfig {
     pub console: ConsoleConfig,
     pub memory: MemoryConfig,
     pub web_search: WebSearchConfig,
+    pub hardware: HardwareConfig,
     pub gateway: GatewayConfig,
     pub channels_weixin: WeixinChannelConfig,
 }
@@ -214,6 +234,13 @@ impl Default for AgentConfig {
                 endpoint: "https://qianfan.baidubce.com/v2/ai_search/web_search".to_string(),
                 max_results: 10,
                 timeout_seconds: 10,
+            },
+            hardware: HardwareConfig {
+                enabled: false,
+                discovery: "on_demand".to_string(),
+                operation_timeout_seconds: 2.0,
+                max_transfer_bytes: 4096,
+                devices: Vec::new(),
             },
             gateway: GatewayConfig {
                 enabled_channels: vec!["weixin".to_string()],
@@ -475,6 +502,124 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
             config.web_search.timeout_seconds = value;
         }
     }
+    if let Some(table) = value.get("hardware") {
+        let Some(hardware_table) = table.as_table() else {
+            return Err("unknown config field: hardware".to_string());
+        };
+        if let Some(value) = hardware_table.get("enabled") {
+            config.hardware.enabled = value
+                .as_bool()
+                .ok_or_else(|| "hardware.enabled must be a boolean".to_string())?;
+        }
+        if let Some(value) = hardware_table.get("discovery") {
+            config.hardware.discovery = value
+                .as_str()
+                .ok_or_else(|| "hardware.discovery must be on_demand".to_string())?
+                .to_string();
+        }
+        if let Some(value) = hardware_table.get("operation_timeout_seconds") {
+            config.hardware.operation_timeout_seconds = value
+                .as_float()
+                .or_else(|| value.as_integer().map(|item| item as f64))
+                .ok_or_else(|| "hardware.operation_timeout_seconds must be a number".to_string())?;
+        }
+        if let Some(value) = hardware_table.get("max_transfer_bytes") {
+            config.hardware.max_transfer_bytes = value
+                .as_integer()
+                .and_then(|item| usize::try_from(item).ok())
+                .ok_or_else(|| "hardware.max_transfer_bytes must be an integer".to_string())?;
+        }
+        if let Some(raw_devices) = hardware_table.get("devices") {
+            let Some(entries) = raw_devices.as_array() else {
+                return Err("hardware.devices must be an array of tables".to_string());
+            };
+            let mut devices = Vec::new();
+            for (index, entry) in entries.iter().enumerate() {
+                let Some(device) = entry.as_table() else {
+                    return Err(format!("hardware.devices[{}] must be a table", index));
+                };
+                for key in device.keys() {
+                    if ![
+                        "name",
+                        "path",
+                        "transport",
+                        "baud_rate",
+                        "capabilities",
+                        "allow_write",
+                    ]
+                    .contains(&key.as_str())
+                    {
+                        return Err(format!("unknown config field: hardware.devices.{}", key));
+                    }
+                }
+                let Some(name) = device.get("name").and_then(toml::Value::as_str) else {
+                    return Err(format!(
+                        "hardware.devices[{}] requires name and path",
+                        index
+                    ));
+                };
+                let Some(path) = device.get("path").and_then(toml::Value::as_str) else {
+                    return Err(format!(
+                        "hardware.devices[{}] requires name and path",
+                        index
+                    ));
+                };
+                let transport = device
+                    .get("transport")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("serial_json")
+                    .to_string();
+                let baud_rate = match device.get("baud_rate") {
+                    Some(value) => value
+                        .as_integer()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| format!("unsupported hardware baud_rate: {}", value))?,
+                    None => 115200,
+                };
+                let capabilities = match device.get("capabilities") {
+                    Some(value) => {
+                        let Some(values) = value.as_array() else {
+                            return Err(format!(
+                                "invalid hardware capabilities for device: {}",
+                                name
+                            ));
+                        };
+                        let mut parsed = Vec::new();
+                        for value in values {
+                            let Some(value) = value.as_str() else {
+                                return Err(format!(
+                                    "invalid hardware capabilities for device: {}",
+                                    name
+                                ));
+                            };
+                            parsed.push(value.to_string());
+                        }
+                        parsed
+                    }
+                    None => vec!["serial".to_string()],
+                };
+                let allow_write = match device.get("allow_write") {
+                    Some(value) => value.as_bool().ok_or_else(|| {
+                        "hardware device allow_write must be a boolean".to_string()
+                    })?,
+                    None => false,
+                };
+                devices.push(HardwareDeviceConfig {
+                    name: name.to_string(),
+                    path: PathBuf::from(path),
+                    transport,
+                    baud_rate,
+                    capabilities,
+                    allow_write,
+                });
+            }
+            config.hardware.devices = devices;
+        }
+        if config.hardware.discovery != "on_demand" {
+            return Err("hardware.discovery must be on_demand".to_string());
+        }
+        validate_hardware_config(&config.hardware)?;
+    }
     if let Some(table) = value.get("gateway") {
         if let Some(value) = get_string_list(table, "enabled_channels") {
             config.gateway.enabled_channels = value;
@@ -620,6 +765,18 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
     )?;
     validate_table(
         value,
+        "hardware",
+        &[
+            "enabled",
+            "discovery",
+            "operation_timeout_seconds",
+            "max_transfer_bytes",
+            "devices",
+        ],
+        &[],
+    )?;
+    validate_table(
+        value,
         "gateway",
         &[
             "enabled_channels",
@@ -724,4 +881,82 @@ fn get_f64(table: &toml::Value, key: &str) -> Option<f64> {
     value
         .as_float()
         .or_else(|| value.as_integer().map(|item| item as f64))
+}
+
+fn validate_hardware_config(config: &HardwareConfig) -> Result<(), String> {
+    if !(config.operation_timeout_seconds > 0.0 && config.operation_timeout_seconds <= 60.0) {
+        return Err("hardware.operation_timeout_seconds must be > 0 and <= 60".to_string());
+    }
+    if !(1..=65536).contains(&config.max_transfer_bytes) {
+        return Err("hardware.max_transfer_bytes must be between 1 and 65536".to_string());
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let allowed_capabilities = ["serial", "gpio", "i2c", "spi"];
+    let allowed_baud_rates = [9600, 19200, 38400, 57600, 115200, 230400];
+    for device in &config.devices {
+        if !valid_hardware_name(&device.name) {
+            return Err(format!("invalid hardware device name: {}", device.name));
+        }
+        if !names.insert(device.name.clone()) {
+            return Err(format!("duplicate hardware device name: {}", device.name));
+        }
+        if !hardware_path_is_allowed(&device.path) {
+            return Err(format!(
+                "hardware device path must be below /dev: {}",
+                device.path.display()
+            ));
+        }
+        if device.transport != "serial_json" {
+            return Err("hardware device transport must be serial_json".to_string());
+        }
+        if !allowed_baud_rates.contains(&device.baud_rate) {
+            return Err(format!(
+                "unsupported hardware baud_rate: {}",
+                device.baud_rate
+            ));
+        }
+        if device.capabilities.is_empty()
+            || device
+                .capabilities
+                .iter()
+                .any(|capability| !allowed_capabilities.contains(&capability.as_str()))
+        {
+            return Err(format!(
+                "invalid hardware capabilities for device: {}",
+                device.name
+            ));
+        }
+        let unique = device
+            .capabilities
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if unique.len() != device.capabilities.len() {
+            return Err(format!(
+                "duplicate hardware capability for device: {}",
+                device.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_hardware_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    value.len() <= 64
+        && first.is_ascii_alphanumeric()
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn hardware_path_is_allowed(path: &Path) -> bool {
+    use std::path::Component;
+
+    path.is_absolute()
+        && path != Path::new("/dev")
+        && path.starts_with("/dev")
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
 }

@@ -23,12 +23,13 @@ PermissionDecision = Literal["allow", "deny", "confirm", "always"]
 
 @dataclass(frozen=True)
 class PermissionSubject:
-    kind: Literal["tool", "shell", "file_path"]
+    kind: Literal["tool", "shell", "file_path", "hardware_device"]
     tool_name: str
     shell_command: str | None = None
     shell_executable: str | None = None
     file_path: str | None = None
     file_root: str | None = None
+    hardware_device: str | None = None
     read_only: bool = False
 
 
@@ -41,6 +42,7 @@ class PermissionDecisionResult:
     subject_kind: str = "tool"
     file_path: str | None = None
     file_root: str | None = None
+    hardware_device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,8 @@ class ConsolePermissionPrompter:
             ).strip().lower()
         if request.subject.kind == "file_path":
             return input("[1] once [2] session-dir [4] user-dir [0] deny: ").strip().lower()
+        if request.subject.kind == "hardware_device":
+            return input("[1] once [2] session-device [4] user-device [0] deny: ").strip().lower()
         return input("[1] once [2] session [4] user [0] deny: ").strip().lower()
 
 
@@ -78,6 +82,7 @@ class PermissionPolicy:
     session_shell_commands: set[str] = field(default_factory=set)
     session_shell_executables: set[str] = field(default_factory=set)
     session_file_roots: set[str] = field(default_factory=set)
+    session_hardware_devices: set[str] = field(default_factory=set)
 
     @classmethod
     def from_config(
@@ -100,6 +105,22 @@ class PermissionPolicy:
                 hard_denied = denied_shell_executable(subject.shell_command, set(context.config.shell.deny)) is not None
             else:
                 hard_denied = subject.shell_executable in context.config.shell.deny
+        elif subject.kind == "hardware_device":
+            device = next(
+                (
+                    candidate
+                    for candidate in context.config.hardware.devices
+                    if candidate.name == subject.hardware_device
+                ),
+                None,
+            )
+            capability = _hardware_write_capability(subject.tool_name)
+            hard_denied = (
+                device is None
+                or not device.allow_write
+                or capability is None
+                or capability not in device.capabilities
+            )
         if hard_denied:
             return _decision(False, "deny", "none", subject, "hard_deny")
 
@@ -150,6 +171,12 @@ class PermissionPolicy:
             if _path_under_any_root(subject.file_path, user_grants.file_roots):
                 return _decision(True, "allow", "user_file_root", subject)
             return None
+        if subject.kind == "hardware_device":
+            if subject.hardware_device in self.session_hardware_devices:
+                return _decision(True, "allow", "session_device", subject)
+            if subject.hardware_device in user_grants.hardware_devices:
+                return _decision(True, "allow", "user_device", subject)
+            return None
         if subject.tool_name in self.session_tool_grants:
             return _decision(True, "allow", "session", subject)
         if subject.tool_name in user_grants.tool_names:
@@ -182,9 +209,16 @@ class PermissionPolicy:
             elif subject.kind == "file_path" and subject.file_path is not None:
                 if subject.file_root is not None:
                     self.session_file_roots.add(subject.file_root)
+            elif subject.kind == "hardware_device" and subject.hardware_device is not None:
+                self.session_hardware_devices.add(subject.hardware_device)
             else:
                 self.session_tool_grants.add(subject.tool_name)
-            scope = "session_file_root" if subject.kind == "file_path" else "session"
+            if subject.kind == "file_path":
+                scope = "session_file_root"
+            elif subject.kind == "hardware_device":
+                scope = "session_device"
+            else:
+                scope = "session"
             return _decision(True, "allow", scope, subject)
         if choice == "3" and subject.kind == "shell" and subject.shell_executable is not None:
             self.session_shell_executables.update(_subject_shell_executables(subject))
@@ -197,10 +231,17 @@ class PermissionPolicy:
                 delta = UserGrants(shell_commands={subject.shell_command})
             elif subject.kind == "file_path" and subject.file_path is not None:
                 delta = UserGrants(file_roots={subject.file_root} if subject.file_root else set())
+            elif subject.kind == "hardware_device" and subject.hardware_device is not None:
+                delta = UserGrants(hardware_devices={subject.hardware_device})
             else:
                 delta = UserGrants(tool_names={subject.tool_name})
             self.user_store.merge(delta)
-            scope = "user_file_root" if subject.kind == "file_path" else "user"
+            if subject.kind == "file_path":
+                scope = "user_file_root"
+            elif subject.kind == "hardware_device":
+                scope = "user_device"
+            else:
+                scope = "user"
             return _decision(True, "allow", scope, subject)
         return _decision(False, "deny", "once", subject, "user_denied")
 
@@ -215,6 +256,15 @@ def permission_subject_for(
     arguments: dict[str, Any],
     context: ToolContext | None = None,
 ) -> PermissionSubject:
+    if tool.spec.name in {"serial.write", "gpio.write", "i2c.write", "spi.transfer"}:
+        device = arguments.get("device")
+        if isinstance(device, str) and device:
+            return PermissionSubject(
+                kind="hardware_device",
+                tool_name=tool.spec.name,
+                hardware_device=device,
+                read_only=False,
+            )
     if tool.spec.name == "shell.run":
         command = arguments.get("command")
         command_text = command.strip() if isinstance(command, str) else ""
@@ -318,6 +368,13 @@ def format_permission_prompt_lines(request: PermissionRequest) -> list[str]:
             lines.append(_content_summary(request.arguments.get("content")))
         return lines
 
+    if request.subject.kind == "hardware_device":
+        return [
+            f"hardware: {request.tool_name}",
+            f"device: {request.subject.hardware_device or ''}",
+            f"arguments: {_summarized_arguments(request.arguments)}",
+        ]
+
     if request.tool_name == "memory.write":
         lines = [f"tool: {request.tool_name}"]
         target = request.arguments.get("file") or request.arguments.get("topic")
@@ -398,6 +455,7 @@ def _decision(
         subject_kind=subject.kind,
         file_path=subject.file_path,
         file_root=subject.file_root,
+        hardware_device=subject.hardware_device,
     )
 
 
@@ -416,3 +474,12 @@ def _path_under_any_root(path: str | None, roots: set[str]) -> bool:
         except (OSError, ValueError):
             continue
     return False
+
+
+def _hardware_write_capability(tool_name: str) -> str | None:
+    return {
+        "serial.write": "serial",
+        "gpio.write": "gpio",
+        "i2c.write": "i2c",
+        "spi.transfer": "spi",
+    }.get(tool_name)

@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt;
 
 use crate::config::{expand_user_path, AgentConfig};
+use crate::hardware::{
+    configured_hardware_devices, probe_hardware, resolve_hardware_device, serial_json_request,
+    serial_read, serial_write, HardwareError,
+};
 use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
@@ -57,6 +61,12 @@ pub fn tool_info(name: &str) -> ToolInfo {
                 | "memory.search"
                 | "skill.read"
                 | "image.understand"
+                | "hardware.probe"
+                | "hardware.devices"
+                | "serial.read"
+                | "gpio.read"
+                | "i2c.scan"
+                | "i2c.read"
         ),
     )
 }
@@ -107,7 +117,11 @@ pub fn tool_specs() -> Vec<serde_json::Value> {
 }
 
 pub fn tool_specs_for_config(config: &AgentConfig) -> Vec<serde_json::Value> {
-    tool_specs_for_enabled(&config.tools.enabled)
+    let mut enabled = config.tools.enabled.clone();
+    if !config.hardware.enabled {
+        enabled.retain(|category| category != "hardware");
+    }
+    tool_specs_for_enabled(&enabled)
 }
 
 fn tool_specs_for_enabled(enabled: &[String]) -> Vec<serde_json::Value> {
@@ -156,6 +170,9 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
                 "additionalProperties":false
             }),
         ));
+    }
+    if has("hardware") {
+        specs.extend(hardware_tool_specs());
     }
     if has("image") {
         specs.push(openai_tool(
@@ -225,6 +242,61 @@ fn memory_tool_specs() -> Vec<serde_json::Value> {
     ]
 }
 
+fn hardware_tool_specs() -> Vec<serde_json::Value> {
+    vec![
+        openai_tool(
+            "hardware.probe",
+            "List host hardware capabilities and standard device nodes without opening the devices.",
+            serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        openai_tool(
+            "hardware.devices",
+            "List configured hardware device aliases, capabilities, and write availability.",
+            serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        openai_tool(
+            "serial.read",
+            "Read currently available text from a configured serial device alias.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"max_bytes":{"type":"integer","minimum":1}},"required":["device"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "serial.write",
+            "Write UTF-8 text to a configured serial device alias.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"data":{"type":"string"}},"required":["device","data"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "gpio.read",
+            "Read a GPIO pin through a configured serial JSON controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"pin":{"type":"integer","minimum":0}},"required":["device","pin"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "gpio.write",
+            "Write a GPIO pin through a configured serial JSON controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"pin":{"type":"integer","minimum":0},"value":{"type":"integer","enum":[0,1]}},"required":["device","pin","value"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "i2c.scan",
+            "Scan I2C addresses through a configured serial JSON controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"}},"required":["device"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "i2c.read",
+            "Read bytes from an I2C address through a configured serial JSON controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"address":{"type":"integer","minimum":0,"maximum":127},"register":{"type":"integer","minimum":0,"maximum":255},"length":{"type":"integer","minimum":1}},"required":["device","address","length"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "i2c.write",
+            "Write hexadecimal bytes to an I2C address through a configured serial JSON controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"address":{"type":"integer","minimum":0,"maximum":127},"register":{"type":"integer","minimum":0,"maximum":255},"data":{"type":"string","description":"Non-empty even-length hexadecimal bytes."}},"required":["device","address","data"],"additionalProperties":false}),
+        ),
+        openai_tool(
+            "spi.transfer",
+            "Transfer hexadecimal bytes through a configured serial JSON SPI controller.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"data":{"type":"string","description":"Non-empty even-length hexadecimal bytes."}},"required":["device","data"],"additionalProperties":false}),
+        ),
+    ]
+}
+
 fn openai_tool(name: &str, description: &str, parameters: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "function",
@@ -251,6 +323,20 @@ pub fn run_tool_map(
     args: &BTreeMap<String, String>,
     context: &ToolContext,
 ) -> Result<ToolResult, String> {
+    if is_hardware_tool(name)
+        && (!context.config.hardware.enabled
+            || !context
+                .config
+                .tools
+                .enabled
+                .iter()
+                .any(|category| category == "hardware"))
+    {
+        return Ok(ToolResult::error(
+            "unknown_tool",
+            format!("Unknown tool: {}", name),
+        ));
+    }
     let result = match name {
         "files.list" => files_list(args, context),
         "files.read" => files_read(args, context),
@@ -265,9 +351,276 @@ pub fn run_tool_map(
         "skill.run" => run_skill_command(args, context),
         "web.search" => web_search(args, context),
         "image.understand" => image_understand(args, context),
+        "hardware.probe" => hardware_probe(context),
+        "hardware.devices" => hardware_devices(context),
+        "serial.read" => hardware_serial_read(args, context),
+        "serial.write" => hardware_serial_write(args, context),
+        "gpio.read" => hardware_controller_tool(args, context, "gpio", false, "gpio_read"),
+        "gpio.write" => hardware_controller_tool(args, context, "gpio", true, "gpio_write"),
+        "i2c.scan" => hardware_controller_tool(args, context, "i2c", false, "i2c_scan"),
+        "i2c.read" => hardware_controller_tool(args, context, "i2c", false, "i2c_read"),
+        "i2c.write" => hardware_controller_tool(args, context, "i2c", true, "i2c_write"),
+        "spi.transfer" => hardware_controller_tool(args, context, "spi", true, "spi_transfer"),
         _ => ToolResult::error("unknown_tool", format!("Unknown tool: {}", name)),
     };
     Ok(result)
+}
+
+fn hardware_probe(context: &ToolContext) -> ToolResult {
+    let text = serde_json::to_string_pretty(&probe_hardware()).unwrap_or_else(|_| "{}".to_string());
+    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
+    let mut result = ToolResult::ok(text);
+    result.truncated = truncated;
+    result
+}
+
+fn hardware_devices(context: &ToolContext) -> ToolResult {
+    hardware_json_result(
+        configured_hardware_devices(&context.config.hardware),
+        context,
+    )
+}
+
+fn hardware_serial_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
+    let device_name = match required_hardware_string(args, "device") {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
+    let max_bytes = match args.get("max_bytes") {
+        Some(value) => match hardware_integer(
+            value,
+            "max_bytes",
+            1,
+            context.config.hardware.max_transfer_bytes as u64,
+        ) {
+            Ok(value) => value as usize,
+            Err(result) => return result,
+        },
+        None => context.config.hardware.max_transfer_bytes,
+    };
+    let device =
+        match resolve_hardware_device(&context.config.hardware, device_name, "serial", false) {
+            Ok(device) => device,
+            Err(error) => return hardware_error_result(error),
+        };
+    match serial_read(&context.config.hardware, device, max_bytes) {
+        Ok(data) => {
+            let text = String::from_utf8_lossy(&data).into_owned();
+            let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
+            let mut result = ToolResult::ok(text);
+            result.truncated = truncated;
+            result
+        }
+        Err(error) => hardware_error_result(error),
+    }
+}
+
+fn hardware_serial_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
+    let device_name = match required_hardware_string(args, "device") {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
+    let data = match required_hardware_string(args, "data") {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
+    let device =
+        match resolve_hardware_device(&context.config.hardware, device_name, "serial", true) {
+            Ok(device) => device,
+            Err(error) => return hardware_error_result(error),
+        };
+    match serial_write(&context.config.hardware, device, data.as_bytes()) {
+        Ok(written) => hardware_json_result(
+            serde_json::json!({"device":device_name,"bytes_written":written}),
+            context,
+        ),
+        Err(error) => hardware_error_result(error),
+    }
+}
+
+fn hardware_controller_tool(
+    args: &BTreeMap<String, String>,
+    context: &ToolContext,
+    capability: &str,
+    write: bool,
+    command: &str,
+) -> ToolResult {
+    let device_name = match required_hardware_string(args, "device") {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
+    let arguments = match hardware_controller_arguments(args, context, command) {
+        Ok(value) => value,
+        Err(result) => return result,
+    };
+    let device =
+        match resolve_hardware_device(&context.config.hardware, device_name, capability, write) {
+            Ok(device) => device,
+            Err(error) => return hardware_error_result(error),
+        };
+    match serial_json_request(&context.config.hardware, device, command, arguments) {
+        Ok(result) => hardware_json_result(
+            serde_json::json!({"device":device_name,"result":result}),
+            context,
+        ),
+        Err(error) => hardware_error_result(error),
+    }
+}
+
+fn hardware_controller_arguments(
+    args: &BTreeMap<String, String>,
+    context: &ToolContext,
+    command: &str,
+) -> Result<serde_json::Value, ToolResult> {
+    let mut result = serde_json::Map::new();
+    match command {
+        "gpio_read" => insert_hardware_integer(&mut result, args, "pin", 0, 65535)?,
+        "gpio_write" => {
+            insert_hardware_integer(&mut result, args, "pin", 0, 65535)?;
+            insert_hardware_integer(&mut result, args, "value", 0, 1)?;
+        }
+        "i2c_scan" => {}
+        "i2c_read" => {
+            insert_hardware_integer(&mut result, args, "address", 0, 127)?;
+            if let Some(value) = args.get("register") {
+                let value = hardware_integer(value, "register", 0, 255)?;
+                result.insert("register".to_string(), serde_json::Value::from(value));
+            }
+            insert_hardware_integer(
+                &mut result,
+                args,
+                "length",
+                1,
+                context.config.hardware.max_transfer_bytes as u64,
+            )?;
+        }
+        "i2c_write" => {
+            insert_hardware_integer(&mut result, args, "address", 0, 127)?;
+            if let Some(value) = args.get("register") {
+                let value = hardware_integer(value, "register", 0, 255)?;
+                result.insert("register".to_string(), serde_json::Value::from(value));
+            }
+            let data = required_hardware_hex(args, context)?;
+            result.insert("data".to_string(), serde_json::Value::String(data));
+        }
+        "spi_transfer" => {
+            let data = required_hardware_hex(args, context)?;
+            result.insert("data".to_string(), serde_json::Value::String(data));
+        }
+        _ => {
+            return Err(ToolResult::error(
+                "invalid_arguments",
+                "Unsupported hardware controller command",
+            ))
+        }
+    }
+    Ok(serde_json::Value::Object(result))
+}
+
+fn required_hardware_string<'a>(
+    args: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Result<&'a str, ToolResult> {
+    args.get(name)
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .ok_or_else(|| {
+            ToolResult::error(
+                "invalid_arguments",
+                format!("{} must be a non-empty string", name),
+            )
+        })
+}
+
+fn hardware_integer(
+    value: &str,
+    name: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, ToolResult> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| {
+            ToolResult::error(
+                "invalid_arguments",
+                format!(
+                    "{} must be an integer between {} and {}",
+                    name, minimum, maximum
+                ),
+            )
+        })
+}
+
+fn insert_hardware_integer(
+    result: &mut serde_json::Map<String, serde_json::Value>,
+    args: &BTreeMap<String, String>,
+    name: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<(), ToolResult> {
+    let Some(value) = args.get(name) else {
+        return Err(ToolResult::error(
+            "invalid_arguments",
+            format!(
+                "{} must be an integer between {} and {}",
+                name, minimum, maximum
+            ),
+        ));
+    };
+    let value = hardware_integer(value, name, minimum, maximum)?;
+    result.insert(name.to_string(), serde_json::Value::from(value));
+    Ok(())
+}
+
+fn required_hardware_hex(
+    args: &BTreeMap<String, String>,
+    context: &ToolContext,
+) -> Result<String, ToolResult> {
+    let value = required_hardware_string(args, "data")?;
+    if value.len() % 2 != 0
+        || value.len() / 2 > context.config.hardware.max_transfer_bytes
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ToolResult::error(
+            "invalid_arguments",
+            if value.len() / 2 > context.config.hardware.max_transfer_bytes {
+                "data exceeds the configured transfer limit"
+            } else {
+                "data must be a non-empty even-length hexadecimal string"
+            },
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn hardware_json_result(value: serde_json::Value, context: &ToolContext) -> ToolResult {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
+    let mut result = ToolResult::ok(text);
+    result.truncated = truncated;
+    result
+}
+
+fn hardware_error_result(error: HardwareError) -> ToolResult {
+    ToolResult::error(&error.error_type, error.message)
+}
+
+fn is_hardware_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "hardware.probe"
+            | "hardware.devices"
+            | "serial.read"
+            | "serial.write"
+            | "gpio.read"
+            | "gpio.write"
+            | "i2c.scan"
+            | "i2c.read"
+            | "i2c.write"
+            | "spi.transfer"
+    )
 }
 
 fn files_list(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {

@@ -117,6 +117,25 @@ max_results = 10
 # Web 搜索请求超时时间，单位秒。
 timeout_seconds = 10
 
+[hardware]
+# 是否允许向模型暴露硬件工具；默认关闭。
+enabled = false
+# 当前仅支持按需探测，不启动后台设备监听。
+discovery = "on_demand"
+# 单次硬件操作超时，单位秒。
+operation_timeout_seconds = 2.0
+# 单次串口请求、响应或原始传输的最大字节数。
+max_transfer_bytes = 4096
+
+# 设备表本身就是硬件路径白名单。取消注释并按真机设备节点调整。
+# [[hardware.devices]]
+# name = "controller"
+# path = "/dev/ttyACM0"
+# transport = "serial_json"
+# baud_rate = 115200
+# capabilities = ["serial", "gpio", "i2c", "spi"]
+# allow_write = false
+
 [gateway]
 # gateway 启用的 channel 列表。
 enabled_channels = ["weixin"]

@@ -12,7 +12,7 @@ Colibri 是一个面向 CardputerZero 这类小内存 Linux 设备的轻量级 P
 - 运行时只使用 Python 标准库，开发测试使用 `pytest`。
 - 支持 OpenAI-compatible 模型接口，也内置确定性的 fake model 用于测试。
 - 有边界的 agent tool loop。
-- 内置文件、Shell、网页搜索、记忆、技能工具。
+- 内置文件、Shell、网页搜索、记忆、技能工具，以及默认关闭的只读硬件探测。
 - 动态权限确认，使用数字选项，支持单次、session、可执行文件 session、用户级命令和用户级可执行文件授权。
 - Markdown 文件记忆系统，支持自动 recall。
 - 本地 skill，使用渐进式披露加载。
@@ -26,7 +26,7 @@ Colibri 是一个面向 CardputerZero 这类小内存 Linux 设备的轻量级 P
 ```mermaid
 flowchart TD
     User["用户 / 外部渠道"] --> CLI["colibri.cli"]
-    CLI --> Commands["ask / repl / diagnostics / auth / gateway"]
+    CLI --> Commands["ask / repl / diagnostics / hardware / auth / gateway"]
     Commands --> Session["AgentSession"]
     Commands --> GatewayProc["GatewayProcessManager"]
     GatewayProc --> GatewayRun["gateway run"]
@@ -135,13 +135,42 @@ timeout_seconds = 10
 uv run python -m colibri.cli ask "hello"
 uv run python -m colibri.cli repl
 uv run python -m colibri.cli diagnostics
+uv run python -m colibri.cli hardware probe
+uv run python -m colibri.cli hardware simulate
 uv run python -m colibri.cli auth weixin
 ```
 
 - `ask`：执行一次请求后退出。
 - `repl`：本地多轮对话。长任务执行中，TTY 下可直接输入一行新指令**改方向**（跳过剩余工具并注入文本），无需等 `colibri>` 提示符；权限确认期间不可用。
 - `diagnostics`：查看环境、路径、RSS、上下文限制等诊断信息。
+- `hardware probe`：列出主机标准硬件设备节点，不打开设备，也不启动后台监听。
+- `hardware simulate`：以前台 stdin/stdout NDJSON 方式运行 GPIO/I2C/SPI 协议模拟器，供无真机开发和测试使用。
 - `auth weixin`：启动微信 iLink 二维码登录，并把 token 写入当前配置文件。
+
+要向模型暴露硬件工具，需要同时打开两个开关，并显式配置设备白名单：
+
+```toml
+[tools]
+enabled = ["shell", "files", "web", "image", "memory", "skills", "hardware"]
+
+[hardware]
+enabled = true
+discovery = "on_demand"
+operation_timeout_seconds = 2.0
+max_transfer_bytes = 4096
+
+[[hardware.devices]]
+name = "controller"
+path = "/dev/ttyACM0"
+transport = "serial_json"
+baud_rate = 115200
+capabilities = ["serial", "gpio", "i2c", "spi"]
+allow_write = false
+```
+
+模型只能使用 `name` 别名，不能提交任意设备路径。当前工具包括 `hardware.probe`、`hardware.devices`、`serial.read/write`、`gpio.read/write`、`i2c.scan/read/write` 和 `spi.transfer`。GPIO/I2C/SPI 通过有界的 newline-delimited JSON 串口控制器协议执行；原生 Linux 总线驱动留到真机接口确认后接入。
+
+带副作用的操作必须同时满足 `allow_write = true` 和权限确认。硬件权限按设备提供 `once`、`session-device`、`user-device`、`deny`，持久授权写入 `permissions.toml` 的 `[hardware].devices`。任何授权都不能绕过设备白名单、能力、超时和传输大小限制。所有设备均按操作打开并立即关闭，不常驻扫描或持有设备句柄。
 
 ## Gateway
 

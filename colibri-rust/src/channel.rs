@@ -224,6 +224,11 @@ pub fn format_channel_permission_prompt(request: &PermissionRequest) -> String {
                 .into_iter()
                 .map(str::to_string),
         ),
+        "hardware_device" => lines.extend(
+            ["1. once", "2. session-device", "4. user-device", "0. deny"]
+                .into_iter()
+                .map(str::to_string),
+        ),
         _ => lines.extend(
             ["1. once", "2. session", "4. user", "0. deny"]
                 .into_iter()
@@ -261,6 +266,22 @@ fn permission_detail_lines(request: &PermissionRequest) -> Vec<String> {
                 lines.push(permission_content_summary(request.arguments.get("content")));
             }
             lines
+        }
+        "hardware_device" => {
+            let pairs = request
+                .arguments
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            vec![
+                format!("hardware: {}", request.tool_name),
+                format!(
+                    "device: {}",
+                    request.hardware_device.as_deref().unwrap_or("")
+                ),
+                format!("arguments: {{{pairs}}}"),
+            ]
         }
         _ if request.tool_name == "memory.write" => {
             let mut lines = vec![format!("tool: {}", request.tool_name)];

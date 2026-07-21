@@ -12,6 +12,7 @@ use crate::gateway::{
     format_gateway_log, format_gateway_status, restart_gateway, run_gateway, start_gateway,
     stop_gateway, GatewayStatus,
 };
+use crate::hardware::{probe_hardware, HardwareSimulator};
 use crate::model::build_model;
 use crate::permissions::{PermissionPrompter, PermissionRequest};
 use crate::repl_input::{
@@ -123,6 +124,64 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
                 .map_err(|error| error.to_string())?;
             }
             Ok(0)
+        }
+        "hardware" if rest.first().map(String::as_str) == Some("probe") => {
+            let output = serde_json::to_string_pretty(&probe_hardware())
+                .map_err(|error| error.to_string())?;
+            writeln!(
+                stdout.lock().map_err(|_| "stdout lock poisoned")?,
+                "{}",
+                output
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(0)
+        }
+        "hardware" if rest.first().map(String::as_str) == Some("simulate") => {
+            let mut simulator = HardwareSimulator::default();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let count = stdin
+                    .read_line(&mut line)
+                    .map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let response = if line.len() > config.hardware.max_transfer_bytes {
+                    "{\"id\":null,\"ok\":false,\"error\":\"request exceeds max_transfer_bytes\"}"
+                        .to_string()
+                } else {
+                    simulator.handle_line(&line)
+                };
+                let response = if response.len() > config.hardware.max_transfer_bytes {
+                    let request_id = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|value| value.get("id").cloned())
+                        .unwrap_or(serde_json::Value::Null);
+                    serde_json::json!({
+                        "id":request_id,
+                        "ok":false,
+                        "error":"response exceeds max_transfer_bytes"
+                    })
+                    .to_string()
+                } else {
+                    response
+                };
+                let mut output = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+                writeln!(output, "{}", response).map_err(|error| error.to_string())?;
+                output.flush().map_err(|error| error.to_string())?;
+            }
+            Ok(0)
+        }
+        "hardware" => {
+            let _ = writeln!(
+                stderr.lock().map_err(|_| "stderr lock poisoned")?,
+                "Usage: colibri hardware {{probe,simulate}}"
+            );
+            Ok(2)
         }
         "ask" => {
             let Some(text) = rest.first() else {
@@ -509,6 +568,7 @@ impl<R: BufRead, W: Write> PermissionPrompter for ConsolePermissionPrompter<'_, 
                 "[1] once [2] session-command [3] session-executable [4] user-command [5] user-executable [0] deny: "
             }
             "file_path" => "[1] once [2] session-dir [4] user-dir [0] deny: ",
+            "hardware_device" => "[1] once [2] session-device [4] user-device [0] deny: ",
             _ => "[1] once [2] session [4] user [0] deny: ",
         };
         let _ = write!(self.stdout, "{}", prompt);
@@ -541,6 +601,14 @@ fn format_permission_prompt_lines(request: &PermissionRequest) -> Vec<String> {
             }
             lines
         }
+        "hardware_device" => vec![
+            format!("hardware: {}", request.tool_name),
+            format!(
+                "device: {}",
+                request.hardware_device.as_deref().unwrap_or("")
+            ),
+            format!("arguments: {}", summarized_arguments(&request.arguments)),
+        ],
         _ if request.tool_name == "memory.write" => {
             let mut lines = vec![format!("tool: {}", request.tool_name)];
             if let Some(target) = request

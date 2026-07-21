@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from colibri.config import AgentConfig
+from colibri.config import AgentConfig, HardwareDeviceConfig
 from colibri.permissions_store import UserGrants, UserPermissionStore
 from colibri.tools.base import ToolContext, ToolResult, ToolSpec
 from colibri.tools.builtin import FilesListTool, FilesWriteTool, ImageUnderstandTool, ShellRunTool
@@ -50,6 +50,84 @@ def test_read_only_tool_is_allowed_under_default_policy():
     assert result.allowed
     assert result.decision == "allow"
     assert result.scope == "default_read_only"
+
+
+def test_hardware_device_session_and_user_grants_are_device_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = AgentConfig.default().with_overrides(
+        {
+            "tools": {"default_permission": "confirm"},
+            "hardware": {
+                "enabled": True,
+                "devices": [
+                    {
+                        "name": "controller",
+                        "path": "/dev/ttyACM0",
+                        "capabilities": ["gpio"],
+                        "allow_write": True,
+                    }
+                ],
+            },
+        }
+    )
+    context = tool_context(config, tmp_path)
+    tool = FakeTool("gpio.write", read_only=False)
+    arguments = {"device": "controller", "pin": 1, "value": 1}
+
+    session_prompter = FakePrompter(replies=["2"], requests=[])
+    session_policy = PermissionPolicy.from_config(config, prompter=session_prompter)
+    first = session_policy.decide(tool, arguments, context)
+    second = session_policy.decide(tool, arguments, context)
+
+    assert first.scope == "session_device"
+    assert second.scope == "session_device"
+    assert len(session_prompter.requests) == 1
+    assert first.hardware_device == "controller"
+    assert session_prompter.requests[0].subject.kind == "hardware_device"
+
+    user_prompter = FakePrompter(replies=["4"], requests=[])
+    user_policy = PermissionPolicy.from_config(config, prompter=user_prompter)
+    persisted = user_policy.decide(tool, arguments, context)
+    reused = PermissionPolicy.from_config(
+        config,
+        prompter=FakePrompter(replies=["0"], requests=[]),
+    ).decide(tool, arguments, context)
+
+    assert persisted.scope == "user_device"
+    assert reused.scope == "user_device"
+    assert UserPermissionStore.for_user().load().hardware_devices == {"controller"}
+
+
+def test_hardware_allow_write_hard_deny_wins_over_persisted_grant(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    UserPermissionStore.for_user().merge(UserGrants(hardware_devices={"controller"}))
+    config = AgentConfig.default().with_overrides(
+        {
+            "tools": {"default_permission": "allow"},
+            "hardware": {
+                "enabled": True,
+                "devices": [
+                    {
+                        "name": "controller",
+                        "path": "/dev/ttyACM0",
+                        "capabilities": ["serial"],
+                        "allow_write": False,
+                    }
+                ],
+            },
+        }
+    )
+    prompter = FakePrompter(replies=["1"], requests=[])
+
+    result = PermissionPolicy.from_config(config, prompter=prompter).decide(
+        FakeTool("serial.write", read_only=False),
+        {"device": "controller", "data": "x"},
+        tool_context(config, tmp_path),
+    )
+
+    assert not result.allowed
+    assert result.reason == "hard_deny"
+    assert prompter.requests == []
 
 
 def test_confirm_policy_calls_prompter(tmp_path):

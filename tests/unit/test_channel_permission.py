@@ -52,3 +52,24 @@ def test_format_channel_permission_prompt_includes_choices():
     text = format_channel_permission_prompt(request)
     assert "path: /tmp/a" in text
     assert "1. once" in text
+
+
+def test_format_channel_permission_prompt_uses_device_scopes():
+    request = PermissionRequest(
+        tool_name="gpio.write",
+        arguments={"device": "controller", "pin": 13, "value": 1},
+        read_only=False,
+        subject=PermissionSubject(
+            kind="hardware_device",
+            tool_name="gpio.write",
+            hardware_device="controller",
+            read_only=False,
+        ),
+    )
+
+    text = format_channel_permission_prompt(request)
+
+    assert "hardware: gpio.write" in text
+    assert "device: controller" in text
+    assert "2. session-device" in text
+    assert "4. user-device" in text

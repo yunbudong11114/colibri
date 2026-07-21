@@ -225,6 +225,7 @@ class AgentSession:
                     "shell_command": call.arguments.get("command") if call.name == "shell.run" else None,
                     "file_path": decision.file_path,
                     "file_root": decision.file_root,
+                    "hardware_device": decision.hardware_device,
                 },
             )
             if decision.allowed:

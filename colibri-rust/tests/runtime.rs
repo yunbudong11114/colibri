@@ -7,16 +7,19 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 
 use colibri_rust::channel::{
-    build_channel_registry, parse_permission_choice, validate_channel_envelope,
-    ChannelPermissionWaiters, ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope,
-    OutboundSink,
+    build_channel_registry, format_channel_permission_prompt, parse_permission_choice,
+    validate_channel_envelope, ChannelPermissionWaiters, ChannelTextPermissionPrompter,
+    GatewayChannel, InboundEnvelope, OutboundSink,
 };
 use colibri_rust::channel_registry::build_enabled_channels;
 use colibri_rust::cli::{run_steering_pump, run_with_io};
-use colibri_rust::config::{expand_user_path, AgentConfig};
+use colibri_rust::config::{expand_user_path, AgentConfig, HardwareDeviceConfig};
 use colibri_rust::gateway::{
     format_gateway_log, format_gateway_status, GatewayAgentHealth, GatewaySessionCache,
     GatewayStatus,
+};
+use colibri_rust::hardware::{
+    configured_hardware_devices, probe_hardware_with_roots, serial_json_request, HardwareSimulator,
 };
 use colibri_rust::memory::MemoryContext;
 use colibri_rust::messages::{MediaPart, Message, ModelLimits, ToolCall};
@@ -35,7 +38,7 @@ use colibri_rust::steering::{
     format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
 };
 use colibri_rust::terminal_qr::render_terminal_qr;
-use colibri_rust::tools::{run_tool, ToolContext, ToolInfo};
+use colibri_rust::tools::{run_tool, tool_info, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
 use colibri_rust::weixin::{
     cleanup_media_directory, decrypt_aes_ecb, download_inbound_media, encrypt_aes_ecb,
@@ -149,6 +152,11 @@ fn default_config_matches_python_runtime_defaults() {
     assert!(config.tools.enabled.contains(&"image".to_string()));
     assert!(!config.tools.enabled.contains(&"mcp".to_string()));
     assert_eq!(config.web_search.engine, "baidu");
+    assert!(!config.hardware.enabled);
+    assert_eq!(config.hardware.discovery, "on_demand");
+    assert_eq!(config.hardware.operation_timeout_seconds, 2.0);
+    assert_eq!(config.hardware.max_transfer_bytes, 4096);
+    assert!(config.hardware.devices.is_empty());
     assert_eq!(config.gateway.enabled_channels, vec!["weixin".to_string()]);
     assert_eq!(config.gateway.max_sessions, 4);
     assert_eq!(config.gateway.session_idle_seconds, 600);
@@ -1855,6 +1863,7 @@ fn permission_policy_matches_python_session_and_user_grants() {
             shell_executables: vec![],
             tool_names: vec![],
             file_roots: vec![],
+            hardware_devices: vec![],
         })
         .unwrap();
     let mut deny_prompter = FakePermissionPrompter::new(vec!["0"]);
@@ -1871,6 +1880,7 @@ fn permission_policy_matches_python_session_and_user_grants() {
             shell_executables: vec!["cargo".to_string(), "git".to_string()],
             tool_names: vec![],
             file_roots: vec![],
+            hardware_devices: vec![],
         })
         .unwrap();
     let mut executable_prompter = FakePermissionPrompter::new(vec!["0", "0", "0", "0"]);
@@ -2056,6 +2066,102 @@ fn permission_policy_persists_user_grants_as_concurrent_deltas() {
 }
 
 #[test]
+fn hardware_device_session_and_user_permissions_match_python() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("hardware-device-permissions");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "confirm".to_string();
+    config.hardware.enabled = true;
+    config.hardware.devices.push(HardwareDeviceConfig {
+        name: "controller".to_string(),
+        path: "/dev/ttyACM0".into(),
+        transport: "serial_json".to_string(),
+        baud_rate: 115200,
+        capabilities: vec!["gpio".to_string()],
+        allow_write: true,
+    });
+    let context = ToolContext::new(config.clone(), temp.clone());
+    let tool = ToolInfo::new("gpio.write", false);
+    let arguments = BTreeMap::from([
+        ("device".to_string(), "controller".to_string()),
+        ("pin".to_string(), "1".to_string()),
+        ("value".to_string(), "1".to_string()),
+    ]);
+
+    let mut session_prompter = FakePermissionPrompter::new(vec!["2"]);
+    let mut session_policy = PermissionPolicy::from_config(&config, temp.clone());
+    let first = session_policy.decide(&tool, &arguments, &context, Some(&mut session_prompter));
+    let second = session_policy.decide(&tool, &arguments, &context, Some(&mut session_prompter));
+    assert_eq!(first.scope, "session_device");
+    assert_eq!(second.scope, "session_device");
+    assert_eq!(first.hardware_device.as_deref(), Some("controller"));
+    assert_eq!(session_prompter.requests.len(), 1);
+    assert_eq!(session_prompter.requests[0].subject_kind, "hardware_device");
+
+    let mut user_prompter = FakePermissionPrompter::new(vec!["4"]);
+    let mut user_policy = PermissionPolicy::from_config(&config, temp.clone());
+    let persisted = user_policy.decide(&tool, &arguments, &context, Some(&mut user_prompter));
+    let mut reuse_policy = PermissionPolicy::from_config(&config, temp.clone());
+    let reused = reuse_policy.decide(&tool, &arguments, &context, None);
+    assert_eq!(persisted.scope, "user_device");
+    assert_eq!(reused.scope, "user_device");
+    assert_eq!(
+        UserPermissionStore::for_user().load().hardware_devices,
+        vec!["controller".to_string()]
+    );
+
+    let prompt = format_channel_permission_prompt(&session_prompter.requests[0]);
+    assert!(prompt.contains("hardware: gpio.write"));
+    assert!(prompt.contains("device: controller"));
+    assert!(prompt.contains("2. session-device"));
+    assert!(prompt.contains("4. user-device"));
+    restore_home(old_home);
+}
+
+#[test]
+fn hardware_allow_write_hard_deny_wins_over_user_grant_like_python() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("hardware-device-hard-deny");
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &temp);
+    UserPermissionStore::for_user()
+        .merge(&UserGrants {
+            hardware_devices: vec!["controller".to_string()],
+            ..UserGrants::default()
+        })
+        .unwrap();
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "allow".to_string();
+    config.hardware.devices.push(HardwareDeviceConfig {
+        name: "controller".to_string(),
+        path: "/dev/ttyACM0".into(),
+        transport: "serial_json".to_string(),
+        baud_rate: 115200,
+        capabilities: vec!["serial".to_string()],
+        allow_write: false,
+    });
+    let context = ToolContext::new(config.clone(), temp.clone());
+    let mut prompter = FakePermissionPrompter::new(vec!["1"]);
+
+    let result = PermissionPolicy::from_config(&config, temp).decide(
+        &ToolInfo::new("serial.write", false),
+        &BTreeMap::from([
+            ("device".to_string(), "controller".to_string()),
+            ("data".to_string(), "x".to_string()),
+        ]),
+        &context,
+        Some(&mut prompter),
+    );
+
+    assert!(!result.allowed);
+    assert_eq!(result.reason, "hard_deny");
+    assert!(prompter.requests.is_empty());
+    restore_home(old_home);
+}
+
+#[test]
 fn permission_policy_classifies_shell_redirection_as_file_path() {
     let temp = temp_dir("permission-shell-redirection");
     let config = AgentConfig::default();
@@ -2202,6 +2308,7 @@ fn user_permission_store_saves_and_loads_deduplicated_toml() {
             shell_executables: vec!["cargo".to_string(), "git".to_string(), "cargo".to_string()],
             tool_names: vec!["files.read".to_string(), "files.list".to_string()],
             file_roots: vec![temp.display().to_string(), temp.display().to_string()],
+            hardware_devices: vec!["controller".to_string(), "controller".to_string()],
         })
         .unwrap();
 
@@ -2216,10 +2323,13 @@ fn user_permission_store_saves_and_loads_deduplicated_toml() {
         vec!["files.list".to_string(), "files.read".to_string()]
     );
     assert_eq!(loaded.file_roots, vec![temp.display().to_string()]);
+    assert_eq!(loaded.hardware_devices, vec!["controller".to_string()]);
     let text = fs::read_to_string(temp.join(".colibri/permissions.toml")).unwrap();
     assert!(text.contains("[shell]"));
     assert!(text.contains("commands = [\"git status\"]"));
     assert!(text.contains("executables = [\"cargo\", \"git\"]"));
+    assert!(text.contains("[hardware]"));
+    assert!(text.contains("devices = [\"controller\"]"));
     restore_home(old_home);
 }
 
@@ -3520,6 +3630,437 @@ fn transcript_writer_removes_expired_files_but_preserves_active_like_python() {
 }
 
 #[test]
+fn hardware_config_overrides_and_rejects_invalid_values() {
+    let temp = temp_dir("hardware-config");
+    let config_path = temp.join("agent.toml");
+    fs::write(
+        &config_path,
+        concat!(
+            "[hardware]\n",
+            "enabled = true\n",
+            "discovery = \"on_demand\"\n",
+            "operation_timeout_seconds = 3.5\n",
+            "max_transfer_bytes = 2048\n",
+            "\n[[hardware.devices]]\n",
+            "name = \"controller\"\n",
+            "path = \"/dev/ttyACM0\"\n",
+            "transport = \"serial_json\"\n",
+            "baud_rate = 115200\n",
+            "capabilities = [\"serial\", \"gpio\", \"i2c\", \"spi\"]\n",
+            "allow_write = true\n",
+        ),
+    )
+    .unwrap();
+    let config = AgentConfig::load(Some(&config_path)).unwrap();
+    assert!(config.hardware.enabled);
+    assert_eq!(config.hardware.discovery, "on_demand");
+    assert_eq!(config.hardware.operation_timeout_seconds, 3.5);
+    assert_eq!(config.hardware.max_transfer_bytes, 2048);
+    assert_eq!(
+        config.hardware.devices,
+        vec![HardwareDeviceConfig {
+            name: "controller".to_string(),
+            path: "/dev/ttyACM0".into(),
+            transport: "serial_json".to_string(),
+            baud_rate: 115200,
+            capabilities: vec![
+                "serial".to_string(),
+                "gpio".to_string(),
+                "i2c".to_string(),
+                "spi".to_string(),
+            ],
+            allow_write: true,
+        }]
+    );
+
+    fs::write(&config_path, "[hardware]\nport = \"/dev/ttyACM0\"\n").unwrap();
+    assert_eq!(
+        AgentConfig::load(Some(&config_path)).unwrap_err(),
+        "unknown config field: hardware.port"
+    );
+
+    fs::write(&config_path, "[hardware]\ndiscovery = \"watch\"\n").unwrap();
+    assert_eq!(
+        AgentConfig::load(Some(&config_path)).unwrap_err(),
+        "hardware.discovery must be on_demand"
+    );
+
+    for (text, expected) in [
+        (
+            "[hardware]\nenabled = \"true\"\n",
+            "hardware.enabled must be a boolean",
+        ),
+        (
+            "[hardware]\noperation_timeout_seconds = \"slow\"\n",
+            "hardware.operation_timeout_seconds must be a number",
+        ),
+        (
+            "[hardware]\nmax_transfer_bytes = \"large\"\n",
+            "hardware.max_transfer_bytes must be an integer",
+        ),
+        (
+            "[hardware]\noperation_timeout_seconds = 0\n",
+            "hardware.operation_timeout_seconds",
+        ),
+        (
+            "[hardware]\nmax_transfer_bytes = 0\n",
+            "hardware.max_transfer_bytes",
+        ),
+        (
+            "[hardware]\ndevices = \"bad\"\n",
+            "hardware.devices must be an array of tables",
+        ),
+        (
+            "[hardware]\n[[hardware.devices]]\nname = \"../bad\"\npath = \"/dev/ttyACM0\"\n",
+            "invalid hardware device name",
+        ),
+        (
+            "[hardware]\n[[hardware.devices]]\nname = \"controller\"\npath = \"/tmp/ttyACM0\"\n",
+            "path must be below /dev",
+        ),
+        (
+            "[hardware]\n[[hardware.devices]]\nname = \"controller\"\npath = \"/dev/ttyACM0\"\ntransport = \"native\"\n",
+            "transport must be serial_json",
+        ),
+    ] {
+        fs::write(&config_path, text).unwrap();
+        assert!(
+            AgentConfig::load(Some(&config_path))
+                .unwrap_err()
+                .contains(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn hardware_probe_detects_standard_linux_nodes_like_python() {
+    let temp = temp_dir("hardware-probe");
+    let proc_root = temp.join("proc");
+    let dev_root = temp.join("dev");
+    fs::create_dir_all(proc_root.join("device-tree")).unwrap();
+    fs::write(
+        proc_root.join("device-tree").join("model"),
+        b"CardputerZero Test\0",
+    )
+    .unwrap();
+    for relative in [
+        "gpiochip0",
+        "i2c-1",
+        "spidev0.0",
+        "ttyACM0",
+        "video0",
+        "input/event0",
+        "iio:device0",
+        "rtc0",
+        "lirc0",
+        "snd/controlC0",
+        "dri/card0",
+    ] {
+        let path = dev_root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    let result = probe_hardware_with_roots(&proc_root, &dev_root, "linux");
+
+    assert_eq!(result["platform"], "linux");
+    assert_eq!(result["board_model"], "CardputerZero Test");
+    assert_eq!(
+        result["capabilities"],
+        serde_json::json!([
+            "audio", "camera", "display", "gpio", "i2c", "iio", "infrared", "input", "rtc",
+            "serial", "spi"
+        ])
+    );
+    assert_eq!(
+        result["devices"]["serial"],
+        serde_json::json!(["/dev/ttyACM0"])
+    );
+    assert_eq!(
+        result["devices"]["display"],
+        serde_json::json!(["/dev/dri/card0"])
+    );
+}
+
+#[test]
+fn hardware_probe_tool_requires_both_config_gates_like_python() {
+    let mut category_only = AgentConfig::default();
+    category_only.tools.enabled.push("hardware".to_string());
+    let category_specs = colibri_rust::tools::tool_specs_for_config(&category_only);
+    assert!(!category_specs
+        .iter()
+        .any(|spec| spec["function"]["name"] == "hardware.probe"));
+
+    let mut enabled_only = AgentConfig::default();
+    enabled_only.hardware.enabled = true;
+    let enabled_specs = colibri_rust::tools::tool_specs_for_config(&enabled_only);
+    assert!(!enabled_specs
+        .iter()
+        .any(|spec| spec["function"]["name"] == "hardware.probe"));
+
+    category_only.hardware.enabled = true;
+    let specs = colibri_rust::tools::tool_specs_for_config(&category_only);
+    assert!(specs
+        .iter()
+        .any(|spec| spec["function"]["name"] == "hardware.probe"));
+    let names = specs
+        .iter()
+        .filter_map(|spec| spec["function"]["name"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for name in [
+        "hardware.probe",
+        "hardware.devices",
+        "serial.read",
+        "serial.write",
+        "gpio.read",
+        "gpio.write",
+        "i2c.scan",
+        "i2c.read",
+        "i2c.write",
+        "spi.transfer",
+    ] {
+        assert!(names.contains(name), "{name}");
+    }
+    assert!(tool_info("hardware.probe").read_only);
+    assert!(tool_info("gpio.read").read_only);
+    assert!(!tool_info("gpio.write").read_only);
+}
+
+#[test]
+fn hardware_tools_enforce_capability_write_and_transfer_limits_like_python() {
+    let mut config = AgentConfig::default();
+    config.hardware.enabled = true;
+    config.hardware.max_transfer_bytes = 2;
+    config.tools.enabled.push("hardware".to_string());
+    config.hardware.devices.push(HardwareDeviceConfig {
+        name: "sensor".to_string(),
+        path: "/dev/ttyACM0".into(),
+        transport: "serial_json".to_string(),
+        baud_rate: 115200,
+        capabilities: vec!["gpio".to_string()],
+        allow_write: false,
+    });
+    let context = ToolContext::new(config, temp_dir("hardware-tools-limits"));
+
+    let denied = run_tool(
+        "gpio.write",
+        r#"{"device":"sensor","pin":1,"value":1}"#,
+        &context,
+    )
+    .unwrap();
+    let unsupported = run_tool("i2c.scan", r#"{"device":"sensor"}"#, &context).unwrap();
+    let too_large = run_tool(
+        "i2c.write",
+        r#"{"device":"sensor","address":1,"data":"000102"}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert_eq!(
+        (denied.ok, denied.error_type.as_deref()),
+        (false, Some("permission_denied"))
+    );
+    assert_eq!(
+        (unsupported.ok, unsupported.error_type.as_deref()),
+        (false, Some("unsupported_operation"))
+    );
+    assert_eq!(
+        (too_large.ok, too_large.error_type.as_deref()),
+        (false, Some("invalid_arguments"))
+    );
+}
+
+#[test]
+fn hardware_probe_cli_prints_json() {
+    let (code, stdout, stderr) = run_cli(&["hardware", "probe"]);
+
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(value["platform"].is_string());
+    assert!(value["capabilities"].is_array());
+    assert!(value["devices"].is_object());
+}
+
+#[test]
+fn configured_hardware_devices_exposes_alias_not_path_like_python() {
+    let mut config = AgentConfig::default();
+    config.hardware.devices.push(HardwareDeviceConfig {
+        name: "controller".to_string(),
+        path: "/dev/ttyACM0".into(),
+        transport: "serial_json".to_string(),
+        baud_rate: 115200,
+        capabilities: vec![
+            "serial".to_string(),
+            "gpio".to_string(),
+            "i2c".to_string(),
+            "spi".to_string(),
+        ],
+        allow_write: true,
+    });
+
+    let result = configured_hardware_devices(&config.hardware);
+
+    assert_eq!(
+        result,
+        serde_json::json!([{
+            "name":"controller",
+            "transport":"serial_json",
+            "baud_rate":115200,
+            "capabilities":["serial","gpio","i2c","spi"],
+            "allow_write":true
+        }])
+    );
+    assert!(!result.to_string().contains("/dev/ttyACM0"));
+}
+
+#[test]
+fn hardware_simulator_round_trips_gpio_i2c_and_spi_like_python() {
+    let mut simulator = HardwareSimulator::default();
+
+    assert_eq!(
+        simulator.handle_request(
+            &serde_json::json!({"id":"1","cmd":"gpio_write","args":{"pin":13,"value":1}})
+        ),
+        serde_json::json!({"id":"1","ok":true,"result":{"value":1}})
+    );
+    assert_eq!(
+        simulator
+            .handle_request(&serde_json::json!({"id":"2","cmd":"gpio_read","args":{"pin":13}}))
+            ["result"],
+        serde_json::json!({"value":1})
+    );
+    assert_eq!(
+        simulator.handle_request(
+            &serde_json::json!({"id":"3","cmd":"i2c_write","args":{"address":32,"register":1,"data":"a10b"}})
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        simulator.handle_request(&serde_json::json!({"id":"4","cmd":"i2c_scan","args":{}}))
+            ["result"],
+        serde_json::json!({"addresses":[32]})
+    );
+    assert_eq!(
+        simulator.handle_request(
+            &serde_json::json!({"id":"5","cmd":"i2c_read","args":{"address":32,"register":1,"length":4}})
+        )["result"],
+        serde_json::json!({"data":"a10b0000"})
+    );
+    assert_eq!(
+        simulator.handle_request(
+            &serde_json::json!({"id":"6","cmd":"spi_transfer","args":{"data":"CAFE"}})
+        )["result"],
+        serde_json::json!({"data":"cafe"})
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn serial_json_transport_round_trips_over_pty_like_python() {
+    use std::ffi::CStr;
+    use std::os::fd::FromRawFd;
+
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let slave_path = unsafe { CStr::from_ptr(libc::ttyname(slave_fd)) }
+        .to_string_lossy()
+        .to_string();
+    let mut master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
+    let mut config = AgentConfig::default();
+    config.hardware.enabled = true;
+    config.hardware.operation_timeout_seconds = 1.0;
+    config.hardware.devices.push(HardwareDeviceConfig {
+        name: "controller".to_string(),
+        path: slave_path.into(),
+        transport: "serial_json".to_string(),
+        baud_rate: 115200,
+        capabilities: vec!["gpio".to_string()],
+        allow_write: true,
+    });
+
+    let master_guard = master.try_clone().unwrap();
+    let controller = thread::spawn(move || {
+        let mut request_bytes = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            master.read_exact(&mut byte).unwrap();
+            request_bytes.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+        let response = serde_json::json!({
+            "id":request["id"],
+            "ok":true,
+            "result":{"value":1}
+        });
+        master
+            .write_all(format!("{}\n", response).as_bytes())
+            .unwrap();
+    });
+
+    let result = serial_json_request(
+        &config.hardware,
+        &config.hardware.devices[0],
+        "gpio_read",
+        serde_json::json!({"pin":13}),
+    )
+    .unwrap();
+
+    controller.join().unwrap();
+    drop(master_guard);
+    drop(slave);
+    assert_eq!(result, serde_json::json!({"value":1}));
+}
+
+#[test]
+fn hardware_simulator_cli_reads_and_writes_ndjson_like_python() {
+    let temp = temp_dir("hardware-simulator-cli");
+    let config_path = temp.join("config.toml");
+    fs::write(&config_path, "[hardware]\nmax_transfer_bytes = 4096\n").unwrap();
+    let args = vec![
+        "--config".to_string(),
+        config_path.display().to_string(),
+        "hardware".to_string(),
+        "simulate".to_string(),
+    ];
+    let input = concat!(
+        "{\"id\":\"1\",\"cmd\":\"gpio_write\",\"args\":{\"pin\":2,\"value\":1}}\n",
+        "{\"id\":\"2\",\"cmd\":\"gpio_read\",\"args\":{\"pin\":2}}\n",
+    );
+
+    let (code, stdout, stderr) = run_cli_raw(&args, input);
+
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
+        serde_json::json!({"id":"1","ok":true,"result":{"value":1}})
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[1]).unwrap(),
+        serde_json::json!({"id":"2","ok":true,"result":{"value":1}})
+    );
+}
+
+#[test]
 fn transcript_writer_removes_oldest_inactive_files_to_fit_size_limit_like_python() {
     let temp = temp_dir("transcript-retention-size");
     let directory = temp.join("transcripts");
@@ -3927,6 +4468,7 @@ fn shell_permission_request() -> PermissionRequest {
         shell_executable: Some("pwd".to_string()),
         file_path: None,
         file_root: None,
+        hardware_device: None,
     }
 }
 
