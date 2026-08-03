@@ -146,13 +146,106 @@ def test_complete_serializes_assistant_tool_calls(monkeypatch):
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "files.read",
+                        "name": "files_read",
                         "arguments": "{\"path\": \"/tmp/a.txt\"}",
                     },
                 }
             ],
         }
     ]
+
+
+def test_complete_maps_dotted_tool_names_in_both_directions(monkeypatch):
+    client = make_client()
+    captured = {}
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "files.read",
+                "description": "Read a file",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    def fake_request(self, url, payload, timeout_seconds):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "files_read",
+                                    "arguments": "{\"path\": \"notes.txt\"}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    response = client.complete(
+        messages=[Message(role="user", content="read notes")],
+        tools=tools,
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert captured["payload"]["tools"][0]["function"]["name"] == "files_read"
+    assert tools[0]["function"]["name"] == "files.read"
+    assert response.tool_calls[0].name == "files.read"
+
+
+def test_complete_keeps_colliding_tool_names_distinct(monkeypatch):
+    client = make_client()
+    captured = {}
+    tools = [
+        {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+        for name in ["a.b", "a_b"]
+    ]
+
+    def fake_request(self, url, payload, timeout_seconds):
+        captured["payload"] = payload
+        encoded_name = payload["tools"][0]["function"]["name"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": encoded_name, "arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "_request_json", fake_request)
+
+    response = client.complete(
+        messages=[Message(role="user", content="use a tool")],
+        tools=tools,
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    encoded_names = [tool["function"]["name"] for tool in captured["payload"]["tools"]]
+    assert encoded_names[1] == "a_b"
+    assert encoded_names[0].startswith("a_b_")
+    assert len(set(encoded_names)) == 2
+    assert response.tool_calls[0].name == "a.b"
 
 
 def test_complete_parses_tool_calls(monkeypatch):

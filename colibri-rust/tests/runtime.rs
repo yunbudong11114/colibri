@@ -2710,8 +2710,98 @@ fn openai_compatible_serializes_and_parses_tool_calls() {
     assert!(body.contains("\"role\":\"system\""));
     assert!(body.contains("\"tool_call_id\":\"call_1\""));
     assert!(body.contains("\"tool_calls\""));
-    assert!(body.contains("\"files.read\""));
+    assert!(body.contains("\"files_read\""));
     assert!(body.contains("\"tools\""));
+}
+
+#[test]
+fn openai_compatible_maps_dotted_tool_names_in_both_directions() {
+    let _guard = env_lock().lock().unwrap();
+    let server = start_http_server(|_base_url, _requests| {
+        |_request| {
+            TestHttpResponse::json(
+                r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"files_read","arguments":"{\"path\":\"notes.txt\"}"}}]}}]}"#,
+            )
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.api_key = "test-key".to_string();
+    config.model = "test-model".to_string();
+    config.base_url = server.base_url.clone();
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "files.read",
+            "description": "Read a file",
+            "parameters": {"type": "object"}
+        }
+    })];
+
+    let response = model
+        .complete(
+            &[Message::new("user", "read notes")],
+            &tools,
+            "",
+            &ModelLimits {
+                timeout_seconds: 5,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(payload["tools"][0]["function"]["name"], "files_read");
+    assert_eq!(tools[0]["function"]["name"], "files.read");
+    assert_eq!(response.tool_calls[0].name, "files.read");
+}
+
+#[test]
+fn openai_compatible_keeps_colliding_tool_names_distinct() {
+    let _guard = env_lock().lock().unwrap();
+    let digest = format!("{:x}", md5::compute(b"a.b"));
+    let dotted_alias = format!("a_b_{}", &digest[..12]);
+    let response_body = format!(
+        r#"{{"choices":[{{"message":{{"content":null,"tool_calls":[{{"id":"call_1","type":"function","function":{{"name":"{}","arguments":"{{}}"}}}}]}}}}]}}"#,
+        dotted_alias
+    );
+    let server = start_http_server(move |_base_url, _requests| {
+        move |_request| TestHttpResponse::json(&response_body)
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.api_key = "test-key".to_string();
+    config.model = "test-model".to_string();
+    config.base_url = server.base_url.clone();
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+    let tools = vec![
+        serde_json::json!({"type":"function","function":{"name":"a.b","parameters":{"type":"object"}}}),
+        serde_json::json!({"type":"function","function":{"name":"a_b","parameters":{"type":"object"}}}),
+    ];
+
+    let response = model
+        .complete(
+            &[Message::new("user", "use a tool")],
+            &tools,
+            "",
+            &ModelLimits {
+                timeout_seconds: 5,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(payload["tools"][0]["function"]["name"], dotted_alias);
+    assert_eq!(payload["tools"][1]["function"]["name"], "a_b");
+    assert_ne!(
+        payload["tools"][0]["function"]["name"],
+        payload["tools"][1]["function"]["name"]
+    );
+    assert_eq!(response.tool_calls[0].name, "a.b");
 }
 
 #[test]

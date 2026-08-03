@@ -177,6 +177,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
             python_file: "test_openai_compatible_model.py",
             rust_tests: &[
                 "openai_compatible_serializes_and_parses_tool_calls",
+                "openai_compatible_maps_dotted_tool_names_in_both_directions",
+                "openai_compatible_keeps_colliding_tool_names_distinct",
                 "openai_compatible_requires_api_key_or_environment",
                 "openai_tool_arguments_preserve_json_value_types_like_python",
                 "openai_compatible_retries_transient_http_error_then_succeeds",
@@ -492,6 +494,8 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_complete_passes_tools_when_present",
             "test_complete_serializes_tool_result_messages",
             "test_complete_serializes_assistant_tool_calls",
+            "test_complete_maps_dotted_tool_names_in_both_directions",
+            "test_complete_keeps_colliding_tool_names_distinct",
             "test_complete_parses_tool_calls",
             "test_complete_rejects_empty_choices",
             "test_complete_retries_transient_error_then_succeeds",

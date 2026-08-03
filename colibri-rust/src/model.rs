@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
 use std::time::Duration;
 
 use crate::config::ModelConfig;
 use crate::http::request_json;
 use crate::messages::{Message, ModelLimits, ModelResponse, ToolCall};
+
+const API_TOOL_NAME_MAX_LENGTH: usize = 64;
 
 pub trait ModelClient: Send {
     fn complete(
@@ -132,34 +134,32 @@ impl OpenAiCompatibleModel {
 }
 
 fn retry_delay_ms(base_ms: u64, retry_index: usize) -> u64 {
-    base_ms.saturating_mul(
-        1u64
-            .checked_shl(retry_index as u32)
-            .unwrap_or(u64::MAX),
-    )
+    base_ms.saturating_mul(1u64.checked_shl(retry_index as u32).unwrap_or(u64::MAX))
 }
 
 impl ModelClient for OpenAiCompatibleModel {
     fn complete(
         &mut self,
         messages: &[Message],
-        _tools: &[serde_json::Value],
+        tools: &[serde_json::Value],
         system: &str,
         limits: &ModelLimits,
     ) -> Result<ModelResponse, String> {
+        let tool_names = ToolNameMap::build(tools, messages);
         let payload = chat_payload(
             &self.config.model,
             system,
             messages,
-            _tools,
+            tools,
             limits.max_output_tokens,
+            &tool_names,
         );
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
         let body = self.request_with_retry(&url, &payload, limits.timeout_seconds)?;
-        parse_chat_response(&body)
+        parse_chat_response(&body, &tool_names)
     }
 
     fn complete_image(
@@ -179,7 +179,7 @@ impl ModelClient for OpenAiCompatibleModel {
             self.config.base_url.trim_end_matches('/')
         );
         let body = self.request_with_retry(&url, &payload, limits.timeout_seconds)?;
-        parse_chat_response(&body)
+        parse_chat_response(&body, &ToolNameMap::default())
     }
 }
 
@@ -251,13 +251,14 @@ fn chat_payload(
     messages: &[Message],
     tools: &[serde_json::Value],
     max_tokens: usize,
+    tool_names: &ToolNameMap,
 ) -> String {
     let mut api_messages = Vec::new();
     if !system.is_empty() {
         api_messages.push(serde_json::json!({"role": "system", "content": system}));
     }
     for message in messages {
-        api_messages.push(api_message(message));
+        api_messages.push(api_message(message, tool_names));
     }
     let mut payload = serde_json::json!({
         "model": model,
@@ -265,7 +266,7 @@ fn chat_payload(
         "max_completion_tokens": max_tokens,
     });
     if !tools.is_empty() {
-        payload["tools"] = serde_json::Value::Array(tools.to_vec());
+        payload["tools"] = serde_json::Value::Array(tool_names.encode_tools(tools));
     }
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
 }
@@ -287,7 +288,7 @@ fn image_payload(model: &str, prompt: &str, image_data_url: &str, max_tokens: us
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn api_message(message: &Message) -> serde_json::Value {
+fn api_message(message: &Message, tool_names: &ToolNameMap) -> serde_json::Value {
     let mut value = serde_json::json!({
         "role": message.role,
         "content": message.content,
@@ -305,7 +306,7 @@ fn api_message(message: &Message) -> serde_json::Value {
                         "id": call.id,
                         "type": "function",
                         "function": {
-                            "name": call.name,
+                            "name": tool_names.encode(&call.name),
                             "arguments": serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
                         }
                     })
@@ -316,9 +317,13 @@ fn api_message(message: &Message) -> serde_json::Value {
     value
 }
 
-fn parse_chat_response(body: &str) -> Result<ModelResponse, String> {
-    let data: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| format!("model_error:invalid_response:Model response was not valid JSON: {}", error))?;
+fn parse_chat_response(body: &str, tool_names: &ToolNameMap) -> Result<ModelResponse, String> {
+    let data: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        format!(
+            "model_error:invalid_response:Model response was not valid JSON: {}",
+            error
+        )
+    })?;
     let message = data
         .get("choices")
         .and_then(|choices| choices.as_array())
@@ -333,12 +338,17 @@ fn parse_chat_response(body: &str) -> Result<ModelResponse, String> {
     let tool_calls = message
         .get("tool_calls")
         .and_then(|value| value.as_array())
-        .map(|items| items.iter().map(parse_tool_call).collect())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| parse_tool_call(item, tool_names))
+                .collect()
+        })
         .unwrap_or_else(Vec::new);
     Ok(ModelResponse { text, tool_calls })
 }
 
-fn parse_tool_call(value: &serde_json::Value) -> ToolCall {
+fn parse_tool_call(value: &serde_json::Value, tool_names: &ToolNameMap) -> ToolCall {
     let function = value.get("function").unwrap_or(&serde_json::Value::Null);
     let raw_arguments = function
         .get("arguments")
@@ -361,13 +371,157 @@ fn parse_tool_call(value: &serde_json::Value) -> ToolCall {
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .to_string(),
-        name: function
-            .get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string(),
+        name: tool_names.decode(
+            function
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        ),
         arguments,
     }
+}
+
+#[derive(Default)]
+struct ToolNameMap {
+    internal_to_api: BTreeMap<String, String>,
+    api_to_internal: BTreeMap<String, String>,
+}
+
+impl ToolNameMap {
+    fn build(tools: &[serde_json::Value], messages: &[Message]) -> Self {
+        let mut names = BTreeSet::new();
+        for tool in tools {
+            if let Some(name) = tool
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(|name| name.as_str())
+            {
+                names.insert(name.to_string());
+            }
+        }
+        for message in messages {
+            for call in &message.tool_calls {
+                if !call.name.is_empty() {
+                    names.insert(call.name.clone());
+                }
+            }
+        }
+
+        let mut internal_to_api = BTreeMap::new();
+        let mut used = BTreeSet::new();
+        for name in names.iter().filter(|name| is_legal_api_tool_name(name)) {
+            internal_to_api.insert(name.clone(), name.clone());
+            used.insert(name.clone());
+        }
+        for name in names.iter().filter(|name| !is_legal_api_tool_name(name)) {
+            let api_name = unique_api_tool_name(name, &used);
+            internal_to_api.insert(name.clone(), api_name.clone());
+            used.insert(api_name);
+        }
+        let api_to_internal = internal_to_api
+            .iter()
+            .map(|(internal, api)| (api.clone(), internal.clone()))
+            .collect();
+        Self {
+            internal_to_api,
+            api_to_internal,
+        }
+    }
+
+    fn encode(&self, name: &str) -> String {
+        self.internal_to_api
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn decode(&self, name: &str) -> String {
+        self.api_to_internal
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn encode_tools(&self, tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        tools
+            .iter()
+            .map(|tool| {
+                let mut encoded = tool.clone();
+                if let Some(function) = encoded
+                    .get_mut("function")
+                    .and_then(|function| function.as_object_mut())
+                {
+                    let name = function
+                        .get("name")
+                        .and_then(|name| name.as_str())
+                        .map(str::to_string);
+                    if let Some(name) = name {
+                        function.insert(
+                            "name".to_string(),
+                            serde_json::Value::String(self.encode(&name)),
+                        );
+                    }
+                }
+                encoded
+            })
+            .collect()
+    }
+}
+
+fn is_legal_api_tool_name(name: &str) -> bool {
+    if name.len() > API_TOOL_NAME_MAX_LENGTH {
+        return false;
+    }
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn unique_api_tool_name(name: &str, used: &BTreeSet<String>) -> String {
+    let mut candidate = String::new();
+    let mut previous_was_invalid = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            candidate.push(character);
+            previous_was_invalid = false;
+        } else if !previous_was_invalid {
+            candidate.push('_');
+            previous_was_invalid = true;
+        }
+    }
+    if !candidate
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+    {
+        candidate.insert_str(0, "tool_");
+    }
+    candidate.truncate(API_TOOL_NAME_MAX_LENGTH);
+    if !used.contains(&candidate) {
+        return candidate;
+    }
+
+    let digest = format!("{:x}", md5::compute(name.as_bytes()));
+    let digest = &digest[..12];
+    for attempt in 0..=used.len() {
+        let suffix = if attempt == 0 {
+            format!("_{}", digest)
+        } else {
+            format!("_{}_{}", digest, attempt)
+        };
+        let prefix_length = API_TOOL_NAME_MAX_LENGTH.saturating_sub(suffix.len());
+        let alias = format!(
+            "{}{}",
+            &candidate[..candidate.len().min(prefix_length)],
+            suffix
+        );
+        if alias.len() <= API_TOOL_NAME_MAX_LENGTH && !used.contains(&alias) {
+            return alias;
+        }
+    }
+    unreachable!("finite tool names must have an available protocol alias")
 }
 
 #[cfg(test)]
