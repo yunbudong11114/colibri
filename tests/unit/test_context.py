@@ -1,4 +1,10 @@
-from colibri.context import append_summary, format_model_summary, summarize_messages
+from colibri.context import (
+    append_summary,
+    estimate_model_input_tokens,
+    format_model_summary,
+    retain_recent_message_groups,
+    summarize_messages,
+)
 from colibri.messages import Message, ToolCall
 
 
@@ -48,3 +54,32 @@ def test_format_model_summary_strips_analysis_and_keeps_summary_body():
     assert summary == "Summary:\n1. Primary Request and Intent:\nKeep the project moving."
     assert "private scratchpad" not in summary
 
+
+def test_token_estimate_includes_system_tools_and_tool_call_arguments():
+    plain = estimate_model_input_tokens([Message(role="user", content="hello")])
+    complete = estimate_model_input_tokens(
+        [
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id="call_1", name="files.read", arguments={"path": "x" * 80})],
+            )
+        ],
+        system="system prompt",
+        tools=[{"type": "function", "function": {"name": "files.read", "description": "x" * 80}}],
+    )
+
+    assert complete > plain
+
+
+def test_recent_groups_respect_token_limit_and_keep_latest_user_group():
+    messages = [
+        Message(role="user", content="old " + "x" * 80),
+        Message(role="assistant", content="old answer " + "y" * 80),
+        Message(role="user", content="latest request"),
+        Message(role="assistant", content="latest answer"),
+    ]
+
+    kept = retain_recent_message_groups(messages, recent_limit=4, recent_token_limit=8)
+
+    assert [message.content for message in kept] == ["latest request", "latest answer"]

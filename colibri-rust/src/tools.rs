@@ -1,13 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::time::Duration;
 
 use crate::config::{expand_user_path, AgentConfig};
 use crate::hardware::{
@@ -17,6 +13,7 @@ use crate::hardware::{
 use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
+use crate::process_output::{run_bounded_command, CommandRunError};
 use crate::shell_policy::denied_shell_executable;
 use crate::skills::run_skill_command;
 
@@ -802,24 +799,18 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
         return ToolResult::error("permission_denied", "Command is denied");
     }
     let mut process = platform_shell_command(&command);
-    process
-        .current_dir(&context.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    match run_command_with_timeout(process, context.config.tools.max_shell_seconds) {
+    process.current_dir(&context.cwd);
+    let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.0));
+    match run_bounded_command(process, timeout, context.config.tools.max_result_chars) {
         Err(CommandRunError::Timeout) => ToolResult::error("timeout", "Command timed out"),
         Err(CommandRunError::Io(error)) => ToolResult::error("execution_error", error),
         Ok(output) => {
-            let mut text = String::new();
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-            let mut result = if output.status.success() {
-                ToolResult::ok(text)
+            let mut result = if output.success {
+                ToolResult::ok(output.text)
             } else {
-                ToolResult::error("nonzero_exit", text)
+                ToolResult::error("nonzero_exit", output.text)
             };
-            result.truncated = truncated;
+            result.truncated = output.truncated;
             result
         }
     }
@@ -836,86 +827,8 @@ fn platform_shell_command(command: &str) -> Command {
     {
         let mut process = Command::new("sh");
         process.arg("-c").arg(command);
-        process.process_group(0);
         process
     }
-}
-
-enum CommandRunError {
-    Timeout,
-    Io(String),
-}
-
-fn run_command_with_timeout(
-    mut command: Command,
-    timeout_seconds: f64,
-) -> Result<std::process::Output, CommandRunError> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| CommandRunError::Io(error.to_string()))?;
-    let stdout_reader = child.stdout.take().map(|mut handle| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            handle.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    });
-    let stderr_reader = child.stderr.take().map(|mut handle| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            handle.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    });
-    let started = Instant::now();
-    let timeout = Duration::from_secs_f64(timeout_seconds.max(0.0));
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() >= timeout => {
-                kill_shell_process_tree(&mut child);
-                let _ = child.wait();
-                join_output_reader(stdout_reader)?;
-                join_output_reader(stderr_reader)?;
-                return Err(CommandRunError::Timeout);
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-            Err(error) => return Err(CommandRunError::Io(error.to_string())),
-        }
-    }
-    let status = child
-        .wait()
-        .map_err(|error| CommandRunError::Io(error.to_string()))?;
-    let stdout = join_output_reader(stdout_reader)?;
-    let stderr = join_output_reader(stderr_reader)?;
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-#[cfg(unix)]
-fn kill_shell_process_tree(child: &mut std::process::Child) {
-    let pgid = child.id() as i32;
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_shell_process_tree(child: &mut std::process::Child) {
-    let _ = child.kill();
-}
-
-fn join_output_reader(
-    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-) -> Result<Vec<u8>, CommandRunError> {
-    let Some(reader) = reader else {
-        return Ok(Vec::new());
-    };
-    reader
-        .join()
-        .map_err(|_| CommandRunError::Io("command output reader panicked".to_string()))?
-        .map_err(|error| CommandRunError::Io(error.to_string()))
 }
 
 fn memory_list(context: &ToolContext) -> ToolResult {

@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from colibri.config import ConfigError, ModelConfig
-from colibri.messages import Message, ModelLimits, ModelResponse, ToolCall
+from colibri.messages import Message, ModelLimits, ModelResponse, ModelUsage, ToolCall
 from colibri.model.errors import ModelError
 
 
@@ -169,7 +169,9 @@ class OpenAICompatibleModelClient:
     def _raise_http_error(self, error: urllib.error.HTTPError) -> dict:
         body = error.read().decode("utf-8", errors="replace")
         compact = body[:500]
-        if error.code == 408:
+        if error.code in {400, 413} and _is_context_overflow(body):
+            category = "context_overflow"
+        elif error.code == 408:
             category = "timeout"
         elif error.code == 429:
             category = "rate_limit"
@@ -191,13 +193,22 @@ class OpenAICompatibleModelClient:
         if not choices:
             raise ModelError("Model response missing choices", category="invalid_response")
 
-        message = choices[0].get("message", {})
+        choice = choices[0]
+        message = choice.get("message", {})
         text = message.get("content") or ""
         tool_calls = [
             self._parse_tool_call(item, tool_names=tool_names)
             for item in message.get("tool_calls", [])
         ]
-        return ModelResponse(text=text, tool_calls=tool_calls)
+        stop_reason = choice.get("finish_reason")
+        if not isinstance(stop_reason, str):
+            stop_reason = None
+        return ModelResponse(
+            text=text,
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            usage=_parse_usage(data.get("usage")),
+        )
 
     def _parse_tool_call(
         self,
@@ -215,6 +226,80 @@ class OpenAICompatibleModelClient:
             name=(tool_names or _ToolNameMap.empty()).decode(function.get("name", "")),
             arguments=arguments,
         )
+
+
+def _parse_usage(value: object) -> ModelUsage | None:
+    if not isinstance(value, dict):
+        return None
+
+    prompt_details = value.get("prompt_tokens_details")
+    input_details = value.get("input_tokens_details")
+    cache_read = _first_nonnegative_int(
+        prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None,
+        input_details.get("cached_tokens") if isinstance(input_details, dict) else None,
+        value.get("cache_read_input_tokens"),
+        value.get("cache_read_tokens"),
+        value.get("cached_tokens"),
+    )
+    cache_write = _first_nonnegative_int(
+        prompt_details.get("cache_write_tokens") if isinstance(prompt_details, dict) else None,
+        input_details.get("cache_write_tokens") if isinstance(input_details, dict) else None,
+        value.get("cache_creation_input_tokens"),
+        value.get("cache_write_input_tokens"),
+        value.get("cache_write_tokens"),
+    )
+    prompt_tokens = _first_nonnegative_int(value.get("prompt_tokens"), value.get("input_tokens"))
+    output_tokens = _first_nonnegative_int(value.get("completion_tokens"), value.get("output_tokens"))
+    total_tokens = _first_nonnegative_int(value.get("total_tokens"))
+    known = any(
+        _is_nonnegative_int(item)
+        for item in (
+            value.get("prompt_tokens"),
+            value.get("input_tokens"),
+            value.get("completion_tokens"),
+            value.get("output_tokens"),
+            value.get("total_tokens"),
+            cache_read,
+            cache_write,
+        )
+    )
+    if not known:
+        return None
+
+    cache_read = cache_read or 0
+    cache_write = cache_write or 0
+    input_tokens = max(0, (prompt_tokens or 0) - cache_read - cache_write)
+    output_tokens = output_tokens or 0
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens + cache_read + cache_write
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+        total_tokens=total_tokens,
+    )
+
+
+def _first_nonnegative_int(*values: object) -> int | None:
+    return next((value for value in values if _is_nonnegative_int(value)), None)
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_context_overflow(body: str) -> bool:
+    lower = body.lower()
+    return any(
+        signal in lower
+        for signal in (
+            "context_length_exceeded",
+            "context length",
+            "maximum context",
+            "too many tokens",
+        )
+    ) or ("input token" in lower and ("exceed" in lower or "limit" in lower))
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ import urllib.error
 import pytest
 
 from colibri.config import ConfigError, ModelConfig
-from colibri.messages import Message, ModelLimits, ToolCall
+from colibri.messages import Message, ModelLimits, ModelUsage, ToolCall
 from colibri.model.errors import ModelError
 from colibri.model.openai_compatible import OpenAICompatibleModelClient
 
@@ -288,6 +288,61 @@ def test_complete_parses_tool_calls(monkeypatch):
     assert response.tool_calls[0].arguments == {"city": "Shanghai"}
 
 
+def test_complete_parses_finish_reason_and_usage(monkeypatch):
+    client = make_client()
+
+    monkeypatch.setattr(
+        OpenAICompatibleModelClient,
+        "_request_json",
+        lambda self, url, payload, timeout_seconds: {
+            "choices": [{"finish_reason": "length", "message": {"content": "partial"}}],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 20,
+                "total_tokens": 140,
+                "prompt_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 10},
+            },
+        },
+    )
+
+    response = client.complete(
+        messages=[Message(role="user", content="hello")],
+        tools=[],
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert response.stop_reason == "length"
+    assert response.usage == ModelUsage(
+        input_tokens=80,
+        output_tokens=20,
+        cache_read_tokens=30,
+        cache_write_tokens=10,
+        total_tokens=140,
+    )
+
+
+def test_complete_ignores_malformed_usage(monkeypatch):
+    client = make_client()
+    monkeypatch.setattr(
+        OpenAICompatibleModelClient,
+        "_request_json",
+        lambda self, url, payload, timeout_seconds: {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": "unknown"},
+        },
+    )
+
+    response = client.complete(
+        messages=[Message(role="user", content="hello")],
+        tools=[],
+        system="",
+        limits=ModelLimits(timeout_seconds=5, max_output_tokens=20),
+    )
+
+    assert response.usage is None
+
+
 def test_complete_rejects_empty_choices(monkeypatch):
     client = make_client()
     monkeypatch.setattr(
@@ -406,6 +461,24 @@ def test_request_json_turns_http_error_into_model_error():
         client._raise_http_error(error)
 
     assert caught.value.category == "client_error"
+    assert not caught.value.retryable
+
+
+def test_http_context_overflow_is_classified_without_transport_retry():
+    client = make_client()
+    body = json.dumps({"error": {"code": "context_length_exceeded"}}).encode("utf-8")
+    error = urllib.error.HTTPError(
+        url="https://api.example.test/v1/chat/completions",
+        code=400,
+        msg="Bad Request",
+        hdrs={},
+        fp=FakeErrorBody(body),
+    )
+
+    with pytest.raises(ModelError) as caught:
+        client._raise_http_error(error)
+
+    assert caught.value.category == "context_overflow"
     assert not caught.value.retryable
 
 

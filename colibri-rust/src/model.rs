@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::config::ModelConfig;
 use crate::http::request_json;
-use crate::messages::{Message, ModelLimits, ModelResponse, ToolCall};
+use crate::messages::{Message, ModelLimits, ModelResponse, ModelUsage, ToolCall};
+use crate::time_context::user_text_without_time_context;
 
 const API_TOOL_NAME_MAX_LENGTH: usize = 64;
 
@@ -48,6 +49,7 @@ impl ModelClient for FakeModel {
             return Ok(ModelResponse {
                 text: format!("final: {}", tool_message.content),
                 tool_calls: Vec::new(),
+                ..ModelResponse::default()
             });
         }
         let user_text = messages
@@ -56,15 +58,18 @@ impl ModelClient for FakeModel {
             .find(|message| message.role == "user")
             .map(|message| message.content.as_str())
             .unwrap_or("");
+        let user_text = user_text_without_time_context(user_text);
         if let Some(call) = scripted_tool_call(user_text) {
             return Ok(ModelResponse {
                 text: String::new(),
                 tool_calls: vec![call],
+                ..ModelResponse::default()
             });
         }
         Ok(ModelResponse {
             text: format!("fake: {}", user_text),
             tool_calls: Vec::new(),
+            ..ModelResponse::default()
         })
     }
 
@@ -77,6 +82,7 @@ impl ModelClient for FakeModel {
         Ok(ModelResponse {
             text: format!("fake image: {}", prompt),
             tool_calls: Vec::new(),
+            ..ModelResponse::default()
         })
     }
 }
@@ -115,10 +121,13 @@ impl OpenAiCompatibleModel {
                 Ok(response) if response.status.is_none_or(|status| status < 400) => {
                     return Ok(response.body);
                 }
-                Ok(response) => model_failure_for_status(
-                    response.status.unwrap_or(500),
-                    format!("model request failed: {}", response.body),
-                ),
+                Ok(response) => {
+                    let status = response.status.unwrap_or(500);
+                    model_failure_for_status(
+                        status,
+                        format!("model request failed: {}", response.body),
+                    )
+                }
                 Err(error) => model_failure_for_transport(error),
             };
             if !failure.retryable || attempt >= self.config.max_retries {
@@ -197,6 +206,7 @@ impl ModelFailure {
 
 fn model_failure_for_status(status: u16, message: String) -> ModelFailure {
     let (category, retryable) = match status {
+        400 | 413 if is_context_overflow(&message) => ("context_overflow", false),
         408 => ("timeout", true),
         429 => ("rate_limit", true),
         500..=599 => ("server_error", true),
@@ -324,11 +334,13 @@ fn parse_chat_response(body: &str, tool_names: &ToolNameMap) -> Result<ModelResp
             error
         )
     })?;
-    let message = data
+    let choice = data
         .get("choices")
         .and_then(|choices| choices.as_array())
         .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| "model_error:invalid_response:Model response missing choices".to_string())?;
+    let message = choice
+        .get("message")
         .ok_or_else(|| "model_error:invalid_response:Model response missing choices".to_string())?;
     let text = message
         .get("content")
@@ -345,7 +357,91 @@ fn parse_chat_response(body: &str, tool_names: &ToolNameMap) -> Result<ModelResp
                 .collect()
         })
         .unwrap_or_else(Vec::new);
-    Ok(ModelResponse { text, tool_calls })
+    let stop_reason = choice
+        .get("finish_reason")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    Ok(ModelResponse {
+        text,
+        tool_calls,
+        stop_reason,
+        usage: parse_usage(data.get("usage")),
+    })
+}
+
+fn parse_usage(value: Option<&serde_json::Value>) -> Option<ModelUsage> {
+    let usage = value?.as_object()?;
+    let prompt_details = usage
+        .get("prompt_tokens_details")
+        .and_then(|value| value.as_object());
+    let input_details = usage
+        .get("input_tokens_details")
+        .and_then(|value| value.as_object());
+    let cache_read = first_nonnegative_usize([
+        prompt_details.and_then(|details| details.get("cached_tokens")),
+        input_details.and_then(|details| details.get("cached_tokens")),
+        usage.get("cache_read_input_tokens"),
+        usage.get("cache_read_tokens"),
+        usage.get("cached_tokens"),
+    ]);
+    let cache_write = first_nonnegative_usize([
+        prompt_details.and_then(|details| details.get("cache_write_tokens")),
+        input_details.and_then(|details| details.get("cache_write_tokens")),
+        usage.get("cache_creation_input_tokens"),
+        usage.get("cache_write_input_tokens"),
+        usage.get("cache_write_tokens"),
+    ]);
+    let prompt_tokens =
+        first_nonnegative_usize([usage.get("prompt_tokens"), usage.get("input_tokens")]);
+    let output_tokens =
+        first_nonnegative_usize([usage.get("completion_tokens"), usage.get("output_tokens")]);
+    let total_tokens = first_nonnegative_usize([usage.get("total_tokens")]);
+    if prompt_tokens.is_none()
+        && output_tokens.is_none()
+        && total_tokens.is_none()
+        && cache_read.is_none()
+        && cache_write.is_none()
+    {
+        return None;
+    }
+    let cache_read_tokens = cache_read.unwrap_or(0);
+    let cache_write_tokens = cache_write.unwrap_or(0);
+    let input_tokens = prompt_tokens
+        .unwrap_or(0)
+        .saturating_sub(cache_read_tokens)
+        .saturating_sub(cache_write_tokens);
+    let output_tokens = output_tokens.unwrap_or(0);
+    Some(ModelUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens: total_tokens
+            .unwrap_or(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),
+    })
+}
+
+fn first_nonnegative_usize<const N: usize>(
+    values: [Option<&serde_json::Value>; N],
+) -> Option<usize> {
+    values.into_iter().flatten().find_map(|value| {
+        value
+            .as_u64()
+            .and_then(|number| usize::try_from(number).ok())
+    })
+}
+
+fn is_context_overflow(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "too many tokens",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+        || (lower.contains("input token") && (lower.contains("exceed") || lower.contains("limit")))
 }
 
 fn parse_tool_call(value: &serde_json::Value, tool_names: &ToolNameMap) -> ToolCall {

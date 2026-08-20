@@ -1055,6 +1055,7 @@ mod tests {
             Ok(ModelResponse {
                 text: "recovered".to_string(),
                 tool_calls: Vec::new(),
+                ..ModelResponse::default()
             })
         }
     }

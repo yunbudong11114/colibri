@@ -68,10 +68,21 @@ pub struct ModelLimits {
     pub max_output_tokens: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_read_tokens: usize,
+    pub cache_write_tokens: usize,
+    pub total_tokens: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    pub stop_reason: Option<String>,
+    pub usage: Option<ModelUsage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from colibri.messages import Message
 
 
@@ -97,19 +99,28 @@ def summary_context(summary: str) -> str:
     return f"{SUMMARY_HEADER}\n\n{summary}"
 
 
-def retain_recent_message_groups(messages: list[Message], recent_limit: int) -> list[Message]:
+def retain_recent_message_groups(
+    messages: list[Message],
+    recent_limit: int,
+    recent_token_limit: int | None = None,
+) -> list[Message]:
     if not messages:
         return []
 
     groups = _message_groups(messages)
     kept_reversed: list[list[Message]] = []
     kept_messages = 0
+    kept_tokens = 0
     if recent_limit > 0:
         for group in reversed(groups):
-            if kept_reversed and kept_messages + len(group) > recent_limit:
+            group_tokens = estimate_model_input_tokens(_flatten_groups([group]))
+            exceeds_messages = kept_messages + len(group) > recent_limit
+            exceeds_tokens = recent_token_limit is not None and kept_tokens + group_tokens > recent_token_limit
+            if kept_reversed and (exceeds_messages or exceeds_tokens):
                 break
             kept_reversed.append(group)
             kept_messages += len(group)
+            kept_tokens += group_tokens
 
     kept_groups = list(reversed(kept_reversed))
     latest_user_group = _latest_user_group(groups)
@@ -118,8 +129,26 @@ def retain_recent_message_groups(messages: list[Message], recent_limit: int) -> 
     return _flatten_groups(kept_groups)
 
 
-def estimate_model_input_tokens(messages: list[Message]) -> int:
-    byte_count = sum(len(message.role.encode("utf-8")) + len(message.content.encode("utf-8")) for message in messages)
+def estimate_model_input_tokens(
+    messages: list[Message],
+    *,
+    system: str = "",
+    tools: list[dict] | None = None,
+) -> int:
+    byte_count = len(system.encode("utf-8"))
+    if system:
+        byte_count += len("system")
+    if tools:
+        byte_count += len(json.dumps(tools, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    for message in messages:
+        byte_count += len(message.role.encode("utf-8")) + len(message.content.encode("utf-8"))
+        if message.tool_call_id:
+            byte_count += len(message.tool_call_id.encode("utf-8"))
+        for call in message.tool_calls:
+            byte_count += len(call.id.encode("utf-8")) + len(call.name.encode("utf-8"))
+            byte_count += len(
+                json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            )
     return (byte_count + 3) // 4
 
 

@@ -22,7 +22,7 @@ use colibri_rust::hardware::{
     configured_hardware_devices, probe_hardware_with_roots, serial_json_request, HardwareSimulator,
 };
 use colibri_rust::memory::MemoryContext;
-use colibri_rust::messages::{MediaPart, Message, ModelLimits, ToolCall};
+use colibri_rust::messages::{MediaPart, Message, ModelLimits, ModelUsage, ToolCall};
 use colibri_rust::model::{FakeModel, ModelClient, OpenAiCompatibleModel};
 use colibri_rust::permissions::{
     PermissionPolicy, PermissionPrompter, PermissionRequest, UserGrants, UserPermissionStore,
@@ -31,14 +31,17 @@ use colibri_rust::repl_input::{
     handle_escape_sequence, read_escape_sequence_with, read_repl_line, try_read_line,
     write_raw_tty_newline, ReplLineEditor,
 };
-use colibri_rust::session::AgentSession;
+use colibri_rust::session::{AgentSession, SYSTEM_PROMPT};
 use colibri_rust::session_history::TranscriptHistoryLoader;
 use colibri_rust::skills::{skill_catalog, SkillIndex};
 use colibri_rust::steering::{
     format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
 };
 use colibri_rust::terminal_qr::render_terminal_qr;
-use colibri_rust::tools::{run_tool, tool_info, ToolContext, ToolInfo};
+use colibri_rust::time_context::{
+    append_time_context_to_latest_user, format_time_context, user_text_without_time_context,
+};
+use colibri_rust::tools::{run_tool, tool_info, tool_specs_for_config, ToolContext, ToolInfo};
 use colibri_rust::transcript::TranscriptWriter;
 use colibri_rust::weixin::{
     cleanup_media_directory, decrypt_aes_ecb, download_inbound_media, encrypt_aes_ecb,
@@ -903,6 +906,135 @@ fn session_records_fake_response() {
 }
 
 #[test]
+fn session_injects_transient_current_time_context() {
+    struct CaptureRequestModel {
+        systems: Arc<Mutex<Vec<String>>>,
+        messages: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl ModelClient for CaptureRequestModel {
+        fn complete(
+            &mut self,
+            messages: &[Message],
+            _tools: &[serde_json::Value],
+            system: &str,
+            _limits: &ModelLimits,
+        ) -> Result<colibri_rust::messages::ModelResponse, String> {
+            self.systems.lock().unwrap().push(system.to_string());
+            self.messages.lock().unwrap().push(messages.to_vec());
+            Ok(colibri_rust::messages::ModelResponse {
+                text: "done".to_string(),
+                tool_calls: Vec::new(),
+                ..Default::default()
+            })
+        }
+    }
+
+    let systems = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut config = AgentConfig::default();
+    config.memory.enabled = false;
+    config.session.transcript = false;
+    let mut session = AgentSession::new(
+        config,
+        Box::new(CaptureRequestModel {
+            systems: Arc::clone(&systems),
+            messages: Arc::clone(&requests),
+        }),
+    );
+
+    let response = session.submit("what time is it?").unwrap();
+
+    assert_eq!(response.text, "done");
+    let captured = systems.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0], SYSTEM_PROMPT);
+    drop(captured);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let user_message = captured[0]
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .unwrap();
+    assert!(user_message.content.starts_with("what time is it?"));
+    assert!(user_message.content.contains("\n\n## Current Time\n"));
+    let time_line = user_message.content.lines().last().unwrap();
+    assert_eq!(time_line.len(), 25);
+    assert_eq!(&time_line[4..5], "-");
+    assert_eq!(&time_line[7..8], "-");
+    assert_eq!(&time_line[13..14], ":");
+    assert_eq!(&time_line[16..18], " (");
+    assert_eq!(&time_line[21..22], ":");
+    assert!(session
+        .messages
+        .iter()
+        .all(|message| !message.content.contains("## Current Time")));
+}
+
+#[test]
+fn time_context_formats_offsets_like_python() {
+    assert_eq!(
+        format_time_context("2026-08-13 09:05", "+0800"),
+        "## Current Time\n2026-08-13 09:05 (+08:00)"
+    );
+    assert_eq!(
+        format_time_context("2026-08-12 18:35", "-0730"),
+        "## Current Time\n2026-08-12 18:35 (-07:30)"
+    );
+    assert_eq!(
+        format_time_context("2026-08-13 01:05", "+0000"),
+        "## Current Time\n2026-08-13 01:05 (+00:00)"
+    );
+}
+
+#[test]
+fn time_context_only_changes_active_user_tail_like_python() {
+    let stable_prefix = vec![
+        Message::new("system", "summary"),
+        Message::new("user", "previous question"),
+        Message::new("assistant", "previous answer"),
+    ];
+    let mut first = stable_prefix.clone();
+    first.push(Message::new(
+        "user",
+        "[channel=weixin sender=alice]\ncurrent question",
+    ));
+    let mut second = stable_prefix.clone();
+    second.push(Message::new(
+        "user",
+        "[channel=console sender=bob]\ncurrent question",
+    ));
+
+    assert!(append_time_context_to_latest_user(
+        &mut first,
+        "## Current Time\n2026-08-20 10:00 (+08:00)",
+    ));
+    assert!(append_time_context_to_latest_user(
+        &mut second,
+        "## Current Time\n2026-08-20 10:01 (+08:00)",
+    ));
+
+    assert_eq!(&first[..stable_prefix.len()], stable_prefix.as_slice());
+    assert_eq!(&second[..stable_prefix.len()], stable_prefix.as_slice());
+    assert_ne!(
+        first.last().unwrap().content,
+        second.last().unwrap().content
+    );
+}
+
+#[test]
+fn user_text_without_time_context_requires_valid_runtime_suffix_like_python() {
+    let augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)";
+
+    assert_eq!(user_text_without_time_context(augmented), "hello");
+    assert_eq!(
+        user_text_without_time_context("hello\n\n## Current Time\nnot-runtime-data"),
+        "hello\n\n## Current Time\nnot-runtime-data"
+    );
+}
+
+#[test]
 fn session_returns_failed_turn_and_recovers_like_python() {
     struct FailOnceModel {
         calls: usize,
@@ -923,6 +1055,7 @@ fn session_returns_failed_turn_and_recovers_like_python() {
             Ok(colibri_rust::messages::ModelResponse {
                 text: "recovered".to_string(),
                 tool_calls: Vec::new(),
+                ..Default::default()
             })
         }
     }
@@ -1155,6 +1288,150 @@ fn session_compacts_when_model_input_tokens_reach_threshold_like_python() {
 }
 
 #[test]
+fn session_uses_output_reserve_for_compaction_threshold_like_python() {
+    let mut config = AgentConfig::default();
+    config.session.trigger_message_limit = 99;
+    config.session.recent_message_limit = 2;
+    config.session.model_compact = false;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let old_message = Message::new("user", &"x".repeat(1000));
+    let latest_message = Message::new("user", "latest");
+    let tools = tool_specs_for_config(&config);
+    let estimated = colibri_rust::context::estimate_completion_input_tokens(
+        &[old_message.clone(), latest_message],
+        SYSTEM_PROMPT,
+        &tools,
+    );
+    config.model.input_context_tokens = estimated.saturating_mul(14) / 10;
+    config.model.max_output_tokens = estimated / 2;
+    let mut session = AgentSession::new(config, Box::new(BudgetInspectModel));
+    session.messages.push(old_message);
+
+    let response = session.submit("latest message").unwrap();
+
+    assert_eq!(response.text, "budget ok");
+    assert!(!session.summary.is_empty());
+}
+
+#[test]
+fn session_blocks_length_truncated_tool_call_and_asks_model_again_like_python() {
+    let _guard = env_lock().lock().unwrap();
+    let temp = temp_dir("session-length-tool");
+    let marker = temp.join("should-not-exist");
+    let old = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&temp).unwrap();
+    let mut config = AgentConfig::default();
+    config.tools.default_permission = "allow".to_string();
+    config.memory.enabled = false;
+    config.session.transcript = false;
+    let mut session = AgentSession::new(config, Box::new(LengthToolModel::new(&marker)));
+
+    let response = session.submit("run it").unwrap();
+
+    std::env::set_current_dir(old).unwrap();
+    assert_eq!(response.text, "reissued safely");
+    assert!(!marker.exists());
+    assert!(session.messages.iter().any(|message| {
+        message.role == "tool" && message.content.starts_with("truncated_tool_call:")
+    }));
+}
+
+#[test]
+fn session_records_stop_reason_and_usage_in_transcript_like_python() {
+    let temp = temp_dir("session-model-usage");
+    let transcript_path = temp.join("events.jsonl");
+    let mut config = AgentConfig::default();
+    config.memory.enabled = false;
+    config.session.transcript = true;
+    let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
+    let mut session = AgentSession::from_shared(
+        Arc::new(config),
+        Arc::new(Mutex::new(Box::new(UsageModel) as Box<dyn ModelClient>)),
+        Some(Arc::new(Mutex::new(writer))),
+        BTreeMap::new(),
+    );
+
+    session.submit("hello").unwrap();
+
+    let text = fs::read_to_string(transcript_path).unwrap();
+    assert!(text.contains("\"stop_reason\":\"stop\""));
+    assert!(text.contains("\"total_tokens\":12"));
+}
+
+#[test]
+fn session_uses_reported_usage_as_next_request_anchor_like_python() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let mut config = AgentConfig::default();
+    config.model.input_context_tokens = 200;
+    config.model.max_output_tokens = 80;
+    config.session.trigger_message_limit = 99;
+    config.session.model_compact = false;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    config.skills.max_catalog = 0;
+    config.tools.enabled.clear();
+    let mut session = AgentSession::new(
+        config,
+        Box::new(UsageAnchorModel {
+            calls: Arc::clone(&calls),
+        }),
+    );
+
+    session.submit(&"u".repeat(100)).unwrap();
+    session.submit(&"v".repeat(100)).unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(session.summary, "");
+}
+
+#[test]
+fn session_compacts_and_retries_context_overflow_once_like_python() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let mut config = AgentConfig::default();
+    config.session.trigger_message_limit = 99;
+    config.session.model_compact = false;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(
+        config,
+        Box::new(OverflowModel {
+            calls: Arc::clone(&calls),
+            always: false,
+        }),
+    );
+    session.messages.push(Message::new("user", "old context"));
+
+    let response = session.submit("latest").unwrap();
+
+    assert_eq!(response.text, "recovered after compact");
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert!(!session.summary.is_empty());
+}
+
+#[test]
+fn session_stops_after_second_context_overflow_like_python() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let mut config = AgentConfig::default();
+    config.session.trigger_message_limit = 99;
+    config.session.model_compact = false;
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(
+        config,
+        Box::new(OverflowModel {
+            calls: Arc::clone(&calls),
+            always: true,
+        }),
+    );
+
+    let response = session.submit("latest").unwrap();
+
+    assert_eq!(response.error_type.as_deref(), Some("context_overflow"));
+    assert_eq!(*calls.lock().unwrap(), 2);
+}
+
+#[test]
 fn retain_recent_message_groups_keeps_tool_pairs_intact_like_python() {
     let call = ToolCall {
         id: "call_1".to_string(),
@@ -1194,6 +1471,51 @@ fn retain_recent_message_groups_keeps_tool_pairs_intact_like_python() {
             ("assistant", None),
             ("tool", Some("call_1"))
         ]
+    );
+}
+
+#[test]
+fn token_estimate_includes_system_tools_and_tool_call_arguments_like_python() {
+    let plain =
+        colibri_rust::context::estimate_model_input_tokens(&[Message::new("user", "hello")]);
+    let mut assistant = Message::new("assistant", "");
+    assistant.tool_calls = vec![ToolCall {
+        id: "call_1".to_string(),
+        name: "files.read".to_string(),
+        arguments: serde_json::Map::from_iter([(
+            "path".to_string(),
+            serde_json::Value::String("x".repeat(80)),
+        )]),
+    }];
+    let complete = colibri_rust::context::estimate_completion_input_tokens(
+        &[assistant],
+        "system prompt",
+        &[serde_json::json!({
+            "type":"function",
+            "function":{"name":"files.read","description":"x".repeat(80)}
+        })],
+    );
+
+    assert!(complete > plain);
+}
+
+#[test]
+fn retain_recent_message_groups_respects_token_limit_and_latest_user_like_python() {
+    let messages = vec![
+        Message::new("user", &format!("old {}", "x".repeat(80))),
+        Message::new("assistant", &format!("old answer {}", "y".repeat(80))),
+        Message::new("user", "latest request"),
+        Message::new("assistant", "latest answer"),
+    ];
+
+    let kept =
+        colibri_rust::context::retain_recent_message_groups_with_token_limit(messages, 4, Some(8));
+
+    assert_eq!(
+        kept.iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["latest request", "latest answer"]
     );
 }
 
@@ -2470,6 +2792,50 @@ commands:
 }
 
 #[test]
+fn skill_run_bounds_large_output_and_preserves_tail_like_python() {
+    let temp = temp_dir("skill-run-bounded-output");
+    let skill = temp.join("skills/release");
+    fs::create_dir_all(skill.join("scripts")).unwrap();
+    fs::write(
+        skill.join("scripts/render.sh"),
+        "printf HEAD; i=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done; printf TAIL\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name: release
+description: Release helper
+commands:
+  - name: render
+    command: sh
+    args: [scripts/render.sh]
+    read_only: false
+---
+"#,
+    )
+    .unwrap();
+    let mut config = AgentConfig::default();
+    config.skills.dir = temp.join("skills");
+    config.tools.max_result_chars = 120;
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool(
+        "skill.run",
+        r#"{"skill":"release","command":"render"}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert!(result.ok);
+    assert!(result.truncated);
+    assert!(result.text.chars().count() <= 120);
+    assert!(result.text.starts_with("HEAD"));
+    assert!(result.text.ends_with("TAIL"));
+    assert!(result.text.contains("...[truncated]..."));
+}
+
+#[test]
 fn skill_catalog_includes_builtin_and_local_like_python() {
     let temp = temp_dir("builtin-skill");
     let skill_dir = temp.join("skills/release");
@@ -2712,6 +3078,84 @@ fn openai_compatible_serializes_and_parses_tool_calls() {
     assert!(body.contains("\"tool_calls\""));
     assert!(body.contains("\"files_read\""));
     assert!(body.contains("\"tools\""));
+}
+
+#[test]
+fn openai_compatible_parses_finish_reason_and_usage() {
+    let _guard = env_lock().lock().unwrap();
+    let server = start_http_server(|_base_url, _requests| {
+        |_request| {
+            TestHttpResponse::json(
+                r#"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}],"usage":{"prompt_tokens":120,"completion_tokens":20,"total_tokens":140,"prompt_tokens_details":{"cached_tokens":30,"cache_write_tokens":10}}}"#,
+            )
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.api_key = "test-key".to_string();
+    config.base_url = server.base_url;
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+
+    let response = model
+        .complete(
+            &[Message::new("user", "hello")],
+            &[],
+            "",
+            &ModelLimits {
+                timeout_seconds: 5,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(response.stop_reason.as_deref(), Some("length"));
+    assert_eq!(
+        response.usage,
+        Some(ModelUsage {
+            input_tokens: 80,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 10,
+            total_tokens: 140,
+        })
+    );
+}
+
+#[test]
+fn openai_compatible_classifies_context_overflow_without_retry() {
+    let attempts = Arc::new(Mutex::new(0usize));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = start_http_server(move |_base_url, _requests| {
+        move |_request| {
+            *attempts_for_handler.lock().unwrap() += 1;
+            TestHttpResponse {
+                status: 400,
+                headers: Vec::new(),
+                body: br#"{"error":{"code":"context_length_exceeded"}}"#.to_vec(),
+            }
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.api_key = "test-key".to_string();
+    config.base_url = server.base_url;
+    config.max_retries = 2;
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+
+    let error = model
+        .complete(
+            &[Message::new("user", "hello")],
+            &[],
+            "",
+            &ModelLimits {
+                timeout_seconds: 5,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.contains("model_error:context_overflow:"));
+    assert_eq!(*attempts.lock().unwrap(), 1);
 }
 
 #[test]
@@ -3641,6 +4085,28 @@ fn shell_timeout_terminates_without_waiting_for_natural_exit_like_python() {
         "timeout returned too late: {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn shell_run_bounds_large_output_and_preserves_tail_like_python() {
+    let temp = temp_dir("shell-bounded-output");
+    let mut config = AgentConfig::default();
+    config.tools.max_result_chars = 120;
+    let context = ToolContext::new(config, temp);
+
+    let result = run_tool(
+        "shell.run",
+        r#"{"command":"printf HEAD; i=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done; printf TAIL"}"#,
+        &context,
+    )
+    .unwrap();
+
+    assert!(result.ok);
+    assert!(result.truncated);
+    assert!(result.text.chars().count() <= 120);
+    assert!(result.text.starts_with("HEAD"));
+    assert!(result.text.ends_with("TAIL"));
+    assert!(result.text.contains("...[truncated]..."));
 }
 
 #[test]
@@ -4932,6 +5398,7 @@ impl ModelClient for PermissionRoundModel {
             return Ok(colibri_rust::messages::ModelResponse {
                 text: "done".to_string(),
                 tool_calls: Vec::new(),
+                ..Default::default()
             });
         }
         Ok(colibri_rust::messages::ModelResponse {
@@ -4944,6 +5411,7 @@ impl ModelClient for PermissionRoundModel {
                     serde_json::Value::String("pwd".to_string()),
                 )]),
             }],
+            ..Default::default()
         })
     }
 }
@@ -4974,11 +5442,13 @@ impl ModelClient for CompactScriptModel {
                 text: "<analysis>private reasoning</analysis><summary>important compacted context</summary>"
                     .to_string(),
                 tool_calls: Vec::new(),
+                ..Default::default()
             });
         }
         Ok(colibri_rust::messages::ModelResponse {
             text: "done".to_string(),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -5008,6 +5478,7 @@ impl ModelClient for FailingCompactModel {
         Ok(colibri_rust::messages::ModelResponse {
             text: format!("ok-{}", self.calls),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -5042,6 +5513,7 @@ impl ModelClient for AlwaysToolModel {
                     map
                 },
             }],
+            ..Default::default()
         })
     }
 }
@@ -5059,6 +5531,7 @@ impl ModelClient for PlainTextModel {
         Ok(colibri_rust::messages::ModelResponse {
             text: "done".to_string(),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -5102,11 +5575,13 @@ impl ModelClient for TwoToolsThenTextModel {
                         arguments: args,
                     },
                 ],
+                ..Default::default()
             });
         }
         Ok(colibri_rust::messages::ModelResponse {
             text: "steered-ok".to_string(),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -5136,16 +5611,142 @@ impl ModelClient for SteerDuringTextOnlyModel {
             return Ok(colibri_rust::messages::ModelResponse {
                 text: "almost done".to_string(),
                 tool_calls: Vec::new(),
+                ..Default::default()
             });
         }
         Ok(colibri_rust::messages::ModelResponse {
             text: "steered-ok".to_string(),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
 
 struct BudgetInspectModel;
+
+struct LengthToolModel {
+    calls: usize,
+    marker: String,
+}
+
+impl LengthToolModel {
+    fn new(marker: &Path) -> Self {
+        Self {
+            calls: 0,
+            marker: marker.display().to_string(),
+        }
+    }
+}
+
+impl ModelClient for LengthToolModel {
+    fn complete(
+        &mut self,
+        messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "partial".to_string(),
+                tool_calls: vec![ToolCall {
+                    id: "truncated-call".to_string(),
+                    name: "shell.run".to_string(),
+                    arguments: serde_json::Map::from_iter([(
+                        "command".to_string(),
+                        serde_json::Value::String(format!("printf ran > {}", self.marker)),
+                    )]),
+                }],
+                stop_reason: Some("length".to_string()),
+                usage: None,
+            });
+        }
+        assert!(messages
+            .last()
+            .is_some_and(|message| message.content.starts_with("truncated_tool_call:")));
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "reissued safely".to_string(),
+            stop_reason: Some("stop".to_string()),
+            ..Default::default()
+        })
+    }
+}
+
+struct UsageModel;
+
+impl ModelClient for UsageModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "done".to_string(),
+            stop_reason: Some("stop".to_string()),
+            usage: Some(ModelUsage {
+                input_tokens: 8,
+                output_tokens: 4,
+                total_tokens: 12,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+}
+
+struct UsageAnchorModel {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl ModelClient for UsageAnchorModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "a".repeat(100),
+            usage: Some(ModelUsage {
+                input_tokens: 8,
+                output_tokens: 2,
+                total_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+}
+
+struct OverflowModel {
+    calls: Arc<Mutex<usize>>,
+    always: bool,
+}
+
+impl ModelClient for OverflowModel {
+    fn complete(
+        &mut self,
+        _messages: &[Message],
+        _tools: &[serde_json::Value],
+        _system: &str,
+        _limits: &ModelLimits,
+    ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if self.always || *calls == 1 {
+            return Err("model_error:context_overflow:too many tokens".to_string());
+        }
+        Ok(colibri_rust::messages::ModelResponse {
+            text: "recovered after compact".to_string(),
+            ..Default::default()
+        })
+    }
+}
 
 impl ModelClient for BudgetInspectModel {
     fn complete(
@@ -5155,15 +5756,15 @@ impl ModelClient for BudgetInspectModel {
         _system: &str,
         _limits: &ModelLimits,
     ) -> Result<colibri_rust::messages::ModelResponse, String> {
-        assert!(messages
-            .iter()
-            .any(|message| message.role == "user" && message.content == "latest message"));
+        assert!(messages.iter().any(|message| message.role == "user"
+            && user_text_without_time_context(&message.content) == "latest message"));
         assert!(!messages
             .iter()
             .any(|message| { message.role == "user" && message.content.starts_with("old user") }));
         Ok(colibri_rust::messages::ModelResponse {
             text: "budget ok".to_string(),
             tool_calls: Vec::new(),
+            ..Default::default()
         })
     }
 }
@@ -5193,6 +5794,7 @@ impl ModelClient for RepeatedBudgetPressureModel {
             return Ok(colibri_rust::messages::ModelResponse {
                 text: "stopped bulk read".to_string(),
                 tool_calls: Vec::new(),
+                ..Default::default()
             });
         }
         Ok(colibri_rust::messages::ModelResponse {
@@ -5202,6 +5804,7 @@ impl ModelClient for RepeatedBudgetPressureModel {
                 name: "unknown.tool".to_string(),
                 arguments: serde_json::Map::new(),
             }],
+            ..Default::default()
         })
     }
 }

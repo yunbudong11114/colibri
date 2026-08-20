@@ -2,7 +2,7 @@ from pathlib import Path
 
 from colibri.config import AgentConfig
 from colibri.media import MediaPart
-from colibri.messages import Message, ModelResponse, ToolCall
+from colibri.messages import Message, ModelResponse, ModelUsage, ToolCall
 from colibri.model.fake import FakeModelClient
 from colibri.model.errors import ModelError
 from colibri.permissions_store import UserPermissionStore
@@ -175,6 +175,43 @@ def test_system_prompt_has_sentence_spacing():
     assert "memory.search" not in SYSTEM_PROMPT
     assert "Create or edit files" not in SYSTEM_PROMPT
     assert "files.write" not in SYSTEM_PROMPT
+
+
+def test_session_injects_transient_current_time_context():
+    class CaptureRequestModel:
+        def __init__(self):
+            self.systems: list[str] = []
+            self.messages: list[list[Message]] = []
+
+        def complete(self, messages, tools, system, limits):
+            self.systems.append(system)
+            self.messages.append(list(messages))
+            return ModelResponse(text="done")
+
+    model = CaptureRequestModel()
+    config = AgentConfig.default().with_overrides(
+        {"memory": {"enabled": False}, "session": {"transcript": False}}
+    )
+    session = AgentSession(config=config, model=model)
+
+    response = session.submit("what time is it?")
+
+    assert response.text == "done"
+    assert len(model.systems) == 1
+    assert model.systems[0] == SYSTEM_PROMPT
+    user_message = next(
+        message for message in reversed(model.messages[0]) if message.role == "user"
+    )
+    assert user_message.content.startswith("what time is it?")
+    assert "\n\n## Current Time\n" in user_message.content
+    time_line = user_message.content.splitlines()[-1]
+    assert len(time_line) == 25
+    assert time_line[4] == "-"
+    assert time_line[7] == "-"
+    assert time_line[13] == ":"
+    assert time_line[16:18] == " ("
+    assert time_line[21] == ":"
+    assert all("## Current Time" not in message.content for message in session.messages)
 
 
 def test_session_keeps_only_recent_messages():
@@ -456,6 +493,126 @@ def test_session_compacts_when_model_input_tokens_reach_threshold():
     assert not any(message.content.startswith("old user") for message in model.first_messages)
     compact_events = [payload for event_type, payload in transcript.events if event_type == "context_compact"]
     assert compact_events
+
+
+def test_session_uses_output_reserve_for_compaction_threshold():
+    config = AgentConfig.default().with_overrides(
+        {
+            "model": {"input_context_tokens": 500, "max_output_tokens": 200},
+            "session": {"trigger_message_limit": 99, "recent_message_limit": 2, "model_compact": False},
+            "memory": {"enabled": False},
+        }
+    )
+    transcript = MemoryTranscript()
+    session = AgentSession(config=config, model=BudgetAwareModel(), transcript=transcript)
+    session.messages = [Message(role="user", content="x" * 1000)]
+
+    session.submit("latest")
+
+    compact = next(payload for event_type, payload in transcript.events if event_type == "context_compact")
+    assert compact["reason"] == "threshold"
+
+
+def test_session_blocks_length_truncated_tool_call_and_asks_model_again(tmp_path):
+    tool = CountingTool()
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=AgentConfig.default().with_overrides({"memory": {"enabled": False}}),
+        model=LengthToolModel(),
+        tools=ToolRegistry([tool], cwd=tmp_path),
+        transcript=transcript,
+    )
+
+    response = session.submit("run it")
+
+    assert response.text == "reissued safely"
+    assert tool.calls == 0
+    truncated = next(
+        payload
+        for event_type, payload in transcript.events
+        if event_type == "tool_result" and payload["error_type"] == "truncated_tool_call"
+    )
+    assert truncated["id"] == "truncated-call"
+
+
+def test_session_records_stop_reason_and_usage_in_transcript():
+    transcript = MemoryTranscript()
+    session = AgentSession(
+        config=AgentConfig.default().with_overrides({"memory": {"enabled": False}}),
+        model=UsageModel(),
+        transcript=transcript,
+    )
+
+    session.submit("hello")
+
+    event = next(payload for event_type, payload in transcript.events if event_type == "assistant_message")
+    assert event["stop_reason"] == "stop"
+    assert event["usage"]["total_tokens"] == 12
+
+
+def test_session_uses_reported_usage_as_next_request_anchor():
+    config = AgentConfig.default().with_overrides(
+        {
+            "model": {"input_context_tokens": 200, "max_output_tokens": 80},
+            "session": {"trigger_message_limit": 99, "model_compact": False},
+            "memory": {"enabled": False},
+            "skills": {"max_catalog": 0},
+            "tools": {"enabled": []},
+        }
+    )
+    model = UsageAnchorModel()
+    session = AgentSession(
+        config=config,
+        model=model,
+        tools=ToolRegistry([], cwd=Path.cwd()),
+    )
+
+    session.submit("u" * 100)
+    session.submit("v" * 100)
+
+    assert model.calls == 2
+    assert session.summary == ""
+
+
+def test_session_compacts_and_retries_context_overflow_once():
+    transcript = MemoryTranscript()
+    model = OverflowOnceModel()
+    session = AgentSession(
+        config=AgentConfig.default().with_overrides(
+            {
+                "session": {"trigger_message_limit": 99, "model_compact": False},
+                "memory": {"enabled": False},
+            }
+        ),
+        model=model,
+        transcript=transcript,
+    )
+    session.messages = [Message(role="user", content="old context")]
+
+    response = session.submit("latest")
+
+    assert response.text == "recovered after compact"
+    assert model.calls == 2
+    compact = next(payload for event_type, payload in transcript.events if event_type == "context_compact")
+    assert compact["reason"] == "overflow"
+
+
+def test_session_stops_after_second_context_overflow():
+    model = AlwaysOverflowModel()
+    session = AgentSession(
+        config=AgentConfig.default().with_overrides(
+            {
+                "session": {"trigger_message_limit": 99, "model_compact": False},
+                "memory": {"enabled": False},
+            }
+        ),
+        model=model,
+    )
+
+    response = session.submit("latest")
+
+    assert response.error_type == "context_overflow"
+    assert model.calls == 2
 
 
 def test_tool_result_context_keeps_large_success_text_for_model(tmp_path):
@@ -1138,6 +1295,63 @@ class BudgetAwareModel:
         self.calls += 1
         self.first_messages = list(messages)
         return ModelResponse(text=f"budget {self.calls}")
+
+
+class LengthToolModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text="partial",
+                tool_calls=[ToolCall(id="truncated-call", name="counting.tool", arguments={})],
+                stop_reason="length",
+            )
+        assert messages[-1].content.startswith("truncated_tool_call:")
+        return ModelResponse(text="reissued safely", stop_reason="stop")
+
+
+class UsageModel:
+    def complete(self, messages, tools, system, limits):
+        return ModelResponse(
+            text="done",
+            stop_reason="stop",
+            usage=ModelUsage(input_tokens=8, output_tokens=4, total_tokens=12),
+        )
+
+
+class UsageAnchorModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        return ModelResponse(
+            text="a" * 100,
+            usage=ModelUsage(input_tokens=8, output_tokens=2, total_tokens=10),
+        )
+
+
+class OverflowOnceModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        if self.calls == 1:
+            raise ModelError("too many tokens", category="context_overflow")
+        return ModelResponse(text="recovered after compact")
+
+
+class AlwaysOverflowModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools, system, limits):
+        self.calls += 1
+        raise ModelError("too many tokens", category="context_overflow")
 
 
 class CompactAwareModel:

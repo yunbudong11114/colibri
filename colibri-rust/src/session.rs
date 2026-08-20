@@ -1,7 +1,9 @@
 use crate::config::AgentConfig;
 use crate::context::{
-    append_summary, compact_prompt_message, format_model_summary, retain_recent_message_groups,
-    round_limit_text, summarize_messages, summary_context, COMPACT_SYSTEM_PROMPT,
+    append_summary, compact_prompt_message, estimate_completion_input_tokens,
+    estimate_model_input_tokens, format_model_summary,
+    retain_recent_message_groups_with_token_limit, round_limit_text, summarize_messages,
+    summary_context, COMPACT_SYSTEM_PROMPT,
 };
 use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
@@ -10,15 +12,24 @@ use crate::permissions::{PermissionPolicy, PermissionPrompter};
 use crate::runtime_reload::RuntimeSnapshot;
 use crate::skills::skill_catalog;
 use crate::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
+use crate::time_context::{append_time_context_to_latest_user, current_time_context};
 use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
 use crate::transcript::TranscriptWriter;
 use crate::vision::analyze_image;
 use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
 pub const MODEL_UNAVAILABLE_TEXT: &str = "模型暂时不可用，请检查网络后重试。";
+pub const TRUNCATED_TOOL_CALL_TEXT: &str = "Tool call was truncated because the model reached its output limit; retry the call with complete arguments.";
+
+struct UsageAnchor {
+    total_tokens: usize,
+    message_count: usize,
+    prefix_fingerprint: u64,
+}
 
 pub struct AgentSession {
     pub config: Arc<AgentConfig>,
@@ -35,6 +46,7 @@ pub struct AgentSession {
     permission_policy: PermissionPolicy,
     steering: Arc<SteeringState>,
     steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    usage_anchor: Option<UsageAnchor>,
 }
 
 impl AgentSession {
@@ -79,6 +91,7 @@ impl AgentSession {
             permission_policy,
             steering: Arc::new(SteeringState::new()),
             steer_notifier: None,
+            usage_anchor: None,
         }
     }
 
@@ -160,6 +173,7 @@ impl AgentSession {
     ) {
         self.config = config;
         self.model = model;
+        self.usage_anchor = None;
     }
 
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
@@ -244,25 +258,43 @@ impl AgentSession {
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
-            let model_messages = self.model_messages_for_completion(memory_text, skill_text);
-            let response_result = {
-                let mut model = self
-                    .model
-                    .lock()
-                    .map_err(|_| "model lock poisoned".to_string())?;
-                model.complete(
-                    &model_messages,
-                    tools,
-                    SYSTEM_PROMPT,
-                    &ModelLimits {
-                        timeout_seconds: self.config.model.timeout_seconds,
-                        max_output_tokens: self.config.model.max_output_tokens,
-                    },
-                )
-            };
-            let response = match response_result {
-                Ok(response) => response,
-                Err(error) => return Ok(self.finish_model_error(&error)),
+            let mut model_messages =
+                self.model_messages_for_completion(memory_text, skill_text, tools);
+            let mut overflow_retried = false;
+            let response = loop {
+                let mut request_messages = model_messages.clone();
+                append_time_context_to_latest_user(&mut request_messages, &current_time_context());
+                let response_result = {
+                    let mut model = self
+                        .model
+                        .lock()
+                        .map_err(|_| "model lock poisoned".to_string())?;
+                    model.complete(
+                        &request_messages,
+                        tools,
+                        SYSTEM_PROMPT,
+                        &ModelLimits {
+                            timeout_seconds: self.config.model.timeout_seconds,
+                            max_output_tokens: self.config.model.max_output_tokens,
+                        },
+                    )
+                };
+                match response_result {
+                    Ok(response) => break response,
+                    Err(error)
+                        if model_error_category(&error) == "context_overflow"
+                            && !overflow_retried =>
+                    {
+                        overflow_retried = true;
+                        self.write_transcript(
+                            "model_error",
+                            serde_json::json!({"error_type":"context_overflow","message":error}),
+                        );
+                        self.compact_now("overflow");
+                        model_messages = self.model_messages(memory_text, skill_text);
+                    }
+                    Err(error) => return Ok(self.finish_model_error(&error)),
+                }
             };
             let assistant_text = bound_text(&response.text, self.config.tools.max_result_chars);
             let mut assistant = Message::new("assistant", &assistant_text);
@@ -270,8 +302,22 @@ impl AgentSession {
             self.messages.push(assistant);
             self.write_transcript(
                 "assistant_message",
-                serde_json::json!({"text":assistant_text,"tool_call_count":response.tool_calls.len()}),
+                serde_json::json!({
+                    "text":assistant_text,
+                    "tool_call_count":response.tool_calls.len(),
+                    "stop_reason":response.stop_reason,
+                    "usage":usage_payload(&response)
+                }),
             );
+            self.update_usage_anchor(&response, memory_text, skill_text, tools);
+
+            if response.stop_reason.as_deref() == Some("length") && !response.tool_calls.is_empty()
+            {
+                for call in &response.tool_calls {
+                    self.record_truncated_tool_call(call);
+                }
+                continue;
+            }
 
             if response.tool_calls.is_empty() {
                 if let Some(steered) = self.steering.drain_one() {
@@ -327,6 +373,8 @@ impl AgentSession {
             serde_json::json!({
                 "text":MODEL_UNAVAILABLE_TEXT,
                 "tool_call_count":0,
+                "stop_reason":serde_json::Value::Null,
+                "usage":serde_json::Value::Null,
                 "model_error":category
             }),
         );
@@ -420,6 +468,25 @@ impl AgentSession {
         Ok(())
     }
 
+    fn record_truncated_tool_call(&mut self, call: &ToolCall) {
+        self.write_transcript(
+            "tool_result",
+            serde_json::json!({
+                "id":call.id,
+                "name":call.name,
+                "ok":false,
+                "error_type":"truncated_tool_call",
+                "text":TRUNCATED_TOOL_CALL_TEXT,
+                "truncated":false,
+                "media":serde_json::Value::Null
+            }),
+        );
+        self.messages.push(Message::tool(
+            &format!("truncated_tool_call: {}", TRUNCATED_TOOL_CALL_TEXT),
+            &call.id,
+        ));
+    }
+
     fn record_skipped_tool(&mut self, call: &ToolCall) {
         self.write_transcript(
             "tool_result",
@@ -496,8 +563,9 @@ impl AgentSession {
         &mut self,
         memory_text: &str,
         skill_text: &str,
+        tools: &[serde_json::Value],
     ) -> Vec<Message> {
-        self.compact_for_completion_if_needed(memory_text, skill_text);
+        self.compact_for_completion_if_needed(memory_text, skill_text, tools);
         self.model_messages(memory_text, skill_text)
     }
 
@@ -517,45 +585,51 @@ impl AgentSession {
         messages
     }
 
-    /// Estimate tokens without cloning messages / tool_calls JSON.
-    fn estimate_completion_input_tokens(&self, memory_text: &str, skill_text: &str) -> usize {
-        let mut byte_count = 0usize;
-        let summary_text = summary_context(&self.summary);
-        if !summary_text.is_empty() {
-            byte_count += "system".len() + summary_text.len();
+    fn estimate_completion_input_tokens(
+        &self,
+        memory_text: &str,
+        skill_text: &str,
+        tools: &[serde_json::Value],
+    ) -> usize {
+        let fingerprint = self.completion_prefix_fingerprint(memory_text, skill_text, tools);
+        if let Some(anchor) = &self.usage_anchor {
+            if anchor.prefix_fingerprint == fingerprint
+                && anchor.message_count <= self.messages.len()
+            {
+                return anchor
+                    .total_tokens
+                    .saturating_add(estimate_model_input_tokens(
+                        &self.messages[anchor.message_count..],
+                    ));
+            }
         }
-        if !memory_text.is_empty() {
-            byte_count += "system".len() + memory_text.len();
-        }
-        if !skill_text.is_empty() {
-            byte_count += "system".len() + skill_text.len();
-        }
-        for message in &self.messages {
-            byte_count += message.role.len() + message.content.len();
-        }
-        (byte_count + 3) / 4
+        estimate_completion_input_tokens(
+            &self.model_messages(memory_text, skill_text),
+            SYSTEM_PROMPT,
+            tools,
+        )
     }
 
-    fn compact_for_completion_if_needed(&mut self, memory_text: &str, skill_text: &str) {
+    fn compact_for_completion_if_needed(
+        &mut self,
+        memory_text: &str,
+        skill_text: &str,
+        tools: &[serde_json::Value],
+    ) {
         let trigger_limit = self.config.session.trigger_message_limit.max(1);
-        let token_limit = self.config.model.input_context_tokens;
-        let token_threshold = if token_limit == 0 {
-            0
-        } else {
-            token_limit.saturating_mul(8) / 10
-        };
+        let token_threshold = self.compaction_token_threshold();
         let mut should_compact = self.messages.len() >= trigger_limit;
         if !should_compact && token_threshold > 0 {
-            should_compact =
-                self.estimate_completion_input_tokens(memory_text, skill_text) >= token_threshold;
+            should_compact = self.estimate_completion_input_tokens(memory_text, skill_text, tools)
+                >= token_threshold;
         }
         if !should_compact || self.messages.is_empty() {
             return;
         }
-        self.compact_now();
+        self.compact_now("threshold");
     }
 
-    fn compact_now(&mut self) {
+    fn compact_now(&mut self, reason: &str) {
         if self.messages.is_empty() {
             return;
         }
@@ -567,10 +641,14 @@ impl AgentSession {
             &addition,
             self.config.session.summary_max_chars,
         );
-        self.messages = retain_recent_message_groups(
+        let token_threshold = self.compaction_token_threshold();
+        let recent_token_limit = (token_threshold > 0).then_some((token_threshold / 2).max(1));
+        self.messages = retain_recent_message_groups_with_token_limit(
             messages_to_compact,
             self.config.session.recent_message_limit,
+            recent_token_limit,
         );
+        self.usage_anchor = None;
         self.write_transcript(
             "context_compact",
             serde_json::json!({
@@ -578,9 +656,59 @@ impl AgentSession {
                 "compacted_messages": compacted_len,
                 "kept_messages": self.messages.len(),
                 "mode": mode,
+                "reason": reason,
                 "summary_chars": self.summary.chars().count()
             }),
         );
+    }
+
+    fn compaction_token_threshold(&self) -> usize {
+        let context_tokens = self.config.model.input_context_tokens;
+        if context_tokens == 0 {
+            return 0;
+        }
+        let output_reserve = self.config.model.max_output_tokens.min(context_tokens / 2);
+        context_tokens.saturating_sub(output_reserve).max(1)
+    }
+
+    fn completion_prefix_fingerprint(
+        &self,
+        memory_text: &str,
+        skill_text: &str,
+        tools: &[serde_json::Value],
+    ) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.config.model.provider.hash(&mut hasher);
+        self.config.model.base_url.hash(&mut hasher);
+        self.config.model.model.hash(&mut hasher);
+        SYSTEM_PROMPT.hash(&mut hasher);
+        summary_context(&self.summary).hash(&mut hasher);
+        memory_text.hash(&mut hasher);
+        skill_text.hash(&mut hasher);
+        serde_json::to_string(tools)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn update_usage_anchor(
+        &mut self,
+        response: &crate::messages::ModelResponse,
+        memory_text: &str,
+        skill_text: &str,
+        tools: &[serde_json::Value],
+    ) {
+        let Some(usage) = &response.usage else {
+            return;
+        };
+        if usage.total_tokens == 0 {
+            return;
+        }
+        self.usage_anchor = Some(UsageAnchor {
+            total_tokens: usage.total_tokens,
+            message_count: self.messages.len(),
+            prefix_fingerprint: self.completion_prefix_fingerprint(memory_text, skill_text, tools),
+        });
     }
 
     fn compact_messages(&mut self, messages: &[Message]) -> (String, String) {
@@ -668,6 +796,19 @@ fn model_error_category(error: &str) -> &str {
         .map(|(category, _)| category)
         .filter(|category| !category.is_empty())
         .unwrap_or("invalid_response")
+}
+
+fn usage_payload(response: &crate::messages::ModelResponse) -> serde_json::Value {
+    let Some(usage) = &response.usage else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "input_tokens":usage.input_tokens,
+        "output_tokens":usage.output_tokens,
+        "cache_read_tokens":usage.cache_read_tokens,
+        "cache_write_tokens":usage.cache_write_tokens,
+        "total_tokens":usage.total_tokens
+    })
 }
 
 fn owned_transcript(config: &AgentConfig) -> Option<Arc<Mutex<TranscriptWriter>>> {

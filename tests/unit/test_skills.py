@@ -205,6 +205,48 @@ def test_skill_run_executes_declared_local_command(tmp_path):
     assert result.text.strip() == "rendered"
 
 
+def test_skill_run_bounds_large_output_and_preserves_tail(tmp_path):
+    import sys
+
+    skill_dir = tmp_path / "skills" / "release"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "render.py").write_text(
+        "import sys\nsys.stdout.write('HEAD' + 'x' * 5000 + 'TAIL')\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "SKILL.md").write_text(
+        skill_document(
+            "release",
+            commands=f"""commands:
+  - name: render
+    command: {sys.executable}
+    args: [scripts/render.py]
+    read_only: false
+""",
+        ),
+        encoding="utf-8",
+    )
+    config = AgentConfig.default().with_overrides(
+        {
+            "skills": {"dir": str(tmp_path / "skills")},
+            "tools": {"max_result_chars": 120, "max_shell_seconds": 2},
+        }
+    )
+
+    result = SkillRunTool().run(
+        {"skill": "release", "command": "render"},
+        ToolContext(config=config, cwd=tmp_path),
+    )
+
+    assert result.ok
+    assert result.truncated
+    assert len(result.text) <= 120
+    assert result.text.startswith("HEAD")
+    assert result.text.endswith("TAIL")
+    assert "...[truncated]..." in result.text
+
+
 def test_skill_run_rejects_missing_command(tmp_path):
     skill_dir = tmp_path / "skills" / "release"
     skill_dir.mkdir(parents=True)

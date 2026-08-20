@@ -144,7 +144,7 @@ class ModelConfig:
     timeout_seconds: int = 60
     # 单次模型回复最大输出 token 数。
     max_output_tokens: int = 16384
-    # 模型输入上下文 token 上限；达到 80% 时触发历史压缩。
+    # 模型输入上下文 token 上限；运行时预留输出 token 后触发历史压缩。
     input_context_tokens: int = 48000
     # 单次模型请求失败后的最大重试次数；0 表示不重试。
     max_retries: int = 2

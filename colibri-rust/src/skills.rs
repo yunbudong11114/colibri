@@ -7,6 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
+use crate::process_output::{run_bounded_command, CommandRunError};
 use crate::tools::ToolContext;
 use serde::Deserialize;
 
@@ -130,8 +131,7 @@ impl SkillIndex {
                 let Ok(first_text) = fs::read_to_string(&skill_file) else {
                     continue;
                 };
-                let Some((description, commands)) = parse_skill_document(&first_text, &name)
-                else {
+                let Some((description, commands)) = parse_skill_document(&first_text, &name) else {
                     continue;
                 };
                 skills.push(SkillMetadata {
@@ -315,27 +315,25 @@ pub fn run_skill_command(args: &BTreeMap<String, String>, context: &ToolContext)
     argv.extend(extra_args);
     let mut child = Command::new(&command.command);
     child.args(&argv).current_dir(&skill.root);
-    let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.001));
-    match run_command_with_timeout(child, timeout) {
-        Ok((status, stdout, stderr)) => {
-            let text = if stdout.is_empty() { stderr } else { stdout };
-            let (bounded, truncated) = truncate_result(text, context.config.tools.max_result_chars);
-            if status {
-                let mut result = ToolResult::ok(bounded);
-                result.truncated = truncated;
+    let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.0));
+    match run_bounded_command(child, timeout, context.config.tools.max_result_chars) {
+        Ok(output) => {
+            if output.success {
+                let mut result = ToolResult::ok(output.text);
+                result.truncated = output.truncated;
                 result
             } else {
-                let mut result = ToolResult::error("tool_error", bounded);
-                result.truncated = truncated;
+                let mut result = ToolResult::error("tool_error", output.text);
+                result.truncated = output.truncated;
                 result
             }
         }
-        Err(error) if error == "timeout" => {
+        Err(CommandRunError::Timeout) => {
             let mut result = ToolResult::error("timeout", "Skill command timed out");
             result.truncated = false;
             result
         }
-        Err(error) => ToolResult::error("tool_error", error),
+        Err(CommandRunError::Io(error)) => ToolResult::error("tool_error", error),
     }
 }
 
@@ -355,14 +353,6 @@ fn parse_string_list_arg(raw: Option<&String>) -> Vec<String> {
     }
 }
 
-fn truncate_result(text: String, max_chars: usize) -> (String, bool) {
-    if text.chars().count() <= max_chars {
-        (text, false)
-    } else {
-        (bound_skill_text(&text, max_chars), true)
-    }
-}
-
 fn bound_skill_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -370,45 +360,6 @@ fn bound_skill_text(text: &str, max_chars: usize) -> String {
     let suffix = "\n...[truncated]";
     let keep = max_chars.saturating_sub(suffix.chars().count());
     text.chars().take(keep).collect::<String>() + suffix
-}
-
-fn run_command_with_timeout(
-    mut command: Command,
-    timeout: Duration,
-) -> Result<(bool, String, String), String> {
-    use std::io::Read;
-    use std::process::Stdio;
-
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_string(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_string(&mut stderr);
-                }
-                return Ok((status.success(), stdout, stderr));
-            }
-            Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("timeout".to_string());
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
 }
 
 fn dir_fingerprint(skill_dir: &Path) -> Vec<(String, Option<u128>)> {
@@ -451,8 +402,7 @@ fn file_mtime(path: &Path) -> Option<u128> {
 fn builtin_skills() -> Vec<SkillMetadata> {
     let name = "create-colibri-skill".to_string();
     let root = PathBuf::from("builtin");
-    let Some((description, commands)) =
-        parse_skill_document(CREATE_COLIBRI_SKILL_CONTENT, &name)
+    let Some((description, commands)) = parse_skill_document(CREATE_COLIBRI_SKILL_CONTENT, &name)
     else {
         return Vec::new();
     };
@@ -483,8 +433,7 @@ fn parse_skill_document(content: &str, expected_name: &str) -> Option<(String, V
     if !closed {
         return None;
     }
-    let metadata =
-        serde_yaml::from_str::<SkillDocumentMetadata>(&frontmatter.join("\n")).ok()?;
+    let metadata = serde_yaml::from_str::<SkillDocumentMetadata>(&frontmatter.join("\n")).ok()?;
     if metadata.name.trim() != expected_name || metadata.description.trim().is_empty() {
         return None;
     }

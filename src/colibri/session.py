@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import queue
 from dataclasses import dataclass, field, replace
 from time import monotonic
@@ -28,6 +30,7 @@ from colibri.steering import (
     format_steering_ack,
 )
 from colibri.textutil import bound_text
+from colibri.time_context import append_time_context_to_latest_user, current_time_context
 from colibri.tools.base import ToolContext, ToolResult
 from colibri.tools.permissions import PermissionPolicy
 from colibri.tools.registry import ToolRegistry
@@ -40,6 +43,17 @@ SYSTEM_PROMPT = (
     "Prefer short, practical responses and respect low memory, battery, and tool limits. "
 )
 MODEL_UNAVAILABLE_TEXT = "模型暂时不可用，请检查网络后重试。"
+TRUNCATED_TOOL_CALL_TEXT = (
+    "Tool call was truncated because the model reached its output limit; "
+    "retry the call with complete arguments."
+)
+
+
+@dataclass(frozen=True)
+class _UsageAnchor:
+    total_tokens: int
+    message_count: int
+    prefix_fingerprint: str
 
 
 @dataclass
@@ -65,6 +79,7 @@ class AgentSession:
     )
     _turn_active: bool = field(default=False, init=False, repr=False)
     _permission_pending: bool = field(default=False, init=False, repr=False)
+    _usage_anchor: _UsageAnchor | None = field(default=None, init=False, repr=False)
 
     def steer(self, text: str) -> bool:
         cleaned = text.strip()
@@ -88,19 +103,37 @@ class AgentSession:
         registry, policy, image_analyzer = self._runtime_dependencies()
         context = self._tool_context(registry, image_analyzer)
         memory_text, skill_text = self._load_dynamic_context(bounded_text)
-        model_messages = self._model_messages_for_completion(memory_text, skill_text)
+        tools = registry.specs()
+        model_messages = self._model_messages_for_completion(memory_text, skill_text, tools)
 
         self._turn_active = True
         try:
             for _round_index in range(self.config.session.max_tool_rounds):
-                model_response = self._complete_model(model_messages, registry)
+                overflow_retried = False
+                while True:
+                    try:
+                        model_response = self._complete_model(model_messages, tools)
+                        break
+                    except ModelError as error:
+                        if error.category != "context_overflow" or overflow_retried:
+                            raise
+                        overflow_retried = True
+                        self._compact_messages_now(reason="overflow")
+                        model_messages = self._model_messages(memory_text, skill_text)
                 assistant_text = self._record_assistant_message(model_response)
+                self._update_usage_anchor(model_response, memory_text, skill_text, tools)
+
+                if model_response.stop_reason == "length" and model_response.tool_calls:
+                    for call in model_response.tool_calls:
+                        self._record_truncated_tool_call(call)
+                    model_messages = self._model_messages_for_completion(memory_text, skill_text, tools)
+                    continue
 
                 if not model_response.tool_calls:
                     steered = self._drain_one_steering()
                     if steered is not None:
                         self._apply_steering(steered, skipped=0)
-                        model_messages = self._model_messages_for_completion(memory_text, skill_text)
+                        model_messages = self._model_messages_for_completion(memory_text, skill_text, tools)
                         continue
                     return self._finish_response(assistant_text)
 
@@ -114,7 +147,7 @@ class AgentSession:
                             self._record_skipped_tool(skipped_call)
                         self._apply_steering(steered, skipped=skipped)
                         break
-                model_messages = self._model_messages_for_completion(memory_text, skill_text)
+                model_messages = self._model_messages_for_completion(memory_text, skill_text, tools)
 
             return self._round_limit_response()
         except ModelError as error:
@@ -126,6 +159,7 @@ class AgentSession:
     def reset(self) -> None:
         self.messages.clear()
         self.summary = ""
+        self._usage_anchor = None
         self.last_activity_at = monotonic()
 
     def close(self) -> None:
@@ -164,11 +198,13 @@ class AgentSession:
             )
         return memory_result.text, skill_result.text
 
-    def _complete_model(self, messages: list[Message], registry: ToolRegistry) -> ModelResponse:
+    def _complete_model(self, messages: list[Message], tools: list[dict]) -> ModelResponse:
+        request_messages = list(messages)
+        append_time_context_to_latest_user(request_messages, current_time_context())
         try:
             return self.model.complete(
-                messages=list(messages),
-                tools=registry.specs(),
+                messages=request_messages,
+                tools=tools,
                 system=SYSTEM_PROMPT,
                 limits=ModelLimits(
                     timeout_seconds=self.config.model.timeout_seconds,
@@ -189,9 +225,35 @@ class AgentSession:
         )
         self._write_transcript(
             "assistant_message",
-            {"text": assistant_text, "tool_call_count": len(response.tool_calls)},
+            {
+                "text": assistant_text,
+                "tool_call_count": len(response.tool_calls),
+                "stop_reason": response.stop_reason,
+                "usage": _usage_payload(response),
+            },
         )
         return assistant_text
+
+    def _record_truncated_tool_call(self, call: ToolCall) -> None:
+        self._write_transcript(
+            "tool_result",
+            {
+                "id": call.id,
+                "name": call.name,
+                "ok": False,
+                "error_type": "truncated_tool_call",
+                "text": TRUNCATED_TOOL_CALL_TEXT,
+                "truncated": False,
+                "media": None,
+            },
+        )
+        self.messages.append(
+            Message(
+                role="tool",
+                content=f"truncated_tool_call: {TRUNCATED_TOOL_CALL_TEXT}",
+                tool_call_id=call.id,
+            )
+        )
 
     def _execute_tool_call(
         self,
@@ -265,7 +327,13 @@ class AgentSession:
         self.messages.append(Message(role="assistant", content=MODEL_UNAVAILABLE_TEXT))
         self._write_transcript(
             "assistant_message",
-            {"text": MODEL_UNAVAILABLE_TEXT, "tool_call_count": 0, "model_error": error.category},
+            {
+                "text": MODEL_UNAVAILABLE_TEXT,
+                "tool_call_count": 0,
+                "stop_reason": None,
+                "usage": None,
+                "model_error": error.category,
+            },
         )
         return self._finish_response(MODEL_UNAVAILABLE_TEXT, error_type=error.category)
 
@@ -306,23 +374,40 @@ class AgentSession:
             self._image_analyzer = ImageAnalyzer(self.config, self.model)
         return self.tools, self.permission_policy, self._image_analyzer
 
-    def _compact_messages_if_needed(self, memory_text: str = "", skill_text: str = "") -> None:
+    def _compact_messages_if_needed(
+        self,
+        memory_text: str = "",
+        skill_text: str = "",
+        tools: list[dict] | None = None,
+    ) -> None:
         trigger_limit = max(1, self.config.session.trigger_message_limit)
-        token_limit = max(0, self.config.model.input_context_tokens)
-        token_threshold = token_limit * 8 // 10 if token_limit else 0
+        token_threshold = self._compaction_token_threshold()
         should_compact = len(self.messages) >= trigger_limit
         if not should_compact and token_threshold:
-            should_compact = estimate_model_input_tokens(self._model_messages(memory_text, skill_text)) >= token_threshold
+            should_compact = (
+                self._estimated_completion_input_tokens(memory_text, skill_text, tools or [])
+                >= token_threshold
+            )
         if not should_compact or not self.messages:
+            return
+
+        self._compact_messages_now(reason="threshold")
+
+    def _compact_messages_now(self, *, reason: str) -> None:
+        if not self.messages:
             return
 
         messages_to_compact = list(self.messages)
         addition, mode = self._compact_messages(messages_to_compact)
         self.summary = append_summary(self.summary, addition, self.config.session.summary_max_chars)
+        token_threshold = self._compaction_token_threshold()
+        recent_token_limit = max(1, token_threshold // 2) if token_threshold else None
         self.messages = retain_recent_message_groups(
             messages_to_compact,
             max(0, self.config.session.recent_message_limit),
+            recent_token_limit,
         )
+        self._usage_anchor = None
         self._write_transcript(
             "context_compact",
             {
@@ -330,8 +415,70 @@ class AgentSession:
                 "compacted_messages": len(messages_to_compact),
                 "kept_messages": len(self.messages),
                 "mode": mode,
+                "reason": reason,
                 "summary_chars": len(self.summary),
             },
+        )
+
+    def _compaction_token_threshold(self) -> int:
+        context_tokens = max(0, self.config.model.input_context_tokens)
+        if context_tokens == 0:
+            return 0
+        output_reserve = min(max(0, self.config.model.max_output_tokens), context_tokens // 2)
+        return max(1, context_tokens - output_reserve)
+
+    def _estimated_completion_input_tokens(
+        self,
+        memory_text: str,
+        skill_text: str,
+        tools: list[dict],
+    ) -> int:
+        fingerprint = self._completion_prefix_fingerprint(memory_text, skill_text, tools)
+        anchor = self._usage_anchor
+        if (
+            anchor is not None
+            and anchor.prefix_fingerprint == fingerprint
+            and anchor.message_count <= len(self.messages)
+        ):
+            return anchor.total_tokens + estimate_model_input_tokens(self.messages[anchor.message_count :])
+        return estimate_model_input_tokens(
+            self._model_messages(memory_text, skill_text),
+            system=SYSTEM_PROMPT,
+            tools=tools,
+        )
+
+    def _completion_prefix_fingerprint(
+        self,
+        memory_text: str,
+        skill_text: str,
+        tools: list[dict],
+    ) -> str:
+        payload = {
+            "provider": self.config.model.provider,
+            "base_url": self.config.model.base_url,
+            "model": self.config.model.model,
+            "system": SYSTEM_PROMPT,
+            "summary": summary_context(self.summary),
+            "memory": memory_text,
+            "skills": skill_text,
+            "tools": tools,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _update_usage_anchor(
+        self,
+        response: ModelResponse,
+        memory_text: str,
+        skill_text: str,
+        tools: list[dict],
+    ) -> None:
+        if response.usage is None or response.usage.total_tokens <= 0:
+            return
+        self._usage_anchor = _UsageAnchor(
+            total_tokens=response.usage.total_tokens,
+            message_count=len(self.messages),
+            prefix_fingerprint=self._completion_prefix_fingerprint(memory_text, skill_text, tools),
         )
 
     def _compact_messages(self, messages: list[Message]) -> tuple[str, str]:
@@ -452,9 +599,27 @@ class AgentSession:
             context_messages.append(Message(role="system", content=skill_text))
         return context_messages + messages
 
-    def _model_messages_for_completion(self, memory_text: str, skill_text: str = "") -> list[Message]:
-        self._compact_messages_if_needed(memory_text, skill_text)
+    def _model_messages_for_completion(
+        self,
+        memory_text: str,
+        skill_text: str = "",
+        tools: list[dict] | None = None,
+    ) -> list[Message]:
+        self._compact_messages_if_needed(memory_text, skill_text, tools or [])
         return self._model_messages(memory_text, skill_text)
+
+
+def _usage_payload(response: ModelResponse) -> dict | None:
+    usage = response.usage
+    if usage is None:
+        return None
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "total_tokens": usage.total_tokens,
+    }
 
 def _denied_tool_text(call: ToolCall) -> str:
     if call.name == "shell.run":

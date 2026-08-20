@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from subprocess import TimeoutExpired, run
 from typing import Any
 
 from colibri.skills import SkillIndex
-from colibri.tools.base import ToolContext, ToolResult, ToolSpec, bound_tool_text
+from colibri.tools.base import ToolContext, ToolResult, ToolSpec
+from colibri.tools.process_output import ProcessTimedOut, run_bounded_process
 
 
 class SkillReadTool:
@@ -81,23 +81,22 @@ class SkillRunTool:
             return ToolResult(ok=False, text="Skill command is empty", error_type="invalid_config")
 
         try:
-            completed = run(
+            completed = run_bounded_process(
                 [command.command, *command.args, *extra_args],
                 cwd=skill.root,
-                text=True,
-                capture_output=True,
-                timeout=context.config.tools.max_shell_seconds,
-                check=False,
+                timeout_seconds=context.config.tools.max_shell_seconds,
+                max_result_chars=context.config.tools.max_result_chars,
             )
-        except TimeoutExpired as error:
-            text = error.stdout or error.stderr or "Skill command timed out"
-            bounded, truncated = bound_tool_text(str(text), context.config.tools.max_result_chars)
-            return ToolResult(ok=False, text=bounded, error_type="timeout", truncated=truncated)
+        except ProcessTimedOut:
+            return ToolResult(ok=False, text="Skill command timed out", error_type="timeout")
         except OSError as error:
             return ToolResult(ok=False, text=str(error), error_type="tool_error")
 
-        output = completed.stdout if completed.stdout else completed.stderr
-        bounded, truncated = bound_tool_text(output, context.config.tools.max_result_chars)
         if completed.returncode != 0:
-            return ToolResult(ok=False, text=bounded, error_type="tool_error", truncated=truncated)
-        return ToolResult(ok=True, text=bounded, truncated=truncated)
+            return ToolResult(
+                ok=False,
+                text=completed.text,
+                error_type="tool_error",
+                truncated=completed.truncated,
+            )
+        return ToolResult(ok=True, text=completed.text, truncated=completed.truncated)

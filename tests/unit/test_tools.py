@@ -341,6 +341,23 @@ def test_shell_run_timeout_kills_background_process_group(tmp_path):
     assert not (tmp_path / "leaked.txt").exists()
 
 
+def test_shell_run_bounds_large_output_and_preserves_tail(tmp_path):
+    config = make_config(tmp_path, tools={"max_result_chars": 120, "max_shell_seconds": 2})
+    context = ToolContext(config=config, cwd=tmp_path)
+
+    result = ShellRunTool().run(
+        {"command": "python -c \"print('HEAD' + 'x' * 5000 + 'TAIL', end='')\""},
+        context,
+    )
+
+    assert result.ok
+    assert result.truncated
+    assert len(result.text) <= 120
+    assert result.text.startswith("HEAD")
+    assert result.text.endswith("TAIL")
+    assert "...[truncated]..." in result.text
+
+
 def test_web_search_builds_baidu_request_and_formats_results(monkeypatch, tmp_path):
     captured = {}
 

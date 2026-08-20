@@ -26,9 +26,20 @@ class ModelLimits:
 
 
 @dataclass(frozen=True)
+class ModelUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_reason: str | None = None
+    usage: ModelUsage | None = None
 
 
 @dataclass(frozen=True)

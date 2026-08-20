@@ -139,19 +139,33 @@ pub fn summary_context(summary: &str) -> String {
 }
 
 pub fn retain_recent_message_groups(messages: Vec<Message>, recent_limit: usize) -> Vec<Message> {
+    retain_recent_message_groups_with_token_limit(messages, recent_limit, None)
+}
+
+pub fn retain_recent_message_groups_with_token_limit(
+    messages: Vec<Message>,
+    recent_limit: usize,
+    recent_token_limit: Option<usize>,
+) -> Vec<Message> {
     if messages.is_empty() {
         return Vec::new();
     }
     let groups = message_groups(messages);
     let mut kept_reversed: Vec<Vec<Message>> = Vec::new();
     let mut kept_messages = 0usize;
+    let mut kept_tokens = 0usize;
     if recent_limit > 0 {
         for group in groups.iter().rev() {
-            if !kept_reversed.is_empty() && kept_messages + group.len() > recent_limit {
+            let group_tokens = estimate_model_input_tokens(group);
+            let exceeds_messages = kept_messages + group.len() > recent_limit;
+            let exceeds_tokens = recent_token_limit
+                .is_some_and(|limit| kept_tokens.saturating_add(group_tokens) > limit);
+            if !kept_reversed.is_empty() && (exceeds_messages || exceeds_tokens) {
                 break;
             }
             kept_reversed.push(group.clone());
             kept_messages += group.len();
+            kept_tokens = kept_tokens.saturating_add(group_tokens);
         }
     }
     let mut kept_groups = kept_reversed.into_iter().rev().collect::<Vec<_>>();
@@ -165,10 +179,44 @@ pub fn retain_recent_message_groups(messages: Vec<Message>, recent_limit: usize)
 }
 
 pub fn estimate_model_input_tokens(messages: &[Message]) -> usize {
-    let byte_count: usize = messages
-        .iter()
-        .map(|message| message.role.len() + message.content.len())
-        .sum();
+    estimate_completion_input_tokens(messages, "", &[])
+}
+
+pub fn estimate_completion_input_tokens(
+    messages: &[Message],
+    system: &str,
+    tools: &[serde_json::Value],
+) -> usize {
+    let mut byte_count = if system.is_empty() {
+        0
+    } else {
+        "system".len() + system.len()
+    };
+    if !tools.is_empty() {
+        byte_count = byte_count.saturating_add(
+            serde_json::to_vec(tools)
+                .map(|encoded| encoded.len())
+                .unwrap_or_default(),
+        );
+    }
+    for message in messages {
+        byte_count = byte_count
+            .saturating_add(message.role.len())
+            .saturating_add(message.content.len());
+        if let Some(tool_call_id) = &message.tool_call_id {
+            byte_count = byte_count.saturating_add(tool_call_id.len());
+        }
+        for call in &message.tool_calls {
+            byte_count = byte_count
+                .saturating_add(call.id.len())
+                .saturating_add(call.name.len())
+                .saturating_add(
+                    serde_json::to_vec(&call.arguments)
+                        .map(|encoded| encoded.len())
+                        .unwrap_or_default(),
+                );
+        }
+    }
     (byte_count + 3) / 4
 }
 
