@@ -83,7 +83,7 @@ int enter_block(MD_BLOCKTYPE type, void* detail, void* user) {
         s.lists.push_back({true, static_cast<MD_BLOCK_OL_DETAIL*>(detail)->start});
         break;
     case MD_BLOCK_LI: {
-        s.start(s.paragraph());
+        s.start(s.quotes ? BlockKind::Quote : BlockKind::ListItem);
         if (s.lists.empty()) break;
         auto& list = s.lists.back();
         const auto* item = static_cast<MD_BLOCK_LI_DETAIL*>(detail);

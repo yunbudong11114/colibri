@@ -15,6 +15,9 @@
 #include <deque>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <ctime>
 #include <optional>
 #include <thread>
 #include <string_view>
@@ -27,7 +30,7 @@ constexpr int Width = 320;
 constexpr int Height = 170;
 constexpr int PageSize = 6;
 constexpr int ChatWidth = 288;
-constexpr int CodePadding = 6;
+constexpr int CodePadding = 2;
 constexpr int CodeBorder = 1;
 constexpr std::size_t MaxSpelling = 64;
 const json SettingLabels{
@@ -141,7 +144,7 @@ const lv_font_t* load_font(lv_freetype_font_style_t style = LV_FREETYPE_FONT_STY
         if (auto* font = lv_freetype_font_create(path.c_str(), LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
                                                  size, style)) {
             static const auto* emoji = lv_freetype_font_create(
-                COLIBRI_EMOJI_FONT_PATH, LV_FREETYPE_FONT_RENDER_MODE_BITMAP, 14, LV_FREETYPE_FONT_STYLE_NORMAL);
+                COLIBRI_EMOJI_FONT_PATH, LV_FREETYPE_FONT_RENDER_MODE_BITMAP, 12, LV_FREETYPE_FONT_STYLE_NORMAL);
             font->fallback = emoji;
             return font;
         }
@@ -154,7 +157,7 @@ const lv_font_t* code_font(const lv_font_t* fallback) {
                       "/System/Library/Fonts/Monaco.ttf"}) {
         if (!std::filesystem::exists(path)) continue;
         if (auto* font = lv_freetype_font_create(path, LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
-                                                 14, LV_FREETYPE_FONT_STYLE_NORMAL)) {
+                                                 12, LV_FREETYPE_FONT_STYLE_NORMAL)) {
             font->fallback = fallback;
             return font;
         }
@@ -167,20 +170,68 @@ public:
     explicit View(WorkerLink& worker) : worker_(worker) {
         auto* root = lv_screen_active();
         lv_obj_remove_style_all(root);
-        const auto* normal = load_font();
+        const auto* normal = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 12);
         lv_obj_set_style_text_font(root, normal, 0);
-        bold_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD);
-        italic_ = load_font(LV_FREETYPE_FONT_STYLE_ITALIC);
-        heading_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 16);
+        bold_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 12);
+        italic_ = load_font(LV_FREETYPE_FONT_STYLE_ITALIC, 12);
+        heading_ = bold_;
         code_ = code_font(normal);
 
-        title_ = label(root, 10, 4, 212);
-        status_ = label(root, 225, 4, 85);
-        lv_obj_set_style_text_align(status_, LV_TEXT_ALIGN_RIGHT, 0);
+        const auto* chrome_font = normal;
+        // Alpha mask sampled from the launcher hummingbird.
+        static const uint8_t pixels[] = {
+            0, 18, 7, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 15, 18, 0,
+            9, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 9,
+            29, 0, 0, 0, 0, 0, 0, 0, 7, 36, 6, 0, 0, 0, 0, 0, 0, 15,
+            0, 0, 0, 0, 0, 0, 0, 0, 51, 255, 142, 9, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 22, 175, 255, 73, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 182, 240, 85, 182, 158, 73, 0, 0,
+            0, 0, 0, 0, 0, 7, 43, 170, 145, 119, 255, 255, 220, 238, 107, 85, 0, 0,
+            0, 0, 0, 37, 95, 194, 255, 255, 255, 255, 255, 255, 231, 44, 0, 0, 0, 0,
+            0, 0, 0, 43, 85, 85, 162, 227, 255, 255, 241, 111, 36, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 6, 124, 206, 219, 117, 49, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 122, 182, 73, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            9, 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 22,
+            9, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9,
+            0, 12, 15, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 6, 0,
+        };
+        static lv_image_dsc_t bird{};
+        bird.header.magic = LV_IMAGE_HEADER_MAGIC;
+        bird.header.cf = LV_COLOR_FORMAT_A8;
+        bird.header.w = bird.header.stride = 18;
+        bird.header.h = 15;
+        bird.data_size = sizeof(pixels);
+        bird.data = pixels;
+        bird_ = lv_image_create(root);
+        lv_image_set_src(bird_, &bird);
+        lv_obj_set_pos(bird_, 10, 3);
+        title_ = label(root, 33, 1, 165, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(title_, load_font(LV_FREETYPE_FONT_STYLE_BOLD, 14), 0);
+        for (size_t i = 0; i < signal_bars_.size(); ++i) {
+            auto* bar = signal_bars_[i] = lv_obj_create(root);
+            lv_obj_remove_style_all(bar);
+            const int height = 3 + 3 * i;
+            lv_obj_set_size(bar, 3, height);
+            lv_obj_set_pos(bar, 205 + 5 * i, 16 - height);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(bar, 1, 0);
+        }
+        clock_label_ = label(root, 226, 2, 42);
+        battery_label_ = label(root, 272, 2, 41);
+        for (auto* badge : {clock_label_, battery_label_}) {
+            lv_obj_set_style_text_align(badge, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
+            lv_obj_set_style_text_color(badge, lv_color_hex(0xffffff), 0);
+            lv_obj_set_style_radius(badge, 2, 0);
+        }
+        lv_obj_set_style_bg_color(clock_label_, lv_color_hex(0x885725), 0);
+        lv_obj_set_style_bg_color(battery_label_, lv_color_hex(0x805187), 0);
+        update_device_status();
         panel_ = lv_obj_create(root);
         lv_obj_remove_style_all(panel_);
-        lv_obj_set_pos(panel_, 7, 27);
-        lv_obj_set_size(panel_, 306, 91);
+        lv_obj_set_pos(panel_, 7, 22);
+        lv_obj_set_size(panel_, 306, 99);
         lv_obj_set_style_radius(panel_, 7, 0);
         lv_obj_set_scroll_dir(panel_, LV_DIR_VER);
         lv_obj_remove_flag(panel_, LV_OBJ_FLAG_SCROLL_ELASTIC);
@@ -196,17 +247,48 @@ public:
             lv_obj_set_style_pad_hor(row, 7, 0);
             lv_obj_set_style_pad_top(row, 2, 0);
             lv_obj_set_style_radius(row, 4, 0);
+            lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+            lv_obj_set_style_border_width(row, 2, 0);
             menu_rows_[i] = row;
         }
-        composer_ = label(root, 7, 122, 306);
+        composer_ = label(root, 7, 125, 306);
         lv_obj_set_height(composer_, 24);
         lv_obj_set_style_pad_left(composer_, 8, 0);
         lv_obj_set_style_pad_top(composer_, 3, 0);
         lv_obj_set_style_radius(composer_, 6, 0);
-        candidates_ = label(root, 10, 149, 300);
+        for (size_t i = 0; i < voice_bars_.size(); ++i) {
+            auto* bar = voice_bars_[i] = lv_obj_create(root);
+            lv_obj_remove_style_all(bar);
+            lv_obj_set_x(bar, 84 + 5 * i);
+            lv_obj_set_style_radius(bar, 2, 0);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        status_ = label(root, 263, 128, 37);
+        lv_obj_set_style_text_align(status_, LV_TEXT_ALIGN_RIGHT, 0);
+        voice_time_ = label(root, 215, 128, 85);
+        lv_obj_set_style_text_align(voice_time_, LV_TEXT_ALIGN_RIGHT, 0);
+        candidates_ = label(root, 10, 152, 300);
+        lv_obj_set_style_text_font(candidates_, chrome_font, 0);
+        footer_ = lv_obj_create(root);
+        lv_obj_remove_style_all(footer_);
+        lv_obj_remove_flag(footer_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(footer_, 10, 150);
+        lv_obj_set_size(footer_, 300, 20);
+        lv_obj_set_flex_flow(footer_, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(footer_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(footer_, 4, 0);
+        for (size_t i = 0; i < footer_parts_.size(); ++i) {
+            auto* part = footer_parts_[i] = label(footer_, 0, 0, LV_SIZE_CONTENT);
+            if (i % 2 == 0) {
+                lv_obj_set_style_radius(part, 3, 0);
+                lv_obj_set_style_pad_hor(part, 4, 0);
+                lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
+            } else lv_obj_set_style_pad_right(part, 4, 0);
+        }
         memory_editor_ = lv_textarea_create(root);
-        lv_obj_set_pos(memory_editor_, 7, 27);
-        lv_obj_set_size(memory_editor_, 306, 91);
+        lv_obj_set_pos(memory_editor_, 7, 22);
+        lv_obj_set_size(memory_editor_, 306, 99);
         lv_textarea_set_one_line(memory_editor_, false);
         lv_obj_remove_flag(memory_editor_, LV_OBJ_FLAG_SCROLL_ELASTIC);
         lv_obj_add_state(memory_editor_, LV_STATE_FOCUSED);
@@ -215,7 +297,52 @@ public:
         refresh();
     }
 
+    void update_device_status() {
+        const auto now = std::time(nullptr);
+        if (now == status_second_) return;
+        const bool read_device = status_second_ == 0 || now / 5 != status_second_ / 5;
+        status_second_ = now;
+        char clock_text[8] = "--:--";
+        std::tm local{};
+        if (localtime_r(&now, &local)) std::strftime(clock_text, sizeof(clock_text), "%H:%M", &local);
+        lv_label_set_text(clock_label_, clock_text);
+        if (!read_device) return;
+        int charge;
+        if (std::ifstream("/sys/class/power_supply/bq27220-0/capacity") >> charge)
+            lv_label_set_text_fmt(battery_label_, "%d%%", charge);
+        else lv_label_set_text(battery_label_, "--%");
+        std::ifstream wireless("/proc/net/wireless");
+        int level = 0;
+        std::string line;
+        while (std::getline(wireless, line)) {
+            int quality;
+            if (std::sscanf(line.c_str(), " wlan0: %*x %d", &quality) == 1)
+                level = std::clamp((quality + 17) / 18, 0, 4);
+        }
+        for (int i = 0; i < 4; ++i)
+            lv_obj_set_style_bg_color(signal_bars_[i], lv_color_hex(i < level ? 0x49c965 : 0x52615b), 0);
+    }
+
     bool running = true;
+    bool restoring_history() const { return starting_; }
+
+    void update_recording_clock() {
+        if (!recording_ || screen_ != Screen::Chat) return;
+        const unsigned phase = (lv_tick_elaps(recording_start_) / 110) % 8;
+        if (phase != voice_phase_) {
+            constexpr int heights[] = {4, 6, 10, 14, 12, 8, 6, 4};
+            for (size_t i = 0; i < voice_bars_.size(); ++i) {
+                const int h = heights[(phase + 3 * i) % 8];
+                lv_obj_set_size(voice_bars_[i], 3, h);
+                lv_obj_set_y(voice_bars_[i], 137 - h / 2);
+            }
+            voice_phase_ = phase;
+        }
+        const unsigned seconds = std::min<unsigned>(60, lv_tick_elaps(recording_start_) / 1000);
+        if (seconds == recording_seconds_) return;
+        recording_seconds_ = seconds;
+        lv_label_set_text(voice_time_, recording_caption().c_str());
+    }
 
     void receive(const json& event) {
         const auto type = event.value("type", "");
@@ -255,6 +382,10 @@ public:
         }
         busy_ = false;
         status_text_ = "";
+        if (type == "recording" && !recording_) {
+            recording_start_ = lv_tick_get();
+            recording_seconds_ = 0;
+        }
         recording_ = type == "recording";
         if (recording_) offline_voice_ = event.value("backend", "") == "offline";
         if (type == "model_status") {
@@ -479,6 +610,23 @@ private:
     std::vector<std::string> memory_topics_;
     json catalog_items_ = json::array();
     std::size_t catalog_kind_ = 0;
+    std::array<lv_obj_t*, 5> voice_bars_{};
+    lv_obj_t* voice_time_ = nullptr;
+    std::array<lv_obj_t*, 4> signal_bars_{};
+    lv_obj_t *clock_label_ = nullptr, *battery_label_ = nullptr;
+    std::time_t status_second_ = 0;
+    lv_obj_t *bird_ = nullptr, *footer_ = nullptr;
+    std::array<lv_obj_t*, 6> footer_parts_{};
+    unsigned voice_phase_ = 8;
+    uint32_t recording_start_ = 0;
+    unsigned recording_seconds_ = 0;
+
+    std::string recording_caption() const {
+        char time[32];
+        std::snprintf(time, sizeof(time), "%u:%02u / 1:00", recording_seconds_ / 60, recording_seconds_ % 60);
+        return time;
+    }
+
     bool busy_ = false, recording_ = false, offline_voice_ = false, chinese_ = false, dark_ = true;
     bool starting_ = false;
     std::string draft_, edited_, error_, status_text_, spelling_, model_hint_;
@@ -599,29 +747,37 @@ private:
             lv_label_set_text(line, content.c_str());
             return;
         }
+        using markdown::BlockKind;
+        std::optional<BlockKind> previous;
         for (const auto& block : blocks) {
-            using markdown::BlockKind;
+            if (block.runs.empty() && block.kind != BlockKind::Rule) continue;
+            int gap = 4;
+            if (!previous) gap = 0;
+            else if (block.kind == BlockKind::Heading) gap = 6;
+            else if (previous == BlockKind::Heading ||
+                     (previous == BlockKind::ListItem && block.kind == BlockKind::ListItem)) gap = 1;
+            previous = block.kind;
             if (block.kind == BlockKind::Rule) {
                 auto* rule = lv_obj_create(body);
                 lv_obj_remove_style_all(rule);
                 lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
                 lv_obj_add_flag(rule, LV_OBJ_FLAG_USER_2);
                 lv_obj_set_size(rule, 288, 1);
+                lv_obj_set_style_margin_top(rule, gap, 0);
                 lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
                 continue;
             }
-            if (block.runs.empty()) continue;
             auto* group = lv_spangroup_create(body);
+            lv_obj_set_style_margin_top(group, gap, 0);
             lv_obj_set_size(group, ChatWidth, LV_SIZE_CONTENT);
             lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_text_line_space(group, 3, 0);
             if (block.kind == BlockKind::Heading) {
                 lv_obj_set_style_text_font(group, heading_, 0);
-                lv_obj_set_style_pad_top(group, 2, 0);
             } else if (block.kind == BlockKind::Code || block.kind == BlockKind::Quote || block.kind == BlockKind::Table) {
                 lv_obj_add_flag(group, block.kind == BlockKind::Code ? LV_OBJ_FLAG_USER_3 : LV_OBJ_FLAG_USER_1);
                 lv_obj_set_style_bg_opa(group, LV_OPA_COVER, 0);
-                lv_obj_set_style_pad_hor(group, CodePadding, 0);
+                lv_obj_set_style_pad_hor(group, block.kind == BlockKind::Code ? CodePadding : 6, 0);
                 lv_obj_set_style_pad_ver(group, 3, 0);
                 lv_obj_set_style_radius(group, 3, 0);
                 if (block.kind == BlockKind::Code) {
@@ -654,12 +810,13 @@ private:
         if (content.size() > 12000) content.resize(utf8_end(content, 11999));
         auto* block = column(chat_thread_, 0, 0, 2);
         auto* tag = label(block, 0, 0, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_font(tag, bold_, 0);
         lv_label_set_text(tag, speaker.c_str());
         lv_obj_set_style_bg_opa(tag, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(tag, 4, 0);
         lv_obj_set_style_pad_left(tag, 5, 0);
         lv_obj_set_style_pad_right(tag, 5, 0);
-        auto* body = column(block, 0, 0, 3);
+        auto* body = column(block, 0, 0, 0);
         render_markdown(body, content, speaker != "系统");
         const auto role = speaker == "我" ? Speaker::User :
                           speaker == "Colibri" ? Speaker::Agent : Speaker::System;
@@ -1053,7 +1210,7 @@ private:
             lv_point_t size{};
             lv_text_get_size(&size, text.c_str(), lv_obj_get_style_text_font(composer_, LV_PART_MAIN),
                              0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-            return size.x <= 288;
+            return size.x <= 244;
         };
         auto prefix = [&]() { return draft_view_start_ ? "› …" : "› "; };
         draft_view_start_ = std::min(draft_cursor_, draft_view_start_);
@@ -1090,39 +1247,41 @@ private:
         lv_obj_set_style_text_color(composer_, foreground, 0);
         lv_obj_set_style_bg_color(composer_, dark_ ? lv_color_hex(0x233a3e) : lv_color_hex(0xd6e8dd), 0);
         lv_obj_set_style_bg_opa(composer_, LV_OPA_COVER, 0);
-        for (auto* item : {title_, status_, candidates_}) lv_obj_set_style_text_color(item, accent, 0);
+        for (auto* item : {title_, status_, candidates_, voice_time_})
+            lv_obj_set_style_text_color(item, accent, 0);
 
-        std::string title = "Colibri  /  对话";
+        std::string title = "对话";
         const bool show_chat = screen_ == Screen::Chat && !chat_.empty();
         bool show_menu_rows = false;
         for (auto* row : menu_rows_) lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
         std::string content;
-        if (!show_chat && !starting_) {
+        if (starting_) content = "正在加载对话…";
+        else if (!show_chat) {
             content = model_hint_.empty() ?
                 "输入问题开始对话。\n用 Tab 切换拼音，或用 Esc 打开设置。" : model_hint_;
         }
-        std::string composer = screen_ == Screen::Chat ? draft_preview() : "";
+        std::string composer = screen_ == Screen::Chat && !starting_ ? draft_preview() : "";
         std::string hint = "Esc 菜单  Tab 中/英  Fn+空格 语音";
         if (!spelling_.empty()) {
             hint = candidate_pages_.empty() ? "继续输入拼音" : candidate_pages_[page_].text;
             if (candidate_pages_.size() > 1) hint += " ‹ ›";
         }
         if (recording_) {
-            composer = "正在录音 · 最多 60 秒";
+            composer = "正在录音";
             hint = "Fn+空格 结束   Esc 取消";
         }
         if (is_list(screen_)) {
             const auto rows = list_rows();
             switch (screen_) {
-            case Screen::Menu: title = "Colibri  /  菜单"; break;
-            case Screen::Settings: title = "Colibri  /  设置"; break;
+            case Screen::Menu: title = "菜单"; break;
+            case Screen::Settings: title = "设置"; break;
             case Screen::Fields: title = "设置  /  " + CategoryNames[category_]; break;
             case Screen::ModelMode: title = "设置  /  模型"; break;
             case Screen::Providers: title = "模型  /  服务商预设"; break;
             case Screen::ModelForm: title = "模型  /  " + model_title_; break;
             case Screen::MemoryTopics: title = "记忆  /  主题文件"; break;
             case Screen::MemoryActions: title = "编辑  /  " + memory_file_; break;
-            case Screen::CatalogMenu: title = "Colibri  /  MCP 与技能"; break;
+            case Screen::CatalogMenu: title = "MCP 与技能"; break;
             case Screen::CatalogList: title = "查看  /  " + CatalogKinds[catalog_kind_]; break;
             default: break;
             }
@@ -1136,17 +1295,19 @@ private:
                 const bool selected = first + i == selection_;
                 lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
                 lv_label_set_text(row, rows[first + i].c_str());
+                lv_obj_set_style_border_color(row, accent, 0);
+                lv_obj_set_style_border_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
                 lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-                lv_obj_set_style_bg_color(row, lv_color_hex(dark_ ? 0x356654 : 0xb5ddc7), 0);
+                lv_obj_set_style_bg_color(row, lv_color_hex(selected ? (dark_ ? 0x356654 : 0xb5ddc7) : (dark_ ? 0x243940 : 0xe5eee8)), 0);
                 lv_obj_set_style_text_color(row, selected ? lv_color_hex(dark_ ? 0xf0fff7 : 0x13382b) : foreground, 0);
             }
             if (rows.empty() && screen_ == Screen::MemoryTopics) content = "暂无主题文件";
             if (rows.empty() && screen_ == Screen::CatalogList)
                 content = catalog_kind_ == 0 ? "尚未配置 MCP 服务" : "没有可用技能";
             composer = screen_ == Screen::ModelForm && error_.empty() ? "OpenAI 兼容接口" : error_;
-            hint = "F/X 选择  C/Enter 打开  Z/Esc 返回";
+            hint = "F/X 选择     Enter 打开     Esc 返回";
         } else if (screen_ == Screen::Edit) {
-            title = "Colibri  /  编辑";
+            title = "编辑";
             const auto& field = edit_field_;
             const bool secret = field.value("secret", false);
             content = field.value("label", SettingLabels.value(field.value("key", ""), "")) + "\n";
@@ -1183,8 +1344,15 @@ private:
             lv_obj_add_flag(memory_editor_, LV_OBJ_FLAG_HIDDEN);
         }
         lv_label_set_text(title_, title.c_str());
-        lv_label_set_text(status_, busy_ ? status_text_.c_str() : recording_ ? "录音中" :
-                          screen_ == Screen::Chat && !model_hint_.empty() ? "未配置" : chinese_ ? "拼音" : "ABC");
+        const bool show_mode = screen_ == Screen::Chat && !starting_ && !recording_ && !busy_;
+        lv_obj_set_flag(status_, LV_OBJ_FLAG_HIDDEN, !show_mode);
+        if (show_mode) lv_label_set_text(status_, chinese_ ? "拼音" : "ABC");
+        if (!starting_ && busy_ && !status_text_.empty()) {
+            if (screen_ == Screen::Chat) composer = status_text_;
+            else hint = status_text_;
+        }
+        const bool reading = screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
+        lv_obj_set_height(panel_, reading && composer.empty() ? 127 : 99);
         if (chat_colors_dark_ != dark_) {
             for (const auto& message : chat_) color_chat_message(message);
             chat_colors_dark_ = dark_;
@@ -1213,8 +1381,35 @@ private:
         }
         if (composer.empty()) lv_obj_add_flag(composer_, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(composer_, LV_OBJ_FLAG_HIDDEN);
+        const bool voice_visible = recording_ && screen_ == Screen::Chat;
+        for (auto* bar : voice_bars_) {
+            lv_obj_set_flag(bar, LV_OBJ_FLAG_HIDDEN, !voice_visible);
+            lv_obj_set_style_bg_color(bar, accent, 0);
+        }
+        lv_obj_set_flag(voice_time_, LV_OBJ_FLAG_HIDDEN, !voice_visible);
+        if (voice_visible) {
+            lv_label_set_text(voice_time_, recording_caption().c_str());
+            update_recording_clock();
+        }
         lv_label_set_text(composer_, composer.c_str());
-        lv_label_set_text(candidates_, hint.c_str());
+        lv_obj_set_style_image_recolor(bird_, accent, 0);
+        lv_obj_set_style_image_recolor_opa(bird_, LV_OPA_COVER, 0);
+        const bool keycaps = spelling_.empty() && !(busy_ && screen_ != Screen::Chat);
+        lv_obj_set_flag(candidates_, LV_OBJ_FLAG_HIDDEN, starting_ || keycaps);
+        lv_obj_set_flag(footer_, LV_OBJ_FLAG_HIDDEN, starting_ || !keycaps);
+        if (keycaps) {
+            std::istringstream words(hint);
+            for (size_t i = 0; i < footer_parts_.size(); ++i) {
+                auto* part = footer_parts_[i];
+                std::string word;
+                words >> word;
+                lv_obj_set_flag(part, LV_OBJ_FLAG_HIDDEN, word.empty());
+                lv_label_set_text(part, word.c_str());
+                lv_obj_set_style_text_color(part, i % 2 ? foreground : accent, 0);
+                if (i % 2 == 0)
+                    lv_obj_set_style_bg_color(part, lv_color_hex(dark_ ? 0x243e36 : 0xd2e8db), 0);
+            }
+        } else lv_label_set_text(candidates_, hint.c_str());
     }
 };
 
@@ -1265,11 +1460,15 @@ int main(int argc, char** argv) {
         if (argc == 3 && std::string(argv[1]) == "--screenshot")
             return save_screenshot(argv[2]) ? 0 : 1;
 #endif
+        const auto first_frame_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
         while (view.running && poll_input([&](Key key) { view.key(key); },
                                           [&](const std::string& text) { view.text(text); })) {
             if (!view.running) break;
             for (const auto& event : worker.receive()) view.receive(event);
-            lv_timer_handler();
+            view.update_device_status();
+            view.update_recording_clock();
+            if (!view.restoring_history() || std::chrono::steady_clock::now() >= first_frame_deadline)
+                lv_timer_handler();
             std::this_thread::sleep_for(std::chrono::milliseconds(12));
         }
     } catch (const std::exception& error) {

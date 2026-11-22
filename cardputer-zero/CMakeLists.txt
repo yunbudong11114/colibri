@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.31)
-project(colibri-cardputer VERSION 0.1.39 LANGUAGES C CXX)
+project(colibri-cardputer VERSION 0.1.50 LANGUAGES C CXX)
 
 set(COLIBRI_OFFLINE_SPEECH_PAYLOAD "" CACHE PATH "Optional ARM64 offline speech runtime and model")
 

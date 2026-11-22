@@ -4,7 +4,7 @@
 
 namespace {
 using EscapeClock = std::chrono::steady_clock;
-constexpr auto EscapeHold = std::chrono::seconds(3);
+constexpr auto EscapeHold = std::chrono::milliseconds(1500);
 std::optional<EscapeClock::time_point> escape_pressed;
 
 bool escape_expired() {
