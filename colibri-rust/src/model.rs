@@ -110,13 +110,12 @@ impl OpenAiCompatibleModel {
         timeout_seconds: u64,
     ) -> Result<String, String> {
         for attempt in 0..=self.config.max_retries {
-            let result = request_json(
-                "POST",
-                url,
-                &[("Authorization", format!("Bearer {}", self.config.api_key))],
-                Some(payload),
-                timeout_seconds,
-            );
+            let headers = if self.config.api_key.is_empty() {
+                Vec::new()
+            } else {
+                vec![("Authorization", format!("Bearer {}", self.config.api_key))]
+            };
+            let result = request_json("POST", url, &headers, Some(payload), timeout_seconds);
             let failure = match result {
                 Ok(response) if response.status.is_none_or(|status| status < 400) => {
                     return Ok(response.body);
@@ -233,10 +232,27 @@ fn model_failure_for_transport(message: String) -> ModelFailure {
     }
 }
 
+pub(crate) fn model_key_required(url: &url::Url) -> bool {
+    matches!(url.host_str(), Some("api.openai.com" | "api.deepseek.com" | "openrouter.ai"))
+}
+
 pub fn build_model(config: &ModelConfig) -> Result<Box<dyn ModelClient>, String> {
     match config.provider.as_str() {
         "fake" => Ok(Box::new(FakeModel::new())),
-        "openai_compatible" => Ok(Box::new(OpenAiCompatibleModel::from_config(config)?)),
+        "openai_compatible" => {
+            let url = crate::http::http_endpoint(&config.base_url)?;
+            if config.model.trim().is_empty() {
+                return Err("model.model is required".into());
+            }
+            if model_key_required(&url) {
+                return Ok(Box::new(OpenAiCompatibleModel::from_config(config)?));
+            }
+            let mut config = config.clone();
+            if config.api_key.is_empty() {
+                config.api_key = std::env::var("COLIBRI_API_KEY").unwrap_or_default();
+            }
+            Ok(Box::new(OpenAiCompatibleModel { config }))
+        }
         other => Err(format!("Unsupported model provider: {}", other)),
     }
 }

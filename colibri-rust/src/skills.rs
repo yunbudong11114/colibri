@@ -54,7 +54,7 @@ commands:
 
 Keep the Markdown body focused on context gathering and the exact workflow. Prefer progressive disclosure and reference extra local files only when needed. Put reusable implementations under `scripts/`. Do not create `skill.toml`.
 
-After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. When a declared command matches the requested action, execute it with `skill.run`. Keep command permissions explicit and avoid long resident processes on small devices.
+After creating a skill, Colibri lists it in the skill catalog. Use `skill.read` with the skill name when you need the full instructions. When a declared command matches the requested action, execute it with `skill.run`. Avoid long-running processes on small devices.
 "#;
 
 #[derive(Debug, Deserialize)]

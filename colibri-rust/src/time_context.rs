@@ -3,6 +3,7 @@ use std::mem::MaybeUninit;
 
 const TIME_FORMAT: &[u8] = b"%Y-%m-%d %H:%M|%z\0";
 const TIME_CONTEXT_SEPARATOR: &str = "\n\n## Current Time\n";
+const TIME_USAGE_INSTRUCTION: &str = "Use this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant.";
 
 pub fn current_time_context() -> String {
     let timestamp = unsafe { libc::time(std::ptr::null_mut()) };
@@ -14,9 +15,10 @@ pub fn current_time_context() -> String {
 
 pub fn format_time_context(date_time: &str, offset: &str) -> String {
     format!(
-        "## Current Time\n{} ({})",
+        "## Current Time\n{} ({})\n{}",
         date_time,
-        normalize_utc_offset(offset)
+        normalize_utc_offset(offset),
+        TIME_USAGE_INSTRUCTION
     )
 }
 
@@ -49,6 +51,12 @@ pub fn user_text_without_time_context(content: &str) -> &str {
 }
 
 fn is_formatted_time_line(value: &str) -> bool {
+    let Some((value, instruction)) = value.split_once('\n') else {
+        return false;
+    };
+    if instruction != TIME_USAGE_INSTRUCTION {
+        return false;
+    }
     let bytes = value.as_bytes();
     bytes.len() == 25
         && bytes[4] == b'-'
@@ -150,11 +158,11 @@ mod tests {
     fn formats_shared_time_context() {
         assert_eq!(
             format_time_context("2026-08-13 09:05", "+0800"),
-            "## Current Time\n2026-08-13 09:05 (+08:00)"
+            "## Current Time\n2026-08-13 09:05 (+08:00)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant."
         );
         assert_eq!(
             format_time_context("2026-08-12 18:35", "-0730"),
-            "## Current Time\n2026-08-12 18:35 (-07:30)"
+            "## Current Time\n2026-08-12 18:35 (-07:30)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant."
         );
     }
 
@@ -211,7 +219,7 @@ mod tests {
 
     #[test]
     fn removes_only_a_valid_appended_time_context() {
-        let augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)";
+        let augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant.";
         assert_eq!(user_text_without_time_context(augmented), "hello");
         assert_eq!(
             user_text_without_time_context("hello\n\n## Current Time\nnot-runtime-data"),

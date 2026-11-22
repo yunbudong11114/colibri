@@ -77,6 +77,10 @@ def main(
                 gateway_status = manager.status()
             for line in format_gateway_status(gateway_status):
                 print(line)
+            if args.gateway_action == "stop":
+                return int(gateway_status.running)
+            if args.gateway_action in {"start", "restart"}:
+                return int(not gateway_status.running or bool(gateway_status.reason))
             return 0
 
         load_config = config_loader or AgentConfig.load

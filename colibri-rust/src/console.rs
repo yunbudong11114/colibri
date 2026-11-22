@@ -53,7 +53,7 @@ pub fn status_line_for_event(event_type: &str, payload: &Value) -> Option<String
                 .get("name")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown");
-            Some(format!("[colibri] tool {name} wait_permission"))
+            Some(format!("[colibri] tool {name} running"))
         }
         "tool_result" => {
             let name = payload

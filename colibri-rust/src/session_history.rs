@@ -40,10 +40,14 @@ impl TranscriptHistoryLoader {
     }
 
     pub fn load(&self) -> Vec<Message> {
+        self.load_after(&BTreeMap::new())
+    }
+
+    pub(crate) fn load_after(&self, offsets: &BTreeMap<String, u64>) -> Vec<Message> {
         if self.message_limit < 2 || self.char_limit == 0 || self.scan_bytes == 0 {
             return Vec::new();
         }
-        let turns = completed_turns(&self.recent_lines());
+        let turns = completed_turns(&self.recent_lines(offsets));
         let mut selected = Vec::new();
         let mut selected_chars = 0usize;
         for (user, assistant) in turns.into_iter().rev() {
@@ -65,7 +69,7 @@ impl TranscriptHistoryLoader {
         messages
     }
 
-    fn recent_lines(&self) -> Vec<String> {
+    fn recent_lines(&self, offsets: &BTreeMap<String, u64>) -> Vec<String> {
         let Ok(entries) = fs::read_dir(&self.transcript_dir) else {
             return Vec::new();
         };
@@ -88,7 +92,16 @@ impl TranscriptHistoryLoader {
             let Ok(size) = file.metadata().map(|meta| meta.len()) else {
                 continue;
             };
-            let read_size = remaining.min(size);
+            let floor = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| offsets.get(name))
+                .copied()
+                .unwrap_or(0);
+            let read_size = remaining.min(size.saturating_sub(floor));
+            if read_size == 0 {
+                continue;
+            }
             let start = size.saturating_sub(read_size);
             let mut starts_mid_line = false;
             if start > 0 && file.seek(SeekFrom::Start(start - 1)).is_ok() {

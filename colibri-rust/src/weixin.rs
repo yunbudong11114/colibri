@@ -11,15 +11,11 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use serde_json::json;
 
-use crate::channel::{
-    ChannelPermissionWaiters, ChannelTextPermissionPrompter, GatewayChannel, InboundEnvelope,
-    OutboundSink,
-};
+use crate::channel::{ChannelPollError, GatewayChannel, InboundEnvelope, OutboundSink};
 use crate::config::AgentConfig;
 use crate::http::{json_string_field, request_binary, request_json};
 use crate::messages::MediaPart;
 use crate::model::escape_json;
-use crate::permissions::PermissionPrompter;
 use crate::terminal_qr::render_terminal_qr;
 use crate::tools::content_type_for_path;
 
@@ -31,7 +27,6 @@ const WEIXIN_DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c
 const MEDIA_TEMP_DIR: &str = "/tmp/colibri/media";
 const MEDIA_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 const MEDIA_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
-const CHANNEL_PERMISSION_TIMEOUT_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug)]
 pub struct WeixinAuthResult {
@@ -72,11 +67,11 @@ impl GatewayChannel for WeixinGatewayChannel {
         "weixin"
     }
 
-    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
         let mut cursor = self
             .get_updates_buf
             .lock()
-            .map_err(|_| "weixin poll cursor lock poisoned".to_string())?;
+            .map_err(|_| ChannelPollError::Permanent("weixin poll cursor lock poisoned".into()))?;
         let (next_cursor, messages) = poll_weixin_once(&self.config, &cursor)?;
         *cursor = next_cursor;
         Ok(messages.into_iter().map(envelope_from_weixin).collect())
@@ -104,20 +99,6 @@ impl GatewayChannel for WeixinGatewayChannel {
             sender_id: envelope.sender_id.clone(),
             context_token: envelope.context_token().to_string(),
         }))
-    }
-
-    fn permission_prompter(
-        &self,
-        outbound: Arc<dyn OutboundSink>,
-        session_key: String,
-        waiters: Arc<ChannelPermissionWaiters>,
-    ) -> Option<Box<dyn PermissionPrompter>> {
-        Some(Box::new(ChannelTextPermissionPrompter::new(
-            outbound,
-            session_key,
-            waiters,
-            CHANNEL_PERMISSION_TIMEOUT_SECONDS,
-        )))
     }
 }
 
@@ -170,6 +151,13 @@ pub fn parse_weixin_updates(
 ) -> Result<(String, Vec<InboundWeixinMessage>), String> {
     let data: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| format!("Weixin API response was not valid JSON: {}", error))?;
+    Ok(parse_weixin_updates_value(config, &data))
+}
+
+fn parse_weixin_updates_value(
+    config: &AgentConfig,
+    data: &serde_json::Value,
+) -> (String, Vec<InboundWeixinMessage>) {
     let next = data
         .get("get_updates_buf")
         .and_then(serde_json::Value::as_str)
@@ -253,7 +241,7 @@ pub fn parse_weixin_updates(
             pending_media_items,
         });
     }
-    Ok((next, messages))
+    (next, messages)
 }
 
 pub fn resolve_inbound_media(
@@ -410,7 +398,14 @@ pub fn save_weixin_auth_config(path: &Path, result: &WeixinAuthResult) -> Result
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let text = fs::read_to_string(path).unwrap_or_default();
+    #[cfg(unix)]
+    let _lock = crate::config_io::lock(&path.with_file_name("settings.lock"))
+        .map_err(|error| error.to_string())?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
     let text = upsert_toml_section_values(
         &text,
         "channels.weixin",
@@ -420,15 +415,19 @@ pub fn save_weixin_auth_config(path: &Path, result: &WeixinAuthResult) -> Result
             ("base_url", toml_string(&result.base_url)),
         ],
     );
-    fs::write(path, text).map_err(|error| error.to_string())
+    #[cfg(unix)]
+    let result = crate::config_io::atomic_write(path, text.as_bytes());
+    #[cfg(not(unix))]
+    let result = fs::write(path, text);
+    result.map_err(|error| error.to_string())
 }
 
 pub fn poll_weixin_once(
     config: &AgentConfig,
     get_updates_buf: &str,
-) -> Result<(String, Vec<InboundWeixinMessage>), String> {
+) -> Result<(String, Vec<InboundWeixinMessage>), ChannelPollError> {
     if config.channels_weixin.token.is_empty() {
-        return Err("channels.weixin.token is required".to_string());
+        return Err(ChannelPollError::AuthRequired);
     }
     let base_url = normalized_base_url(&config.channels_weixin.base_url);
     let url = format!("{}ilink/bot/getupdates", base_url);
@@ -443,9 +442,39 @@ pub fn poll_weixin_once(
         &weixin_headers(true, &config.channels_weixin.token),
         Some(&body),
         config.channels_weixin.poll_timeout_seconds + 5,
-    )?;
-    fail_on_http("Weixin getupdates", &response)?;
-    let (parsed_buf, messages) = parse_weixin_updates(config, &response.body)?;
+    )
+    .map_err(|_| ChannelPollError::Retryable("微信轮询网络请求失败".into()))?;
+    match response.status {
+        Some(401 | 403) => return Err(ChannelPollError::AuthRequired),
+        Some(status @ (408 | 425 | 429 | 500..=599)) => {
+            return Err(ChannelPollError::Retryable(format!(
+                "微信轮询 HTTP {status}"
+            )));
+        }
+        Some(status @ 400..=499) => {
+            return Err(ChannelPollError::Permanent(format!(
+                "微信轮询 HTTP {status}"
+            )));
+        }
+        _ => {}
+    }
+    let data: serde_json::Value = serde_json::from_str(&response.body)
+        .map_err(|_| ChannelPollError::Retryable("微信轮询响应格式无效".into()))?;
+    let code = |key| {
+        data.get(key)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
+    let (ret, errcode) = (code("ret"), code("errcode"));
+    if ret == -14 || errcode == -14 {
+        return Err(ChannelPollError::AuthRequired);
+    }
+    if ret != 0 || errcode != 0 {
+        return Err(ChannelPollError::Retryable(format!(
+            "微信轮询 ret={ret}, errcode={errcode}"
+        )));
+    }
+    let (parsed_buf, messages) = parse_weixin_updates_value(config, &data);
     let next_buf = if parsed_buf.is_empty() {
         get_updates_buf.to_string()
     } else {

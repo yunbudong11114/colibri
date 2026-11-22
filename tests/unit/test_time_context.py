@@ -11,15 +11,21 @@ from colibri.time_context import (
 def test_current_time_context_uses_shared_positive_offset_format():
     now = datetime(2026, 8, 13, 9, 5, tzinfo=timezone(timedelta(hours=8)))
 
-    assert current_time_context(now) == "## Current Time\n2026-08-13 09:05 (+08:00)"
+    assert current_time_context(now) == (
+        "## Current Time\n2026-08-13 09:05 (+08:00)\n"
+        "Use this only when needed. Do not mention or repeat the current time unless "
+        "the user asks or it is relevant."
+    )
 
 
 def test_current_time_context_formats_negative_and_utc_offsets():
     negative = datetime(2026, 8, 12, 18, 35, tzinfo=timezone(-timedelta(hours=7, minutes=30)))
     utc = datetime(2026, 8, 13, 1, 5, tzinfo=timezone.utc)
 
-    assert current_time_context(negative) == "## Current Time\n2026-08-12 18:35 (-07:30)"
-    assert current_time_context(utc) == "## Current Time\n2026-08-13 01:05 (+00:00)"
+    suffix = ("\nUse this only when needed. Do not mention or repeat the current time "
+              "unless the user asks or it is relevant.")
+    assert current_time_context(negative) == "## Current Time\n2026-08-12 18:35 (-07:30)" + suffix
+    assert current_time_context(utc) == "## Current Time\n2026-08-13 01:05 (+00:00)" + suffix
 
 
 def test_time_context_only_changes_active_user_tail():
@@ -48,7 +54,10 @@ def test_time_context_only_changes_active_user_tail():
 
 
 def test_user_text_without_time_context_requires_valid_runtime_suffix():
-    augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)"
+    augmented = current_time_context(
+        datetime(2026, 8, 20, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+    )
+    augmented = f"hello\n\n{augmented}"
 
     assert user_text_without_time_context(augmented) == "hello"
     assert (

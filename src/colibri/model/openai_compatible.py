@@ -136,14 +136,14 @@ class OpenAICompatibleModelClient:
 
     def _request_json(self, url: str, payload: dict, timeout_seconds: int) -> dict:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(
             url=url,
             data=body,
             method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:

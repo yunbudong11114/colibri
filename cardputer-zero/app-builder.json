@@ -1,0 +1,38 @@
+{
+  "app_name": "Colibri",
+  "package_name": "colibri-cardputer",
+  "version": "0.1.39",
+  "description": "Keyboard-first Colibri chat for Cardputer Zero",
+  "store": {
+    "summary": "Keyboard-first AI chat with pinyin, voice, MCP, and a terminal REPL.",
+    "description": "A lightweight Colibri client for the Cardputer Zero, with configurable model, speech, search, and history settings.",
+    "categories": [
+      "AI",
+      "Development"
+    ],
+    "screenshots": [
+      "assets/screenshot.png",
+      "assets/screenshot-confirm.png"
+    ],
+    "icon": "assets/store-icon.png",
+    "source_repo": "https://github.com/yunbudong11114/colibri",
+    "author": {
+      "display_name": "卧东"
+    },
+    "locales": {
+      "zh-CN": {
+        "title": "Colibri",
+        "summary": "支持拼音、语音、MCP 和终端 REPL 的口袋 AI 助手。"
+      }
+    },
+    "permissions": {
+      "camera": false,
+      "microphone": true,
+      "imu": false,
+      "network": true,
+      "additional_hardware": false,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}

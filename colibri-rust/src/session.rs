@@ -8,20 +8,19 @@ use crate::context::{
 use crate::memory::MemoryContext;
 use crate::messages::{AgentResponse, MediaPart, Message, ModelLimits, ToolCall, ToolResult};
 use crate::model::ModelClient;
-use crate::permissions::{PermissionPolicy, PermissionPrompter};
 use crate::runtime_reload::RuntimeSnapshot;
 use crate::skills::skill_catalog;
 use crate::steering::{format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT};
 use crate::time_context::{append_time_context_to_latest_user, current_time_context};
-use crate::tools::{run_tool_map, string_arguments, tool_info, tool_specs_for_config, ToolContext};
+use crate::tools::{run_tool_map, string_arguments, tool_specs_for_config, ToolContext};
 use crate::transcript::TranscriptWriter;
 use crate::vision::analyze_image;
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. ";
+pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. Before any dangerous, destructive, or irreversible operation, ask the user and wait for their explicit approval.";
 pub const MODEL_UNAVAILABLE_TEXT: &str = "模型暂时不可用，请检查网络后重试。";
 pub const TRUNCATED_TOOL_CALL_TEXT: &str = "Tool call was truncated because the model reached its output limit; retry the call with complete arguments.";
 
@@ -29,6 +28,11 @@ struct UsageAnchor {
     total_tokens: usize,
     message_count: usize,
     prefix_fingerprint: u64,
+}
+
+pub trait SessionToolExtension: Send + Sync {
+    fn specs(&self) -> Vec<serde_json::Value>;
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Option<ToolResult>;
 }
 
 pub struct AgentSession {
@@ -43,7 +47,8 @@ pub struct AgentSession {
     media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     history_loader: Option<Box<dyn Fn() -> Vec<Message> + Send>>,
     history_loaded: bool,
-    permission_policy: PermissionPolicy,
+    direct_tools: Option<Box<dyn SessionToolExtension>>,
+    working_directory: Option<PathBuf>,
     steering: Arc<SteeringState>,
     steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
     usage_anchor: Option<UsageAnchor>,
@@ -75,7 +80,6 @@ impl AgentSession {
         transcript: Option<Arc<Mutex<TranscriptWriter>>>,
         transcript_metadata: BTreeMap<String, String>,
     ) -> Self {
-        let permission_policy = PermissionPolicy::from_config(&config, std::path::PathBuf::new());
         Self {
             config,
             model,
@@ -88,11 +92,37 @@ impl AgentSession {
             media_sender: None,
             history_loader: None,
             history_loaded: false,
-            permission_policy,
+            direct_tools: None,
+            working_directory: None,
             steering: Arc::new(SteeringState::new()),
             steer_notifier: None,
             usage_anchor: None,
         }
+    }
+
+    pub(crate) fn with_working_directory(mut self, cwd: PathBuf) -> Self {
+        self.working_directory = Some(cwd);
+        self
+    }
+
+    #[cfg(unix)]
+    fn prepare_tools(&mut self) -> Result<(), String> {
+        if self.direct_tools.is_none() {
+            use crate::mcp::{servers, Extensions};
+            let servers = servers(&self.config.mcp_servers)?;
+            let extension = Extensions::discover(&servers, |message| {
+                if let Some(callback) = &self.status_callback {
+                    callback(&message);
+                }
+            });
+            self.direct_tools = Some(Box::new(extension));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_transcript(&mut self, transcript: Option<Arc<Mutex<TranscriptWriter>>>) {
+        self.close();
+        self.transcript = transcript;
     }
 
     pub fn with_history_loader(mut self, loader: Box<dyn Fn() -> Vec<Message> + Send>) -> Self {
@@ -131,10 +161,6 @@ impl AgentSession {
         self.steering.is_turn_active()
     }
 
-    pub fn is_permission_pending(&self) -> bool {
-        self.steering.is_permission_pending()
-    }
-
     /// Close transcript resources. Shared gateway transcripts stay open until
     /// `GatewaySessionCache::close` (matches Python ScopedTranscriptWriter).
     pub fn close(&mut self) {
@@ -148,7 +174,7 @@ impl AgentSession {
     }
 
     pub fn submit(&mut self, text: &str) -> Result<AgentResponse, String> {
-        self.submit_with_permission_prompter(text, None)
+        self.submit_inner(text, Vec::new())
     }
 
     pub fn submit_with_media(
@@ -156,7 +182,7 @@ impl AgentSession {
         text: &str,
         media: Vec<MediaPart>,
     ) -> Result<AgentResponse, String> {
-        self.submit_inner(text, media, None)
+        self.submit_inner(text, media)
     }
 
     pub fn set_media_sender(
@@ -171,6 +197,9 @@ impl AgentSession {
         config: Arc<AgentConfig>,
         model: Arc<Mutex<Box<dyn ModelClient>>>,
     ) {
+        if self.config.mcp_servers != config.mcp_servers {
+            self.direct_tools = None;
+        }
         self.config = config;
         self.model = model;
         self.usage_anchor = None;
@@ -183,29 +212,9 @@ impl AgentSession {
         }
     }
 
-    pub fn submit_with_permission_prompter(
-        &mut self,
-        text: &str,
-        prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> Result<AgentResponse, String> {
-        self.submit_inner(text, Vec::new(), prompter)
-    }
-
-    pub fn submit_with_media_and_permission_prompter(
-        &mut self,
-        text: &str,
-        media: Vec<MediaPart>,
-        prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> Result<AgentResponse, String> {
-        self.submit_inner(text, media, prompter)
-    }
-
-    fn submit_inner(
-        &mut self,
-        text: &str,
-        media: Vec<MediaPart>,
-        prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> Result<AgentResponse, String> {
+    fn submit_inner(&mut self, text: &str, media: Vec<MediaPart>) -> Result<AgentResponse, String> {
+        #[cfg(unix)]
+        self.prepare_tools()?;
         self.restore_history_once();
         let user_text = user_text_with_media(text, &media);
         self.messages.push(Message::new("user", &user_text));
@@ -217,7 +226,10 @@ impl AgentSession {
             }),
         );
 
-        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let cwd = match &self.working_directory {
+            Some(cwd) => cwd.clone(),
+            None => std::env::current_dir().map_err(|error| error.to_string())?,
+        };
         let analyzer_config = Arc::clone(&self.config);
         let analyzer = Arc::new(move |path: &Path, prompt: &str| {
             analyze_image(&analyzer_config, path, prompt)
@@ -241,12 +253,14 @@ impl AgentSession {
                 serde_json::json!({"skills":skill_names,"truncated":_truncated}),
             );
         }
-        let tools = tool_specs_for_config(&self.config);
+        let mut tools = tool_specs_for_config(&self.config);
+        if let Some(extension) = &self.direct_tools {
+            tools.extend(extension.specs());
+        }
         let steering = Arc::clone(&self.steering);
         steering.set_turn_active(true);
         let _turn_guard = TurnGuard { steering };
-        let mut prompter = prompter;
-        self.run_tool_rounds(&memory.text, &skill_text, &tools, &context, &mut prompter)
+        self.run_tool_rounds(&memory.text, &skill_text, &tools, &context)
     }
 
     fn run_tool_rounds(
@@ -255,7 +269,6 @@ impl AgentSession {
         skill_text: &str,
         tools: &[serde_json::Value],
         context: &ToolContext,
-        prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<AgentResponse, String> {
         for _ in 0..self.config.session.max_tool_rounds {
             let mut model_messages =
@@ -332,7 +345,7 @@ impl AgentSession {
 
             let calls = response.tool_calls;
             for index in 0..calls.len() {
-                self.execute_tool_call(&calls[index], context, prompter)?;
+                self.execute_tool_call(&calls[index], context)?;
                 if let Some(steered) = self.steering.drain_one() {
                     let skipped = calls.len() - index - 1;
                     for skipped_call in &calls[index + 1..] {
@@ -384,62 +397,21 @@ impl AgentSession {
         }
     }
 
-    fn execute_tool_call(
-        &mut self,
-        call: &ToolCall,
-        context: &ToolContext,
-        prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> Result<(), String> {
+    fn execute_tool_call(&mut self, call: &ToolCall, context: &ToolContext) -> Result<(), String> {
         let execution_arguments = string_arguments(&call.arguments);
         self.write_transcript(
             "tool_call",
             serde_json::json!({"id":call.id,"name":call.name,"arguments":call.arguments}),
         );
-        self.steering.set_permission_pending(true);
-        let _permission_guard = PermissionPendingGuard {
-            steering: Arc::clone(&self.steering),
+        let extension_result = self
+            .direct_tools
+            .as_ref()
+            .and_then(|extension| extension.run(call, context));
+        let mut result = match extension_result {
+            Some(result) => result,
+            None => run_tool_map(&call.name, &execution_arguments, context)?,
         };
-        let decision = if let Some(prompter) = prompter.as_mut() {
-            self.permission_policy.decide(
-                &tool_info(&call.name),
-                &execution_arguments,
-                context,
-                Some(&mut **prompter),
-            )
-        } else {
-            self.permission_policy.decide(
-                &tool_info(&call.name),
-                &execution_arguments,
-                context,
-                None,
-            )
-        };
-        drop(_permission_guard);
-        self.write_transcript(
-            "permission_decision",
-            serde_json::json!({
-                "tool_name":call.name,
-                "subject_kind":decision.subject_kind,
-                "decision":decision.decision,
-                "scope":decision.scope,
-                "allowed":decision.allowed,
-                "reason":decision.reason,
-                "shell_command":execution_arguments.get("command"),
-                "file_path":decision.file_path,
-                "file_root":decision.file_root,
-                "hardware_device":decision.hardware_device
-            }),
-        );
-        let result = if decision.allowed {
-            let run_context = decision
-                .file_root
-                .as_ref()
-                .map(|root| context.with_allowed_file_root(std::path::PathBuf::from(root)))
-                .unwrap_or_else(|| context.clone());
-            run_tool_map(&call.name, &execution_arguments, &run_context)?
-        } else {
-            crate::messages::ToolResult::error("permission_denied", denied_tool_text(call))
-        };
+        crate::secrets::redact_tool_output(&self.config, &mut result.text);
         let result = self.send_media_result_if_needed(result);
         self.write_transcript(
             "tool_result",
@@ -824,22 +796,6 @@ fn owned_transcript(config: &AgentConfig) -> Option<Arc<Mutex<TranscriptWriter>>
     .map(|writer| Arc::new(Mutex::new(writer)))
 }
 
-fn denied_tool_text(call: &ToolCall) -> String {
-    if call.name == "shell.run" {
-        if let Some(command) = call
-            .arguments
-            .get("command")
-            .and_then(|value| value.as_str())
-        {
-            let command = command.trim();
-            if !command.is_empty() {
-                return format!("User denied shell.run: {}", command);
-            }
-        }
-    }
-    format!("User denied {}", call.name)
-}
-
 fn user_text_with_media(text: &str, media: &[MediaPart]) -> String {
     if media.is_empty() {
         return text.to_string();
@@ -909,16 +865,6 @@ impl Drop for TurnGuard {
     fn drop(&mut self) {
         self.steering.set_turn_active(false);
         self.steering.clear();
-    }
-}
-
-struct PermissionPendingGuard {
-    steering: Arc<SteeringState>,
-}
-
-impl Drop for PermissionPendingGuard {
-    fn drop(&mut self) {
-        self.steering.set_permission_pending(false);
     }
 }
 

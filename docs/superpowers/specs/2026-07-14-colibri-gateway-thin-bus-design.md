@@ -267,3 +267,9 @@ InboundEnvelope / OutboundDispatcher, remove Weixin branches from gateway core, 
 Router + scheduler; default concurrent turns = 1.
 
 Ship A→B→C behind one design; each phase stays mergeable and testable.
+
+## 13. Gateway process control
+
+- `stop` is idempotent when the recorded process is gone or is a zombie. For a live PID, verify the gateway command before signaling. Wait for termination after SIGTERM, and recheck identity before escalating to SIGKILL. Confirm exit after escalation as well. Report unverified PIDs, signal failures, or an exit timeout as command failures.
+- `restart` starts a replacement only after `stop` confirms the gateway is no longer running. For a newly spawned process, `start` and `restart` check for immediate exit during a short observation window. This check measures process survival, not channel readiness.
+- Keep the status output format and add machine-readable failure reasons. Rust and Python use the same exit-code rules. These checks work on Linux and macOS without a new dependency.

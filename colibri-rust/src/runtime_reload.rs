@@ -18,7 +18,7 @@ pub enum RuntimeReloadResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ConfigFingerprint {
+pub(crate) struct ConfigFingerprint {
     modified_ns: u128,
     len: u64,
 }
@@ -53,16 +53,12 @@ impl PartialRuntimeReloader {
             Ok(config) => config,
             Err(error) => return RuntimeReloadResult::Rejected(error),
         };
-        let mut next = (*self.snapshot.config).clone();
-        next.model = candidate.model;
-        next.vision = candidate.vision;
-        next.web_search = candidate.web_search;
-        let model = match build_model(&next.model) {
+        let model = match build_model(&candidate.model) {
             Ok(model) => Arc::new(Mutex::new(model)),
             Err(error) => return RuntimeReloadResult::Rejected(error),
         };
         let snapshot = RuntimeSnapshot {
-            config: Arc::new(next),
+            config: Arc::new(candidate),
             model,
         };
         self.snapshot = snapshot.clone();
@@ -70,7 +66,7 @@ impl PartialRuntimeReloader {
     }
 }
 
-fn config_fingerprint(path: &Path) -> Option<ConfigFingerprint> {
+pub(crate) fn config_fingerprint(path: &Path) -> Option<ConfigFingerprint> {
     let metadata = fs::metadata(path).ok()?;
     let modified_ns = metadata
         .modified()

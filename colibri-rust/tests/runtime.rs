@@ -3,16 +3,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use colibri_rust::channel::{
-    build_channel_registry, format_channel_permission_prompt, parse_permission_choice,
-    validate_channel_envelope, ChannelPermissionWaiters, ChannelTextPermissionPrompter,
-    GatewayChannel, InboundEnvelope, OutboundSink,
+    build_channel_registry, validate_channel_envelope, ChannelPollError, GatewayChannel,
+    InboundEnvelope, OutboundSink,
 };
 use colibri_rust::channel_registry::build_enabled_channels;
-use colibri_rust::cli::{run_steering_pump, run_with_io};
+use colibri_rust::cli::{run_with_io};
 use colibri_rust::config::{expand_user_path, AgentConfig, HardwareDeviceConfig};
 use colibri_rust::gateway::{
     format_gateway_log, format_gateway_status, GatewayAgentHealth, GatewaySessionCache,
@@ -24,9 +23,6 @@ use colibri_rust::hardware::{
 use colibri_rust::memory::MemoryContext;
 use colibri_rust::messages::{MediaPart, Message, ModelLimits, ModelUsage, ToolCall};
 use colibri_rust::model::{FakeModel, ModelClient, OpenAiCompatibleModel};
-use colibri_rust::permissions::{
-    PermissionPolicy, PermissionPrompter, PermissionRequest, UserGrants, UserPermissionStore,
-};
 use colibri_rust::repl_input::{
     handle_escape_sequence, read_escape_sequence_with, read_repl_line, try_read_line,
     write_raw_tty_newline, ReplLineEditor,
@@ -41,7 +37,7 @@ use colibri_rust::terminal_qr::render_terminal_qr;
 use colibri_rust::time_context::{
     append_time_context_to_latest_user, format_time_context, user_text_without_time_context,
 };
-use colibri_rust::tools::{run_tool, tool_info, tool_specs_for_config, ToolContext, ToolInfo};
+use colibri_rust::tools::{run_tool, tool_specs_for_config, ToolContext};
 use colibri_rust::transcript::TranscriptWriter;
 use colibri_rust::weixin::{
     cleanup_media_directory, decrypt_aes_ecb, download_inbound_media, encrypt_aes_ecb,
@@ -166,8 +162,6 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.gateway.max_pending_inbound, 8);
     assert_eq!(config.gateway.max_concurrent_turns, 1);
     assert!(!config.channels_weixin.enabled);
-    assert_eq!(config.shell.deny[0], "rm");
-    assert_eq!(config.files.roots[1], Path::new("/tmp/colibri"));
     assert!(config.console.status);
     assert!(config.console.plain_answer);
     assert!(expand_user_path("~/.colibri").is_absolute());
@@ -245,8 +239,6 @@ max_active_servers = 3
     assert_eq!(config.session.restore_scan_bytes, 123456);
     assert_eq!(config.session.transcript_retention_days, 7);
     assert_eq!(config.session.transcript_max_total_bytes, 7654321);
-    assert_eq!(config.files.roots[0].file_name().unwrap(), "notes");
-    assert_eq!(config.files.roots[1], Path::new("/tmp"));
     assert!(!config.console.status);
     assert!(config.console.plain_answer);
     assert!(config.channels_weixin.enabled);
@@ -419,25 +411,10 @@ fn steer_rejected_when_turn_inactive() {
 }
 
 #[test]
-fn steer_rejected_while_permission_pending() {
-    let mut config = AgentConfig::default();
-    config.session.transcript = false;
-    config.memory.enabled = false;
-    let session = AgentSession::new(config, Box::new(FakeModel::new()));
-    let handle = session.steer_handle();
-    handle.set_turn_active_for_test(true);
-    handle.set_permission_pending_for_test(true);
-
-    assert!(!session.steer("change plan"));
-    assert!(session.is_permission_pending());
-}
-
-#[test]
 fn steer_skips_remaining_tools_and_injects_user_message() {
     let mut config = AgentConfig::default();
     config.session.transcript = false;
     config.memory.enabled = false;
-    config.tools.default_permission = "allow".to_string();
 
     let acks = Arc::new(Mutex::new(Vec::new()));
     let acks_for_notifier = Arc::clone(&acks);
@@ -485,7 +462,6 @@ fn steer_during_text_only_complete_is_applied() {
     let mut config = AgentConfig::default();
     config.session.transcript = false;
     config.memory.enabled = false;
-    config.tools.default_permission = "allow".to_string();
 
     let acks = Arc::new(Mutex::new(Vec::new()));
     let acks_for_notifier = Arc::clone(&acks);
@@ -590,7 +566,7 @@ fn steering_pump_forwards_line_to_steer() {
     let stop = AtomicBool::new(false);
     let lines = Mutex::new(vec![Some("change plan".to_string()), None]);
 
-    run_steering_pump(
+    colibri_rust::cli::run_steering_pump(
         &handle,
         &stop,
         |_| {
@@ -605,77 +581,9 @@ fn steering_pump_forwards_line_to_steer() {
             }
             next
         },
-        || {},
-        |_| {},
     );
 
     assert_eq!(handle.drain_one_for_test().as_deref(), Some("change plan"));
-}
-
-#[test]
-fn steering_pump_skips_read_while_permission_pending() {
-    let handle = SteerHandle::new(Arc::new(SteeringState::new()));
-    handle.set_turn_active_for_test(true);
-    handle.set_permission_pending_for_test(true);
-    let stop = AtomicBool::new(false);
-    let read_calls = Mutex::new(Vec::new());
-    let sleeps = Mutex::new(Vec::new());
-
-    run_steering_pump(
-        &handle,
-        &stop,
-        |timeout| {
-            read_calls.lock().unwrap().push(timeout);
-            stop.store(true, Ordering::SeqCst);
-            Some("should-not-reach".to_string())
-        },
-        || {},
-        |duration| {
-            sleeps.lock().unwrap().push(duration);
-            if sleeps.lock().unwrap().len() >= 2 {
-                handle.set_permission_pending_for_test(false);
-            }
-        },
-    );
-
-    assert_eq!(sleeps.lock().unwrap().len(), 2);
-    assert_eq!(*read_calls.lock().unwrap(), vec![0.2]);
-    assert_eq!(
-        handle.drain_one_for_test().as_deref(),
-        Some("should-not-reach")
-    );
-}
-
-#[test]
-fn steering_pump_notifies_permission_pending_once() {
-    let handle = SteerHandle::new(Arc::new(SteeringState::new()));
-    handle.set_turn_active_for_test(true);
-    let stop = AtomicBool::new(false);
-    let notifies = Mutex::new(0usize);
-    let sleep_count = Mutex::new(0usize);
-
-    run_steering_pump(
-        &handle,
-        &stop,
-        |_| {
-            handle.set_permission_pending_for_test(true);
-            Some("steer-me".to_string())
-        },
-        || {
-            *notifies.lock().unwrap() += 1;
-        },
-        |_| {
-            let mut count = sleep_count.lock().unwrap();
-            *count += 1;
-            if *count >= 3 {
-                stop.store(true, Ordering::SeqCst);
-            }
-        },
-    );
-
-    assert_eq!(*notifies.lock().unwrap(), 1);
-    assert!(*sleep_count.lock().unwrap() >= 3);
-    assert!(handle.drain_one_for_test().is_none());
 }
 
 #[test]
@@ -959,7 +867,12 @@ fn session_injects_transient_current_time_context() {
         .unwrap();
     assert!(user_message.content.starts_with("what time is it?"));
     assert!(user_message.content.contains("\n\n## Current Time\n"));
-    let time_line = user_message.content.lines().last().unwrap();
+    let mut lines = user_message.content.lines().rev();
+    assert!(lines
+        .next()
+        .unwrap()
+        .starts_with("Use this only when needed."));
+    let time_line = lines.next().unwrap();
     assert_eq!(time_line.len(), 25);
     assert_eq!(&time_line[4..5], "-");
     assert_eq!(&time_line[7..8], "-");
@@ -976,15 +889,15 @@ fn session_injects_transient_current_time_context() {
 fn time_context_formats_offsets_like_python() {
     assert_eq!(
         format_time_context("2026-08-13 09:05", "+0800"),
-        "## Current Time\n2026-08-13 09:05 (+08:00)"
+        "## Current Time\n2026-08-13 09:05 (+08:00)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant."
     );
     assert_eq!(
         format_time_context("2026-08-12 18:35", "-0730"),
-        "## Current Time\n2026-08-12 18:35 (-07:30)"
+        "## Current Time\n2026-08-12 18:35 (-07:30)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant."
     );
     assert_eq!(
         format_time_context("2026-08-13 01:05", "+0000"),
-        "## Current Time\n2026-08-13 01:05 (+00:00)"
+        "## Current Time\n2026-08-13 01:05 (+00:00)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant."
     );
 }
 
@@ -1025,7 +938,7 @@ fn time_context_only_changes_active_user_tail_like_python() {
 
 #[test]
 fn user_text_without_time_context_requires_valid_runtime_suffix_like_python() {
-    let augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)";
+    let augmented = "hello\n\n## Current Time\n2026-08-20 10:00 (+08:00)\nUse this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant.";
 
     assert_eq!(user_text_without_time_context(augmented), "hello");
     assert_eq!(
@@ -1152,8 +1065,6 @@ fn session_sends_media_result_through_media_sender_like_python() {
     let sent = Arc::new(Mutex::new(Vec::<MediaPart>::new()));
     let sent_for_sender = Arc::clone(&sent);
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
-    config.tools.default_permission = "allow".to_string();
     config.memory.enabled = false;
     config.session.transcript = false;
     let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
@@ -1187,8 +1098,6 @@ fn session_turns_media_sender_failure_into_tool_error_like_python() {
     let temp = temp_dir("session-send-media-fail");
     fs::write(temp.join("report.txt"), "hello").unwrap();
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
-    config.tools.default_permission = "allow".to_string();
     config.memory.enabled = false;
     config.session.transcript = false;
     let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
@@ -1322,7 +1231,6 @@ fn session_blocks_length_truncated_tool_call_and_asks_model_again_like_python() 
     let old = std::env::current_dir().unwrap();
     std::env::set_current_dir(&temp).unwrap();
     let mut config = AgentConfig::default();
-    config.tools.default_permission = "allow".to_string();
     config.memory.enabled = false;
     config.session.transcript = false;
     let mut session = AgentSession::new(config, Box::new(LengthToolModel::new(&marker)));
@@ -1363,7 +1271,7 @@ fn session_records_stop_reason_and_usage_in_transcript_like_python() {
 fn session_uses_reported_usage_as_next_request_anchor_like_python() {
     let calls = Arc::new(Mutex::new(0usize));
     let mut config = AgentConfig::default();
-    config.model.input_context_tokens = 200;
+    config.model.input_context_tokens = 240;
     config.model.max_output_tokens = 80;
     config.session.trigger_message_limit = 99;
     config.session.model_compact = false;
@@ -1561,7 +1469,6 @@ fn session_keeps_large_tool_result_text_for_model_context_like_python() {
     let old = std::env::current_dir().unwrap();
     std::env::set_current_dir(&temp).unwrap();
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
     config.memory.enabled = false;
     config.tools.max_result_chars = 500;
     config.session.transcript = true;
@@ -1656,7 +1563,6 @@ fn session_round_limit_text_matches_python() {
     config.session.max_tool_rounds = 1;
     config.session.transcript = false;
     config.memory.enabled = false;
-    config.tools.default_permission = "allow".to_string();
     let mut session = AgentSession::new(config, Box::new(AlwaysToolModel::new()));
 
     let response = session.submit("loop").unwrap();
@@ -1727,48 +1633,6 @@ commands:
 }
 
 #[test]
-fn session_denies_tool_calls_when_permission_mode_is_deny() {
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "deny".to_string();
-    let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
-
-    let response = session.submit(r#"tool:files.list {"path":"."}"#).unwrap();
-
-    assert!(response.text.contains("permission_denied"));
-    assert!(session.messages.iter().any(
-        |message| message.role == "tool" && message.content.contains("User denied files.list")
-    ));
-}
-
-#[test]
-fn session_permission_grant_survives_multiple_submits() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("session-permission-lifecycle");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let config = AgentConfig::default();
-    let mut session = AgentSession::new(config.clone(), Box::new(PermissionRoundModel));
-    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-
-    session
-        .submit_with_permission_prompter("first", Some(&mut prompter))
-        .unwrap();
-    session
-        .submit_with_permission_prompter("second", Some(&mut prompter))
-        .unwrap();
-
-    assert_eq!(prompter.requests.len(), 1);
-
-    let mut fresh_session = AgentSession::new(config, Box::new(PermissionRoundModel));
-    let mut fresh_prompter = FakePermissionPrompter::new(vec!["0"]);
-    fresh_session
-        .submit_with_permission_prompter("fresh", Some(&mut fresh_prompter))
-        .unwrap();
-    assert_eq!(fresh_prompter.requests.len(), 1);
-    restore_home(old_home);
-}
-
-#[test]
 fn session_allows_read_only_tool_calls_by_default() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("session-readonly");
@@ -1776,7 +1640,6 @@ fn session_allows_read_only_tool_calls_by_default() {
     let old = std::env::current_dir().unwrap();
     std::env::set_current_dir(&temp).unwrap();
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
     config.memory.root = temp.join("memory");
     let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
 
@@ -1789,27 +1652,7 @@ fn session_allows_read_only_tool_calls_by_default() {
 }
 
 #[test]
-fn session_denies_write_and_execute_tools_without_approval_by_default() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("session-deny-write");
-    let old = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&temp).unwrap();
-    let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
-    config.memory.root = temp.join("memory");
-    let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
-
-    let response = session
-        .submit(r#"tool:files.write {"path":"note.txt","content":"nope"}"#)
-        .unwrap();
-
-    std::env::set_current_dir(old).unwrap();
-    assert!(response.text.contains("permission_denied"));
-    assert!(!temp.join("note.txt").exists());
-}
-
-#[test]
-fn cli_ask_confirms_write_tool_from_stdin_like_python() {
+fn cli_ask_writes_without_permission_input() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("cli-permission-confirm");
     let old = std::env::current_dir().unwrap();
@@ -1827,11 +1670,11 @@ fn cli_ask_confirms_write_tool_from_stdin_like_python() {
         r#"tool:files.write {"path":"note.txt","content":"approved"}"#.to_string(),
     ];
 
-    let (code, stdout, stderr) = run_cli_raw(&args, "1\n");
+    let (code, stdout, stderr) = run_cli_raw(&args, "");
 
     std::env::set_current_dir(old).unwrap();
     assert_eq!(code, 0, "stderr={stderr}");
-    assert!(stdout.contains("file: files.write"));
+    assert!(!stdout.contains("file: files.write"));
     assert!(stdout.contains("final: Wrote"));
     assert_eq!(
         fs::read_to_string(temp.join("note.txt")).unwrap(),
@@ -1840,7 +1683,7 @@ fn cli_ask_confirms_write_tool_from_stdin_like_python() {
 }
 
 #[test]
-fn cli_ask_user_permission_persists_like_python() {
+fn cli_ask_ignores_legacy_shell_deny_and_creates_no_grants() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("cli-permission-user");
     let old_home = std::env::var_os("HOME");
@@ -1850,7 +1693,7 @@ fn cli_ask_user_permission_persists_like_python() {
     let config_path = temp.join("config.toml");
     fs::write(
         &config_path,
-        "[model]\nprovider = \"fake\"\n\n[files]\nroots = [\".\"]\n",
+        "[model]\nprovider = \"fake\"\n\n[tools]\nexecution = \"policy\"\n[shell]\ndeny = [\"pwd\"]\n",
     )
     .unwrap();
     let args = vec![
@@ -1860,22 +1703,22 @@ fn cli_ask_user_permission_persists_like_python() {
         r#"tool:shell.run {"command":"pwd"}"#.to_string(),
     ];
 
-    let (first_code, first_stdout, first_stderr) = run_cli_raw(&args, "4\n");
+    let (first_code, first_stdout, first_stderr) = run_cli_raw(&args, "");
     let (second_code, second_stdout, second_stderr) = run_cli_raw(&args, "");
 
     std::env::set_current_dir(old).unwrap();
     restore_home(old_home);
     assert_eq!(first_code, 0, "stderr={first_stderr}");
-    assert!(first_stdout.contains("shell: pwd"));
+    assert!(!first_stdout.contains("shell: pwd"));
+    assert!(first_stdout.contains(&*temp.to_string_lossy()));
     assert_eq!(second_code, 0, "stderr={second_stderr}");
     assert!(!second_stdout.contains("shell: pwd"));
     assert!(second_stdout.contains("final:"));
-    let permissions = fs::read_to_string(temp.join(".colibri/permissions.toml")).unwrap();
-    assert!(permissions.contains("commands = [\"pwd\"]"));
+    assert!(!temp.join(".colibri/permissions.toml").exists());
 }
 
 #[test]
-fn cli_ask_allows_out_of_root_file_after_dynamic_permission_like_python() {
+fn cli_ask_reads_outside_legacy_roots_without_approval() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("cli-out-root-permission");
     let allowed = temp.join("allowed");
@@ -1904,11 +1747,11 @@ fn cli_ask_allows_out_of_root_file_after_dynamic_permission_like_python() {
         ),
     ];
 
-    let (code, stdout, stderr) = run_cli_raw(&args, "1\n");
+    let (code, stdout, stderr) = run_cli_raw(&args, "");
 
     std::env::set_current_dir(old).unwrap();
     assert_eq!(code, 0, "stderr={stderr}");
-    assert!(stdout.contains("file: files.read"));
+    assert!(!stdout.contains("file: files.read"));
     assert!(stdout.contains("final: outside hello"));
 }
 
@@ -1918,7 +1761,6 @@ fn files_tool_lists_reads_and_writes_inside_allowed_root() {
     fs::write(temp.join("alpha.txt"), "alpha").unwrap();
     fs::create_dir_all(temp.join("nested")).unwrap();
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
     config.tools.max_result_chars = 10;
     let context = ToolContext::new(config, temp.clone());
 
@@ -1949,7 +1791,6 @@ fn files_read_range_and_max_chars_match_python() {
     let temp = temp_dir("files-read-range");
     fs::write(temp.join("note.txt"), "one\ntwo\nthreeeeeeeeee\nfour\n").unwrap();
     let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
     config.tools.max_result_chars = 100;
     let context = ToolContext::new(config, temp.clone());
 
@@ -1979,8 +1820,7 @@ fn files_send_returns_media_result_for_allowed_file_like_python() {
     let temp = temp_dir("files-send");
     let path = temp.join("report.txt");
     fs::write(&path, "hello").unwrap();
-    let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
+    let config = AgentConfig::default();
     let context =
         ToolContext::new(config, temp.clone()).with_media_sender(Arc::new(|_media| Ok(())));
 
@@ -2009,8 +1849,7 @@ fn files_send_returns_media_result_for_allowed_file_like_python() {
 fn files_send_requires_channel_media_sender_like_python() {
     let temp = temp_dir("files-send-unavailable");
     fs::write(temp.join("report.txt"), "hello").unwrap();
-    let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
+    let config = AgentConfig::default();
     let context = ToolContext::new(config, temp);
 
     let result = run_tool("files.send", r#"{"path":"report.txt"}"#, &context).unwrap();
@@ -2024,8 +1863,7 @@ fn image_understand_uses_fake_vision_model_for_allowed_image_like_python() {
     let temp = temp_dir("image-understand");
     let image = temp.join("photo.png");
     fs::write(&image, b"png").unwrap();
-    let mut config = AgentConfig::default();
-    config.files.roots = vec![temp.clone()];
+    let config = AgentConfig::default();
     let analyzer_config = config.clone();
     let context = ToolContext::new(config, temp.clone()).with_image_analyzer(Arc::new(
         move |path, prompt| colibri_rust::vision::analyze_image(&analyzer_config, path, prompt),
@@ -2040,56 +1878,6 @@ fn image_understand_uses_fake_vision_model_for_allowed_image_like_python() {
 
     assert!(result.ok);
     assert_eq!(result.text, "fake image: describe");
-}
-
-#[test]
-fn shell_tool_rejects_denied_executable() {
-    let temp = temp_dir("shell-tool");
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool("shell.run", r#"{"command":"rm file"}"#, &context).unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("permission_denied"));
-}
-
-#[test]
-fn shell_tool_rejects_denied_executable_in_compound_command() {
-    let temp = temp_dir("shell-compound-deny");
-    fs::write(temp.join("file"), "keep").unwrap();
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config, temp.clone());
-
-    let result = run_tool(
-        "shell.run",
-        r#"{"command":"printf ok && rm file"}"#,
-        &context,
-    )
-    .unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("permission_denied"));
-    assert_eq!(fs::read_to_string(temp.join("file")).unwrap(), "keep");
-}
-
-#[test]
-fn shell_tool_rejects_denied_executable_after_background_operator() {
-    let temp = temp_dir("shell-background-deny");
-    fs::write(temp.join("file"), "keep").unwrap();
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config, temp.clone());
-
-    let result = run_tool(
-        "shell.run",
-        r#"{"command":"printf ok & rm file"}"#,
-        &context,
-    )
-    .unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("permission_denied"));
-    assert_eq!(fs::read_to_string(temp.join("file")).unwrap(), "keep");
 }
 
 #[test]
@@ -2126,601 +1914,6 @@ fn shell_tool_executes_compound_command_with_real_shell() {
     assert_eq!(result.text.trim(), "2");
 }
 
-#[test]
-fn permission_policy_matches_python_session_and_user_grants() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-policy");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let mut prompter = FakePermissionPrompter::new(vec!["2 session-command"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp.clone());
-    let shell = ToolInfo::new("shell.run", false);
-    let mut args = BTreeMap::new();
-    args.insert("command".to_string(), "pwd".to_string());
-
-    let first = policy.decide(&shell, &args, &context, Some(&mut prompter));
-    let second = policy.decide(&shell, &args, &context, Some(&mut prompter));
-
-    assert!(first.allowed);
-    assert_eq!(first.scope, "session");
-    assert!(second.allowed);
-    assert_eq!(second.scope, "session");
-    assert_eq!(prompter.requests.len(), 1);
-
-    let mut session_executable_prompter = FakePermissionPrompter::new(vec!["3 session-executable"]);
-    let mut session_executable_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let mut first_pipeline_args = BTreeMap::new();
-    first_pipeline_args.insert(
-        "command".to_string(),
-        "curl https://example.com/one | head -10".to_string(),
-    );
-    let mut second_pipeline_args = BTreeMap::new();
-    second_pipeline_args.insert(
-        "command".to_string(),
-        "curl https://example.com/two | head -20".to_string(),
-    );
-    let first_pipeline = session_executable_policy.decide(
-        &shell,
-        &first_pipeline_args,
-        &context,
-        Some(&mut session_executable_prompter),
-    );
-    let second_pipeline = session_executable_policy.decide(
-        &shell,
-        &second_pipeline_args,
-        &context,
-        Some(&mut session_executable_prompter),
-    );
-    assert!(first_pipeline.allowed);
-    assert!(second_pipeline.allowed);
-    assert_eq!(second_pipeline.scope, "session_executable");
-    assert_eq!(session_executable_prompter.requests.len(), 1);
-
-    let store = UserPermissionStore::for_user();
-    store
-        .save(&UserGrants {
-            shell_commands: vec!["git status".to_string()],
-            shell_executables: vec![],
-            tool_names: vec![],
-            file_roots: vec![],
-            hardware_devices: vec![],
-        })
-        .unwrap();
-    let mut deny_prompter = FakePermissionPrompter::new(vec!["0"]);
-    let mut user_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let mut git_args = BTreeMap::new();
-    git_args.insert("command".to_string(), "git status".to_string());
-    let granted = user_policy.decide(&shell, &git_args, &context, Some(&mut deny_prompter));
-    assert!(granted.allowed);
-    assert_eq!(granted.scope, "user");
-
-    store
-        .save(&UserGrants {
-            shell_commands: vec![],
-            shell_executables: vec!["cargo".to_string(), "git".to_string()],
-            tool_names: vec![],
-            file_roots: vec![],
-            hardware_devices: vec![],
-        })
-        .unwrap();
-    let mut executable_prompter = FakePermissionPrompter::new(vec!["0", "0", "0", "0"]);
-    let mut executable_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let mut executable_args = BTreeMap::new();
-    executable_args.insert("command".to_string(), "git status --short".to_string());
-    let executable_granted = executable_policy.decide(
-        &shell,
-        &executable_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(executable_granted.allowed);
-    assert_eq!(executable_granted.scope, "user_executable");
-
-    let mut compound_args = BTreeMap::new();
-    compound_args.insert(
-        "command".to_string(),
-        "git status --short && cargo test".to_string(),
-    );
-    let compound_granted = executable_policy.decide(
-        &shell,
-        &compound_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(compound_granted.allowed);
-    assert_eq!(compound_granted.scope, "user_executable");
-
-    let mut background_args = BTreeMap::new();
-    background_args.insert(
-        "command".to_string(),
-        "git status --short & cargo test".to_string(),
-    );
-    let background_granted = executable_policy.decide(
-        &shell,
-        &background_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(background_granted.allowed);
-    assert_eq!(background_granted.scope, "user_executable");
-
-    let mut nonmatch_args = BTreeMap::new();
-    nonmatch_args.insert("command".to_string(), "gitz status".to_string());
-    let nonmatch = executable_policy.decide(
-        &shell,
-        &nonmatch_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(!nonmatch.allowed);
-
-    let mut nonmatch_compound_args = BTreeMap::new();
-    nonmatch_compound_args.insert(
-        "command".to_string(),
-        "git status --short && python -V".to_string(),
-    );
-    let nonmatch_compound = executable_policy.decide(
-        &shell,
-        &nonmatch_compound_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(!nonmatch_compound.allowed);
-
-    let mut nonmatch_background_args = BTreeMap::new();
-    nonmatch_background_args.insert(
-        "command".to_string(),
-        "git status --short & python -V".to_string(),
-    );
-    let nonmatch_background = executable_policy.decide(
-        &shell,
-        &nonmatch_background_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(!nonmatch_background.allowed);
-
-    let mut substitution_args = BTreeMap::new();
-    substitution_args.insert("command".to_string(), "git status $(echo ok)".to_string());
-    let substitution = executable_policy.decide(
-        &shell,
-        &substitution_args,
-        &context,
-        Some(&mut executable_prompter),
-    );
-    assert!(!substitution.allowed);
-    drop(executable_policy);
-    assert_eq!(
-        executable_prompter.requests[1].shell_command.as_deref(),
-        Some("git status --short && python -V")
-    );
-    assert_eq!(
-        executable_prompter.requests[0].shell_command.as_deref(),
-        Some("gitz status")
-    );
-    assert_eq!(
-        executable_prompter.requests[2].shell_command.as_deref(),
-        Some("git status --short & python -V")
-    );
-    assert_eq!(
-        executable_prompter.requests[3].shell_command.as_deref(),
-        Some("git status $(echo ok)")
-    );
-
-    let mut user_executable_prompter = FakePermissionPrompter::new(vec!["5 user-executable"]);
-    let mut user_executable_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let mut user_executable_args = BTreeMap::new();
-    user_executable_args.insert(
-        "command".to_string(),
-        "curl https://example.com/one | head -10".to_string(),
-    );
-    let user_executable_decision = user_executable_policy.decide(
-        &shell,
-        &user_executable_args,
-        &context,
-        Some(&mut user_executable_prompter),
-    );
-    let mut reused_user_executable_args = BTreeMap::new();
-    reused_user_executable_args.insert(
-        "command".to_string(),
-        "curl https://example.com/two | head -20".to_string(),
-    );
-    let reused_user_executable_decision = user_executable_policy.decide(
-        &shell,
-        &reused_user_executable_args,
-        &context,
-        Some(&mut user_executable_prompter),
-    );
-    drop(user_executable_policy);
-    assert!(user_executable_decision.allowed);
-    assert_eq!(user_executable_decision.scope, "user_executable");
-    assert!(reused_user_executable_decision.allowed);
-    assert_eq!(reused_user_executable_decision.scope, "user_executable");
-    assert_eq!(user_executable_prompter.requests.len(), 1);
-    let persisted_executables = UserPermissionStore::for_user().load().shell_executables;
-    assert!(persisted_executables.contains(&"curl".to_string()));
-    assert!(persisted_executables.contains(&"head".to_string()));
-    restore_home(old_home);
-}
-
-#[test]
-fn permission_policy_persists_user_grants_as_concurrent_deltas() {
-    struct InterleavingPrompter;
-
-    impl PermissionPrompter for InterleavingPrompter {
-        fn confirm(&mut self, request: PermissionRequest) -> String {
-            assert_eq!(request.tool_name, "second.tool");
-            UserPermissionStore::for_user()
-                .merge(&UserGrants {
-                    tool_names: vec!["first.tool".to_string()],
-                    ..UserGrants::default()
-                })
-                .unwrap();
-            "4".to_string()
-        }
-    }
-
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-policy-concurrent-delta");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "confirm".to_string();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let mut prompter = InterleavingPrompter;
-    let mut policy = PermissionPolicy::from_config(&config, temp);
-
-    let decision = policy.decide(
-        &ToolInfo::new("second.tool", false),
-        &BTreeMap::new(),
-        &context,
-        Some(&mut prompter),
-    );
-
-    assert!(decision.allowed);
-    assert_eq!(
-        UserPermissionStore::for_user().load().tool_names,
-        vec!["first.tool".to_string(), "second.tool".to_string()]
-    );
-    restore_home(old_home);
-}
-
-#[test]
-fn hardware_device_session_and_user_permissions_match_python() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("hardware-device-permissions");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "confirm".to_string();
-    config.hardware.enabled = true;
-    config.hardware.devices.push(HardwareDeviceConfig {
-        name: "controller".to_string(),
-        path: "/dev/ttyACM0".into(),
-        transport: "serial_json".to_string(),
-        baud_rate: 115200,
-        capabilities: vec!["gpio".to_string()],
-        allow_write: true,
-    });
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let tool = ToolInfo::new("gpio.write", false);
-    let arguments = BTreeMap::from([
-        ("device".to_string(), "controller".to_string()),
-        ("pin".to_string(), "1".to_string()),
-        ("value".to_string(), "1".to_string()),
-    ]);
-
-    let mut session_prompter = FakePermissionPrompter::new(vec!["2"]);
-    let mut session_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let first = session_policy.decide(&tool, &arguments, &context, Some(&mut session_prompter));
-    let second = session_policy.decide(&tool, &arguments, &context, Some(&mut session_prompter));
-    assert_eq!(first.scope, "session_device");
-    assert_eq!(second.scope, "session_device");
-    assert_eq!(first.hardware_device.as_deref(), Some("controller"));
-    assert_eq!(session_prompter.requests.len(), 1);
-    assert_eq!(session_prompter.requests[0].subject_kind, "hardware_device");
-
-    let mut user_prompter = FakePermissionPrompter::new(vec!["4"]);
-    let mut user_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let persisted = user_policy.decide(&tool, &arguments, &context, Some(&mut user_prompter));
-    let mut reuse_policy = PermissionPolicy::from_config(&config, temp.clone());
-    let reused = reuse_policy.decide(&tool, &arguments, &context, None);
-    assert_eq!(persisted.scope, "user_device");
-    assert_eq!(reused.scope, "user_device");
-    assert_eq!(
-        UserPermissionStore::for_user().load().hardware_devices,
-        vec!["controller".to_string()]
-    );
-
-    let prompt = format_channel_permission_prompt(&session_prompter.requests[0]);
-    assert!(prompt.contains("hardware: gpio.write"));
-    assert!(prompt.contains("device: controller"));
-    assert!(prompt.contains("2. session-device"));
-    assert!(prompt.contains("4. user-device"));
-    restore_home(old_home);
-}
-
-#[test]
-fn hardware_allow_write_hard_deny_wins_over_user_grant_like_python() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("hardware-device-hard-deny");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    UserPermissionStore::for_user()
-        .merge(&UserGrants {
-            hardware_devices: vec!["controller".to_string()],
-            ..UserGrants::default()
-        })
-        .unwrap();
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "allow".to_string();
-    config.hardware.devices.push(HardwareDeviceConfig {
-        name: "controller".to_string(),
-        path: "/dev/ttyACM0".into(),
-        transport: "serial_json".to_string(),
-        baud_rate: 115200,
-        capabilities: vec!["serial".to_string()],
-        allow_write: false,
-    });
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let mut prompter = FakePermissionPrompter::new(vec!["1"]);
-
-    let result = PermissionPolicy::from_config(&config, temp).decide(
-        &ToolInfo::new("serial.write", false),
-        &BTreeMap::from([
-            ("device".to_string(), "controller".to_string()),
-            ("data".to_string(), "x".to_string()),
-        ]),
-        &context,
-        Some(&mut prompter),
-    );
-
-    assert!(!result.allowed);
-    assert_eq!(result.reason, "hard_deny");
-    assert!(prompter.requests.is_empty());
-    restore_home(old_home);
-}
-
-#[test]
-fn permission_policy_classifies_shell_redirection_as_file_path() {
-    let temp = temp_dir("permission-shell-redirection");
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let mut prompter = FakePermissionPrompter::new(vec!["0"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp.clone());
-    let shell = ToolInfo::new("shell.run", false);
-    let mut args = BTreeMap::new();
-    args.insert("command".to_string(), "printf hello > out.txt".to_string());
-
-    let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
-
-    assert!(!decision.allowed);
-    assert_eq!(decision.subject_kind, "file_path");
-    let expected = temp.join("out.txt").display().to_string();
-    assert_eq!(
-        prompter.requests[0].file_path.as_deref(),
-        Some(expected.as_str())
-    );
-}
-
-#[test]
-fn permission_policy_keeps_descriptor_and_null_redirections_as_shell() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-shell-descriptor-redirection");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "confirm".to_string();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let shell = ToolInfo::new("shell.run", false);
-    let commands = [
-        "brew install rclone 2>&1 | tail -10",
-        "printf error 1>&2",
-        "printf quiet 2>&-",
-        "which rclone 2>/dev/null",
-        "printf quiet > /dev/null",
-    ];
-
-    for command in commands {
-        let mut prompter = FakePermissionPrompter::new(vec!["0"]);
-        let mut policy = PermissionPolicy::from_config(&config, temp.clone());
-        let mut args = BTreeMap::new();
-        args.insert("command".to_string(), command.to_string());
-
-        let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
-
-        assert!(!decision.allowed);
-        assert_eq!(decision.subject_kind, "shell", "command: {command}");
-        assert_eq!(decision.file_path, None, "command: {command}");
-        assert_eq!(
-            prompter.requests[0].subject_kind, "shell",
-            "command: {command}"
-        );
-    }
-    restore_home(old_home);
-}
-
-#[test]
-fn permission_policy_keeps_inline_file_redirection_as_file_path() {
-    let temp = temp_dir("permission-shell-inline-redirection");
-    let mut config = AgentConfig::default();
-    config.tools.default_permission = "confirm".to_string();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let shell = ToolInfo::new("shell.run", false);
-    let cases = [
-        ("printf error 2>errors.log", "errors.log"),
-        ("printf error 2>&1 >combined.log", "combined.log"),
-    ];
-
-    for (command, target) in cases {
-        let mut prompter = FakePermissionPrompter::new(vec!["0"]);
-        let mut policy = PermissionPolicy::from_config(&config, temp.clone());
-        let mut args = BTreeMap::new();
-        args.insert("command".to_string(), command.to_string());
-
-        let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
-
-        assert!(!decision.allowed);
-        assert_eq!(decision.subject_kind, "file_path", "command: {command}");
-        assert_eq!(
-            decision.file_path,
-            Some(temp.join(target).display().to_string()),
-            "command: {command}"
-        );
-    }
-}
-
-#[test]
-fn permission_policy_hard_deny_wins_over_shell_redirection_file_path() {
-    let temp = temp_dir("permission-hard-deny-redirection");
-    let config = AgentConfig::default();
-    let context = ToolContext::new(config.clone(), temp.clone());
-    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-    let mut policy = PermissionPolicy::from_config(&config, temp);
-    let shell = ToolInfo::new("shell.run", false);
-    let mut args = BTreeMap::new();
-    args.insert("command".to_string(), "rm old.txt > out.txt".to_string());
-
-    let decision = policy.decide(&shell, &args, &context, Some(&mut prompter));
-
-    assert!(!decision.allowed);
-    assert_eq!(decision.scope, "none");
-    assert_eq!(decision.reason, "hard_deny");
-    assert!(prompter.requests.is_empty());
-}
-
-#[test]
-fn permission_policy_classifies_out_of_root_file_paths() {
-    let temp = temp_dir("permission-file-root");
-    let allowed = temp.join("allowed");
-    let outside = temp.join("outside");
-    fs::create_dir_all(&allowed).unwrap();
-    fs::create_dir_all(&outside).unwrap();
-    let mut config = AgentConfig::default();
-    config.files.roots = vec![allowed.clone()];
-    let context = ToolContext::new(config.clone(), allowed.clone());
-    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-    let mut policy = PermissionPolicy::from_config(&config, allowed);
-    let tool = ToolInfo::new("files.list", true);
-    let mut args = BTreeMap::new();
-    args.insert("path".to_string(), outside.display().to_string());
-
-    let decision = policy.decide(&tool, &args, &context, Some(&mut prompter));
-
-    assert!(decision.allowed);
-    assert_eq!(decision.subject_kind, "file_path");
-    assert_eq!(decision.scope, "session_file_root");
-    assert_eq!(prompter.requests[0].subject_kind, "file_path");
-    assert_eq!(prompter.requests[0].tool_name, "files.list");
-}
-
-#[test]
-fn user_permission_store_saves_and_loads_deduplicated_toml() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-store");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let store = UserPermissionStore::for_user();
-
-    store
-        .save(&UserGrants {
-            shell_commands: vec!["git status".to_string(), "git status".to_string()],
-            shell_executables: vec!["cargo".to_string(), "git".to_string(), "cargo".to_string()],
-            tool_names: vec!["files.read".to_string(), "files.list".to_string()],
-            file_roots: vec![temp.display().to_string(), temp.display().to_string()],
-            hardware_devices: vec!["controller".to_string(), "controller".to_string()],
-        })
-        .unwrap();
-
-    let loaded = store.load();
-    assert_eq!(loaded.shell_commands, vec!["git status".to_string()]);
-    assert_eq!(
-        loaded.shell_executables,
-        vec!["cargo".to_string(), "git".to_string()]
-    );
-    assert_eq!(
-        loaded.tool_names,
-        vec!["files.list".to_string(), "files.read".to_string()]
-    );
-    assert_eq!(loaded.file_roots, vec![temp.display().to_string()]);
-    assert_eq!(loaded.hardware_devices, vec!["controller".to_string()]);
-    let text = fs::read_to_string(temp.join(".colibri/permissions.toml")).unwrap();
-    assert!(text.contains("[shell]"));
-    assert!(text.contains("commands = [\"git status\"]"));
-    assert!(text.contains("executables = [\"cargo\", \"git\"]"));
-    assert!(text.contains("[hardware]"));
-    assert!(text.contains("devices = [\"controller\"]"));
-    restore_home(old_home);
-}
-
-#[test]
-fn user_permission_store_ignores_obsolete_shell_prefixes() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-store-legacy-prefixes");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let store = UserPermissionStore::for_user();
-    fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-    fs::write(&store.path, "[shell]\nprefixes = [\"cargo\", \"git\"]\n").unwrap();
-
-    let loaded = store.load();
-
-    assert!(loaded.shell_executables.is_empty());
-    restore_home(old_home);
-}
-
-#[test]
-fn user_permission_store_refreshes_cache_after_atomic_replacement() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-store-cache-replacement");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let store = UserPermissionStore::for_user();
-    fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-    fs::write(&store.path, "[shell]\nexecutables = [\"git\"]\n").unwrap();
-
-    assert_eq!(store.load().shell_executables, vec!["git".to_string()]);
-
-    let replacement = store.path.with_extension("replacement");
-    fs::write(&replacement, "[shell]\nexecutables = [\"cargo\"]\n").unwrap();
-    fs::rename(replacement, &store.path).unwrap();
-
-    assert_eq!(store.load().shell_executables, vec!["cargo".to_string()]);
-    restore_home(old_home);
-}
-
-#[test]
-fn user_permission_store_merge_preserves_concurrent_stale_grants() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("permission-store-concurrent-merge");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let first = UserPermissionStore::for_user();
-    let second = UserPermissionStore::for_user();
-
-    assert_eq!(first.load(), UserGrants::default());
-    assert_eq!(second.load(), UserGrants::default());
-
-    first
-        .merge(&UserGrants {
-            shell_commands: vec!["git status".to_string()],
-            ..UserGrants::default()
-        })
-        .unwrap();
-    second
-        .merge(&UserGrants {
-            shell_executables: vec!["cargo".to_string()],
-            ..UserGrants::default()
-        })
-        .unwrap();
-
-    let grants = UserPermissionStore::for_user().load();
-    assert_eq!(grants.shell_commands, vec!["git status".to_string()]);
-    assert_eq!(grants.shell_executables, vec!["cargo".to_string()]);
-    restore_home(old_home);
-}
 
 #[test]
 fn memory_context_bootstraps_and_loads_always_on_files() {
@@ -3952,7 +3145,7 @@ fn gateway_session_cache_reuses_and_evicts_oldest_like_python() {
 }
 
 #[test]
-fn gateway_hot_reload_applies_only_model_vision_and_web_search() {
+fn gateway_hot_reload_uses_the_shared_direct_config() {
     let temp = temp_dir("gateway-hot-reload");
     let path = temp.join("config.toml");
     fs::write(
@@ -3974,29 +3167,7 @@ fn gateway_hot_reload_applies_only_model_vision_and_web_search() {
     assert_eq!(session.config.model.model, "after-longer");
     assert_eq!(session.config.vision.model, "vision-after");
     assert_eq!(session.config.web_search.api_key, "search-after");
-    assert_eq!(session.config.session.max_tool_rounds, 7);
-}
-
-#[test]
-fn hot_reload_preserves_session_permission_grants() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("hot-reload-permission-lifecycle");
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &temp);
-    let config = AgentConfig::default();
-    let mut session = AgentSession::new(config.clone(), Box::new(PermissionRoundModel));
-    let mut prompter = FakePermissionPrompter::new(vec!["2"]);
-    session
-        .submit_with_permission_prompter("first", Some(&mut prompter))
-        .unwrap();
-    let replacement_model: Box<dyn ModelClient> = Box::new(PermissionRoundModel);
-    session.adopt_runtime(Arc::new(config), Arc::new(Mutex::new(replacement_model)));
-    session
-        .submit_with_permission_prompter("second", Some(&mut prompter))
-        .unwrap();
-
-    assert_eq!(prompter.requests.len(), 1);
-    restore_home(old_home);
+    assert_eq!(session.config.session.max_tool_rounds, 99);
 }
 
 #[test]
@@ -4225,7 +3396,6 @@ fn hardware_config_overrides_and_rejects_invalid_values() {
                 "i2c".to_string(),
                 "spi".to_string(),
             ],
-            allow_write: true,
         }]
     );
 
@@ -4378,9 +3548,6 @@ fn hardware_probe_tool_requires_both_config_gates_like_python() {
     ] {
         assert!(names.contains(name), "{name}");
     }
-    assert!(tool_info("hardware.probe").read_only);
-    assert!(tool_info("gpio.read").read_only);
-    assert!(!tool_info("gpio.write").read_only);
 }
 
 #[test]
@@ -4395,16 +3562,9 @@ fn hardware_tools_enforce_capability_write_and_transfer_limits_like_python() {
         transport: "serial_json".to_string(),
         baud_rate: 115200,
         capabilities: vec!["gpio".to_string()],
-        allow_write: false,
     });
     let context = ToolContext::new(config, temp_dir("hardware-tools-limits"));
 
-    let denied = run_tool(
-        "gpio.write",
-        r#"{"device":"sensor","pin":1,"value":1}"#,
-        &context,
-    )
-    .unwrap();
     let unsupported = run_tool("i2c.scan", r#"{"device":"sensor"}"#, &context).unwrap();
     let too_large = run_tool(
         "i2c.write",
@@ -4413,10 +3573,6 @@ fn hardware_tools_enforce_capability_write_and_transfer_limits_like_python() {
     )
     .unwrap();
 
-    assert_eq!(
-        (denied.ok, denied.error_type.as_deref()),
-        (false, Some("permission_denied"))
-    );
     assert_eq!(
         (unsupported.ok, unsupported.error_type.as_deref()),
         (false, Some("unsupported_operation"))
@@ -4453,7 +3609,6 @@ fn configured_hardware_devices_exposes_alias_not_path_like_python() {
             "i2c".to_string(),
             "spi".to_string(),
         ],
-        allow_write: true,
     });
 
     let result = configured_hardware_devices(&config.hardware);
@@ -4465,7 +3620,6 @@ fn configured_hardware_devices_exposes_alias_not_path_like_python() {
             "transport":"serial_json",
             "baud_rate":115200,
             "capabilities":["serial","gpio","i2c","spi"],
-            "allow_write":true
         }])
     );
     assert!(!result.to_string().contains("/dev/ttyACM0"));
@@ -4546,7 +3700,6 @@ fn serial_json_transport_round_trips_over_pty_like_python() {
         transport: "serial_json".to_string(),
         baud_rate: 115200,
         capabilities: vec!["gpio".to_string()],
-        allow_write: true,
     });
 
     let master_guard = master.try_clone().unwrap();
@@ -4885,6 +4038,7 @@ fn gateway_stop_refuses_unverified_pid_like_python() {
     .unwrap();
 
     let result = colibri_rust::gateway::stop_gateway();
+    let restarted = colibri_rust::gateway::restart_gateway(None).unwrap();
     std::thread::sleep(Duration::from_millis(50));
     let still_running = child.try_wait().unwrap().is_none();
     let _ = child.kill();
@@ -4893,10 +4047,75 @@ fn gateway_stop_refuses_unverified_pid_like_python() {
 
     let status = result.unwrap();
     assert_eq!(status.reason, "unverified_pid");
+    assert_eq!(restarted.reason, "unverified_pid");
+    assert_eq!(restarted.pid, status.pid);
     assert!(
         still_running,
         "stop_gateway terminated an unrelated process"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn gateway_cli_reports_failed_stop_restart_and_start() {
+    let temp = temp_dir("gateway-process-exit-codes");
+    let run_dir = temp.join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    let state = run_dir.join("gateway.json");
+    let mut unrelated = std::process::Command::new("sleep")
+        .arg("10")
+        .spawn()
+        .unwrap();
+    fs::write(&state, serde_json::json!({"pid": unrelated.id()}).to_string()).unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_colibri"))
+            .env("COLIBRI_HOME", &temp)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let stop = run(&["gateway", "stop"]);
+    let restart = run(&["gateway", "restart"]);
+    let untouched = unrelated.try_wait().unwrap().is_none();
+    let _ = unrelated.kill();
+    unrelated.wait().unwrap();
+    for result in [stop, restart] {
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("reason=unverified_pid"));
+    }
+    assert!(untouched);
+
+    let config = temp.join("invalid.toml");
+    fs::write(&config, "[model\n").unwrap();
+    let start = run(&["--config", config.to_str().unwrap(), "gateway", "start"]);
+    assert_eq!(start.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&start.stdout).contains("reason=startup_exited"));
+
+    let server = start_http_server(|_, _| {
+        |_| TestHttpResponse::json(r#"{"ret":0,"msgs":[],"get_updates_buf":"cursor"}"#)
+    });
+    fs::write(
+        &config,
+        format!(
+            "[session]\ntranscript = false\n[channels.weixin]\nenabled = true\ntoken = \"test-token\"\nbase_url = {:?}\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    let config_arg = config.to_str().unwrap();
+    let started = run(&["--config", config_arg, "gateway", "start"]);
+    let restarted = run(&["--config", config_arg, "gateway", "restart"]);
+    let stopped = run(&["gateway", "stop"]);
+    let read_pid = |output: &std::process::Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("pid=").and_then(|pid| pid.parse::<u32>().ok()))
+    };
+    assert!(started.status.success(), "{started:?}");
+    assert!(restarted.status.success(), "{restarted:?}");
+    assert_ne!(read_pid(&started), read_pid(&restarted));
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("running=false"));
 }
 
 #[test]
@@ -4977,98 +4196,11 @@ fn weixin_media_cleanup_removes_oldest_files_to_fit_budget_like_python() {
     assert!(second.exists());
 }
 
-#[test]
-fn weixin_permission_numeric_choices_match_python() {
-    for (reply, expected) in [
-        ("1", "1"),
-        ("2", "2"),
-        ("3", "3"),
-        ("4", "4"),
-        ("5", "5"),
-        ("0", "0"),
-        ("yes", "0"),
-        ("session", "0"),
-        ("executable-session", "0"),
-        ("user", "0"),
-        ("user-command", "0"),
-        ("user-executable", "0"),
-        ("project", "0"),
-        ("deny", "0"),
-        ("something else", "0"),
-    ] {
-        assert_eq!(parse_permission_choice(reply), expected);
-    }
-}
+struct FixtureOutbound;
 
-struct PermissionPromptSignal {
-    prompted: mpsc::Sender<()>,
-}
-
-impl OutboundSink for PermissionPromptSignal {
-    fn send_text(&self, _text: &str) -> Result<(), String> {
-        self.prompted.send(()).map_err(|error| error.to_string())
-    }
-
-    fn send_media(&self, _media: &MediaPart) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-fn shell_permission_request() -> PermissionRequest {
-    PermissionRequest {
-        tool_name: "shell.run".to_string(),
-        arguments: BTreeMap::from([("command".to_string(), "pwd".to_string())]),
-        read_only: false,
-        subject_kind: "shell".to_string(),
-        shell_command: Some("pwd".to_string()),
-        shell_executable: Some("pwd".to_string()),
-        file_path: None,
-        file_root: None,
-        hardware_device: None,
-    }
-}
-
-#[test]
-fn channel_permission_waiters_isolate_same_sender_across_channels() {
-    let waiters = Arc::new(ChannelPermissionWaiters::default());
-    let (prompted_tx, prompted_rx) = mpsc::channel();
-
-    let wx_waiters = Arc::clone(&waiters);
-    let wx_outbound: Arc<dyn OutboundSink> = Arc::new(PermissionPromptSignal {
-        prompted: prompted_tx.clone(),
-    });
-    let wx_thread = thread::spawn(move || {
-        let mut prompter = ChannelTextPermissionPrompter::new(
-            wx_outbound,
-            "weixin:user-1".to_string(),
-            wx_waiters,
-            2,
-        );
-        prompter.confirm(shell_permission_request())
-    });
-
-    let other_waiters = Arc::clone(&waiters);
-    let other_outbound: Arc<dyn OutboundSink> = Arc::new(PermissionPromptSignal {
-        prompted: prompted_tx,
-    });
-    let other_thread = thread::spawn(move || {
-        let mut prompter = ChannelTextPermissionPrompter::new(
-            other_outbound,
-            "other:user-1".to_string(),
-            other_waiters,
-            2,
-        );
-        prompter.confirm(shell_permission_request())
-    });
-
-    prompted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    prompted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(waiters.deliver("weixin:user-1", "1"));
-    assert!(!other_thread.is_finished());
-    assert!(waiters.deliver("other:user-1", "0"));
-
-    assert_eq!(wx_thread.join().unwrap(), "1");
-    assert_eq!(other_thread.join().unwrap(), "0");
+impl OutboundSink for FixtureOutbound {
+    fn send_text(&self, _text: &str) -> Result<(), String> { Ok(()) }
+    fn send_media(&self, _media: &MediaPart) -> Result<(), String> { Ok(()) }
 }
 
 struct FakeGatewayChannel;
@@ -5078,7 +4210,7 @@ impl GatewayChannel for FakeGatewayChannel {
         "other"
     }
 
-    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+    fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
         Ok(vec![InboundEnvelope {
             channel: self.name().to_string(),
             sender_id: "user-1".to_string(),
@@ -5099,22 +4231,7 @@ impl GatewayChannel for FakeGatewayChannel {
     }
 
     fn outbound_for(&self, _envelope: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String> {
-        let (prompted, _rx) = mpsc::channel();
-        Ok(Arc::new(PermissionPromptSignal { prompted }))
-    }
-
-    fn permission_prompter(
-        &self,
-        outbound: Arc<dyn OutboundSink>,
-        session_key: String,
-        waiters: Arc<ChannelPermissionWaiters>,
-    ) -> Option<Box<dyn PermissionPrompter>> {
-        Some(Box::new(ChannelTextPermissionPrompter::new(
-            outbound,
-            session_key,
-            waiters,
-            2,
-        )))
+        Ok(Arc::new(FixtureOutbound))
     }
 }
 
@@ -5126,19 +4243,13 @@ fn gateway_channel_registry_accepts_fake_adapter_without_gateway_changes() {
     let mut envelope = channel.poll_once().unwrap().remove(0);
 
     channel.resolve_inbound_media(&mut envelope).unwrap();
-    let outbound = channel.outbound_for(&envelope).unwrap();
-    let prompter = channel.permission_prompter(
-        outbound,
-        envelope.session_key(),
-        Arc::new(ChannelPermissionWaiters::default()),
-    );
+    channel.outbound_for(&envelope).unwrap();
 
     assert_eq!(
         envelope.context.get("resolved").map(String::as_str),
         Some("yes")
     );
     assert!(envelope.media_refs.is_empty());
-    assert!(prompter.is_some());
 }
 
 #[test]
@@ -5191,15 +4302,9 @@ fn weixin_gateway_channel_exposes_transport_through_generic_adapter() {
         media_refs: Vec::new(),
         context: BTreeMap::from([("context_token".to_string(), "ctx".to_string())]),
     };
-    let outbound = adapter.outbound_for(&envelope).unwrap();
-    let prompter = adapter.permission_prompter(
-        outbound,
-        envelope.session_key(),
-        Arc::new(ChannelPermissionWaiters::default()),
-    );
+    adapter.outbound_for(&envelope).unwrap();
 
     assert_eq!(adapter.name(), "weixin");
-    assert!(prompter.is_some());
 }
 
 #[test]
@@ -5358,27 +4463,6 @@ fn set_old_mtime(path: &Path) {
         .arg(path)
         .status()
         .expect("touch old mtime");
-}
-
-struct FakePermissionPrompter {
-    replies: Vec<String>,
-    requests: Vec<PermissionRequest>,
-}
-
-impl FakePermissionPrompter {
-    fn new(replies: Vec<&str>) -> Self {
-        Self {
-            replies: replies.into_iter().map(ToString::to_string).rev().collect(),
-            requests: Vec::new(),
-        }
-    }
-}
-
-impl PermissionPrompter for FakePermissionPrompter {
-    fn confirm(&mut self, request: PermissionRequest) -> String {
-        self.requests.push(request);
-        self.replies.pop().unwrap_or_else(|| "0".to_string())
-    }
 }
 
 struct PermissionRoundModel;
@@ -6017,4 +5101,29 @@ fn inbound_router_idle_waits_for_active_release_like_python() {
     router.release("channel:user-1");
     assert!(router.wait_idle(Some(Duration::from_millis(10))));
     assert_eq!(router.active_len(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate() {
+    struct DirectPromptModel;
+    impl ModelClient for DirectPromptModel {
+        fn complete(
+            &mut self,
+            messages: &[Message],
+            tools: &[serde_json::Value],
+            system: &str,
+            limits: &ModelLimits,
+        ) -> Result<colibri_rust::messages::ModelResponse, String> {
+            assert!(system.contains("wait for their explicit approval"));
+            PermissionRoundModel.complete(messages, tools, system, limits)
+        }
+    }
+    let mut config = AgentConfig::default();
+    config.session.transcript = false;
+    config.memory.enabled = false;
+    let mut session = AgentSession::new(config, Box::new(DirectPromptModel));
+    let response = session.submit("inspect").unwrap();
+    assert_eq!(response.text, "done");
+    assert!(session.messages.iter().any(|message| message.role == "tool" && !message.content.contains("permission_denied")));
 }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -8,8 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::channel::{
-    validate_channel_envelope, ChannelPermissionWaiters, ChannelRegistry, GatewayChannel,
-    InboundEnvelope,
+    validate_channel_envelope, ChannelPollError, ChannelRegistry, GatewayChannel, InboundEnvelope,
 };
 use crate::channel_registry::build_enabled_channels;
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
@@ -25,6 +24,7 @@ use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
 pub struct GatewayStatus {
     pub running: bool,
     pub agent_status: String,
+    pub channel_status: BTreeMap<String, String>,
     pub pid: Option<String>,
     pub rss_kb: Option<String>,
     pub config_path: String,
@@ -80,6 +80,44 @@ fn gateway_log(message: impl AsRef<str>) {
     eprintln!("{}", format_gateway_log(message.as_ref()));
 }
 
+#[derive(Default)]
+struct ChannelHealth(Mutex<BTreeMap<String, &'static str>>);
+
+impl ChannelHealth {
+    fn report(&self, channel: &str, status: &'static str) {
+        let Ok(mut states) = self.0.lock() else {
+            return;
+        };
+        if states.get(channel) == Some(&status) {
+            return;
+        }
+        states.insert(channel.into(), status);
+        gateway_log(format!("channel={channel} transport={status}"));
+        let path = colibri_home().join("run/gateway-channels.json");
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let data = serde_json::json!({"pid":std::process::id(),"channels":&*states}).to_string();
+        #[cfg(unix)]
+        let _ = crate::config_io::atomic_write(&path, data.as_bytes());
+        #[cfg(not(unix))]
+        let _ = fs::write(path, data);
+    }
+}
+
+fn read_channel_health(state_path: &Path, pid: Option<&str>) -> BTreeMap<String, String> {
+    let read = || -> Option<_> {
+        let pid: u64 = pid?.parse().ok()?;
+        let text = fs::read_to_string(state_path.with_file_name("gateway-channels.json")).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        if value["pid"].as_u64() != Some(pid) {
+            return None;
+        }
+        serde_json::from_value(value["channels"].clone()).ok()
+    };
+    read().unwrap_or_default()
+}
+
 pub struct GatewaySessionCache {
     config: Arc<AgentConfig>,
     model: Arc<Mutex<Box<dyn ModelClient>>>,
@@ -108,8 +146,7 @@ impl GatewaySessionCache {
         config: AgentConfig,
         config_path: Option<PathBuf>,
     ) -> Result<Self, String> {
-        let active_path = config_path
-            .unwrap_or_else(|| crate::config::expand_user_path(crate::config::DEFAULT_USER_CONFIG));
+        let active_path = config_path.unwrap_or_else(crate::config::default_config_path);
         let config = Arc::new(config);
         let model = Arc::new(Mutex::new(build_model(&config.model)?));
         let runtime_reloader = PartialRuntimeReloader::new(
@@ -382,6 +419,7 @@ impl GatewayStatus {
         if !state_path.is_file() {
             return Self {
                 running: false,
+                channel_status: BTreeMap::new(),
                 agent_status: "unhealthy".to_string(),
                 pid: None,
                 rss_kb: None,
@@ -406,8 +444,10 @@ impl GatewayStatus {
             .filter(|_| running)
             .and_then(|pid| process_rss_kb(Some(pid)))
             .map(|value| value.to_string());
+        let channel_status = read_channel_health(&state_path, pid.as_deref());
         Self {
             running,
+            channel_status,
             agent_status: if running {
                 json_field(&text, "agent_status").unwrap_or_else(|| "healthy".to_string())
             } else {
@@ -441,6 +481,7 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
     fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
     let state_path = run_dir.join("gateway.json");
     let log_path = log_dir.join("gateway.log");
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(&current_exe);
     if let Some(path) = &config_path {
@@ -452,13 +493,12 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
         .append(true)
         .open(&log_path)
         .map_err(|error| error.to_string())?;
-    let process = command
+    let mut process = command
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
         .stderr(log)
         .spawn()
         .map_err(|error| error.to_string())?;
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let started_at = beijing_timestamp_now();
     let state = format!(
         "{{\"pid\":{},\"agent_status\":\"healthy\",\"config\":\"{}\",\"cwd\":\"{}\",\"log\":\"{}\",\"started_at\":\"{}\"}}\n",
@@ -471,44 +511,83 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
         log_path.display(),
         started_at
     );
-    fs::write(&state_path, state).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::write(&state_path, state) {
+        let _ = process.kill();
+        let _ = process.wait();
+        return Err(error.to_string());
+    }
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        if process
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            let mut status = GatewayStatus::from_paths(state_path, log_path);
+            status.running = false;
+            status.agent_status = "unhealthy".to_string();
+            status.rss_kb = None;
+            status.reason = "startup_exited".to_string();
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
     Ok(GatewayStatus::from_paths(state_path, log_path))
 }
 
 pub fn stop_gateway() -> Result<GatewayStatus, String> {
     let status = GatewayStatus::current();
-    if let Some(pid) = status
+    let Some(pid) = status
         .pid
         .as_deref()
         .and_then(|value| value.parse::<u32>().ok())
-    {
-        if status.running {
-            if !pid_matches_gateway(pid) {
-                let mut status = status;
-                status.reason = "unverified_pid".to_string();
-                return Ok(status);
-            }
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline && pid_running(pid) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if pid_running(pid) {
-                let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .status();
-            }
+        .filter(|_| status.running)
+    else {
+        return Ok(status);
+    };
+    let mut failure = "";
+    for (signal, timeout) in [("-TERM", 5), ("-KILL", 2)] {
+        if !pid_running(pid) {
+            break;
+        }
+        if !pid_matches_gateway(pid) {
+            failure = "unverified_pid";
+            break;
+        }
+        let sent = Command::new("kill")
+            .arg(signal)
+            .arg(pid.to_string())
+            .status()
+            .is_ok_and(|result| result.success());
+        if !sent {
+            failure = "signal_failed";
+            break;
+        }
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        while Instant::now() < deadline && pid_running(pid) {
+            thread::sleep(Duration::from_millis(100));
         }
     }
-    Ok(GatewayStatus::current())
+    let mut status = GatewayStatus::current();
+    if status.running {
+        status.reason = if failure.is_empty() {
+            "stop_timeout"
+        } else {
+            failure
+        }
+        .to_string();
+    }
+    Ok(status)
 }
 
 pub fn restart_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, String> {
-    let _ = stop_gateway();
+    let stopped = stop_gateway()?;
+    if stopped.running {
+        return Ok(stopped);
+    }
     start_gateway(config_path)
 }
 
@@ -532,6 +611,9 @@ pub fn format_gateway_status(status: &GatewayStatus) -> Vec<String> {
     ];
     if !status.started_at.is_empty() {
         lines.push(format!("started_at={}", status.started_at));
+    }
+    for (name, mode) in &status.channel_status {
+        lines.push(format!("channel.{name}={mode}"));
     }
     if !status.reason.is_empty() {
         lines.push(format!("reason={}", status.reason));
@@ -558,13 +640,41 @@ fn json_field(text: &str, key: &str) -> Option<String> {
 }
 
 fn pid_running(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => {
+            if let Some(state) = stat
+                .rsplit_once(") ")
+                .and_then(|(_, tail)| tail.chars().next())
+            {
+                return !matches!(state, 'Z' | 'X' | 'x');
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => {}
+    }
+    if let Ok(output) = Command::new("ps")
+        .args(["-o", "stat=", "-p"])
         .arg(pid.to_string())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .output()
+    {
+        let state = String::from_utf8_lossy(&output.stdout);
+        let state = state.trim();
+        if let Some(state) = state.chars().next() {
+            return !matches!(state, 'Z' | 'X' | 'x');
+        }
+    }
+    #[cfg(unix)]
+    {
+        // A process we cannot signal is still live.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    false
 }
 
 fn pid_matches_gateway(pid: u32) -> bool {
@@ -578,9 +688,14 @@ fn pid_matches_gateway(pid: u32) -> bool {
                 .map(|name| name.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "colibri".to_string());
-    (command.contains(&binary) || command.contains("colibri"))
-        && command.contains("gateway")
-        && command.contains("run")
+    let Some(args) = command.strip_suffix(" gateway run") else {
+        return false;
+    };
+    let executable = args.split_once(" --config ").map_or(args, |(exe, _)| exe);
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(binary.as_str())
 }
 
 fn pid_command(pid: u32) -> Option<String> {
@@ -711,6 +826,18 @@ impl<T> InboundRouter<T> {
         self.cv.notify_all();
     }
 
+    fn closed_after(&self, delay: Duration) -> bool {
+        let guard = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if delay.is_zero() {
+            return guard.closed;
+        }
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, delay, |state| !state.closed)
+            .unwrap_or_else(|error| error.into_inner());
+        guard.closed
+    }
+
     pub fn pending_len(&self) -> usize {
         self.inner
             .lock()
@@ -771,7 +898,6 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
     let max_turns = config.gateway.max_concurrent_turns.max(1);
     let router = Arc::new(InboundRouter::new(max_pending));
     let (error_tx, error_rx) = mpsc::channel::<String>();
-    let waiters = Arc::new(ChannelPermissionWaiters::default());
     let sessions = Arc::new(Mutex::new(GatewaySessionCache::new_with_config_path(
         config.clone(),
         config_path,
@@ -781,7 +907,6 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
     for _ in 0..max_turns {
         let worker_router = Arc::clone(&router);
         let worker_channels = Arc::clone(&channels);
-        let worker_waiters = Arc::clone(&waiters);
         let worker_sessions = Arc::clone(&sessions);
         let worker_health = Arc::clone(&health);
         let worker_error_tx = error_tx.clone();
@@ -789,7 +914,6 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
             if let Err(error) = run_turn_worker(
                 worker_router,
                 worker_channels,
-                worker_waiters,
                 worker_sessions,
                 worker_health,
             ) {
@@ -798,19 +922,20 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
             }
         }));
     }
+    let channel_health = Arc::new(ChannelHealth::default());
     let mut pollers = Vec::new();
     for channel in channels.values().cloned() {
         let channel_name = channel.name().to_string();
         let poll_router = Arc::clone(&router);
-        let poll_waiters = Arc::clone(&waiters);
         let poll_sessions = Arc::clone(&sessions);
-        let poll_error_tx = error_tx.clone();
+        let channel_health = Arc::clone(&channel_health);
         pollers.push(thread::spawn(move || {
             if let Err(error) =
-                run_channel_poll_loop(channel, poll_router, poll_waiters, poll_sessions)
+                run_channel_poll_loop(channel, poll_router, poll_sessions, |status| {
+                    channel_health.report(&channel_name, status);
+                })
             {
-                gateway_log(format!("channel={} poller failed: {}", channel_name, error));
-                let _ = poll_error_tx.send(error);
+                gateway_log(format!("channel={channel_name} poller stopped: {error}"));
             }
         }));
     }
@@ -842,16 +967,45 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
 fn run_channel_poll_loop(
     channel: Arc<dyn GatewayChannel>,
     router: Arc<InboundRouter<InboundEnvelope>>,
-    waiters: Arc<ChannelPermissionWaiters>,
     sessions: Arc<Mutex<GatewaySessionCache>>,
+    report: impl Fn(&'static str),
 ) -> Result<(), String> {
-    loop {
-        for envelope in channel.poll_once()? {
-            validate_channel_envelope(channel.as_ref(), &envelope)?;
-            let key = envelope.session_key();
-            if envelope.text_only() && waiters.deliver(&key, &envelope.text) {
+    let initial_delay = Duration::from_secs(1);
+    let mut backoff = initial_delay;
+    report("connecting");
+    while !router.closed_after(Duration::ZERO) {
+        let messages = match channel.poll_once() {
+            Ok(messages) => {
+                backoff = initial_delay;
+                report("online");
+                messages
+            }
+            Err(ChannelPollError::Retryable(error)) => {
+                if backoff == initial_delay {
+                    gateway_log(format!("channel={} reconnecting: {error}", channel.name()));
+                }
+                report("reconnecting");
+                if router.closed_after(backoff) {
+                    break;
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(30));
                 continue;
             }
+            Err(ChannelPollError::AuthRequired) => {
+                report("auth_required");
+                return Err("channel authentication required".into());
+            }
+            Err(ChannelPollError::Permanent(error)) => {
+                report("failed");
+                return Err(error);
+            }
+        };
+        for envelope in messages {
+            validate_channel_envelope(channel.as_ref(), &envelope).map_err(|error| {
+                report("failed");
+                error
+            })?;
+            let key = envelope.session_key();
             if envelope.text_only() {
                 let steered = sessions
                     .lock()
@@ -866,12 +1020,12 @@ fn run_channel_poll_loop(
             }
         }
     }
+    Ok(())
 }
 
 fn run_turn_worker(
     router: Arc<InboundRouter<InboundEnvelope>>,
     channels: Arc<ChannelRegistry>,
-    waiters: Arc<ChannelPermissionWaiters>,
     sessions: Arc<Mutex<GatewaySessionCache>>,
     health: Arc<GatewayAgentHealth>,
 ) -> Result<(), String> {
@@ -904,23 +1058,7 @@ fn run_turn_worker(
             session.set_steer_notifier(Some(Arc::new(move |ack| {
                 ack_outbound.send_ack(&ack);
             })));
-            let prompter = channel.permission_prompter(
-                Arc::clone(&outbound),
-                key.clone(),
-                Arc::clone(&waiters),
-            );
-            let response_result = match prompter {
-                Some(mut prompter) => session.submit_with_media_and_permission_prompter(
-                    &envelope.text,
-                    envelope.media,
-                    Some(prompter.as_mut()),
-                ),
-                None => session.submit_with_media_and_permission_prompter(
-                    &envelope.text,
-                    envelope.media,
-                    None,
-                ),
-            };
+            let response_result = session.submit_with_media(&envelope.text, envelope.media);
             {
                 let mut guard = sessions
                     .lock()
@@ -989,13 +1127,57 @@ mod tests {
         InboundRouter,
     };
     use crate::channel::{
-        build_channel_registry, ChannelPermissionWaiters, GatewayChannel, InboundEnvelope,
-        OutboundSink,
+        build_channel_registry, ChannelPollError, GatewayChannel, InboundEnvelope, OutboundSink,
     };
     use crate::config::AgentConfig;
     use crate::messages::{MediaPart, Message, ModelLimits, ModelResponse};
     use crate::model::ModelClient;
     use crate::session::MODEL_UNAVAILABLE_TEXT;
+
+    struct ReconnectingChannel(AtomicUsize);
+
+    impl GatewayChannel for ReconnectingChannel {
+        fn name(&self) -> &str {
+            "fixture"
+        }
+
+        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
+            match self.0.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(ChannelPollError::Retryable("connection reset".into())),
+                1 => Ok(Vec::new()),
+                _ => Err(ChannelPollError::AuthRequired),
+            }
+        }
+
+        fn resolve_inbound_media(&self, _: &mut InboundEnvelope) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn outbound_for(&self, _: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String> {
+            Err("unused".into())
+        }
+    }
+
+    #[test]
+    fn generic_poller_recovers_from_transport_error_and_stops_on_auth_error() {
+        let states = Mutex::new(Vec::new());
+        let channel = Arc::new(ReconnectingChannel(AtomicUsize::new(0)));
+        let mut config = AgentConfig::default();
+        config.session.transcript = false;
+        let gateway = GatewaySessionCache::new(config).unwrap();
+        let error = run_channel_poll_loop(
+            channel,
+            Arc::new(InboundRouter::new(1)),
+            Arc::new(Mutex::new(gateway)),
+            |status| states.lock().unwrap().push(status),
+        )
+        .unwrap_err();
+        assert_eq!(error, "channel authentication required");
+        assert_eq!(
+            *states.lock().unwrap(),
+            ["connecting", "reconnecting", "online", "auth_required"]
+        );
+    }
 
     struct RecordingSink {
         texts: Arc<Mutex<Vec<String>>>,
@@ -1065,9 +1247,9 @@ mod tests {
             "expected"
         }
 
-        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
             if self.polled.swap(true, Ordering::SeqCst) {
-                return Err("poll stopped".to_string());
+                return Err(ChannelPollError::Permanent("poll stopped".into()));
             }
             Ok(vec![InboundEnvelope {
                 channel: "wrong".to_string(),
@@ -1097,7 +1279,7 @@ mod tests {
             "other"
         }
 
-        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, String> {
+        fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
             Ok(Vec::new())
         }
 
@@ -1175,7 +1357,6 @@ mod tests {
             )
             .unwrap();
         router.close();
-        let waiters = Arc::new(ChannelPermissionWaiters::default());
         let mut config = AgentConfig::default();
         config.session.transcript = false;
         config.session.restore_transcript = false;
@@ -1184,7 +1365,6 @@ mod tests {
         run_turn_worker(
             router,
             channels,
-            waiters,
             sessions,
             Arc::new(GatewayAgentHealth::default()),
         )
@@ -1199,13 +1379,12 @@ mod tests {
             polled: AtomicBool::new(false),
         });
         let router = Arc::new(InboundRouter::new(1));
-        let waiters = Arc::new(ChannelPermissionWaiters::default());
         let mut config = AgentConfig::default();
         config.session.transcript = false;
         config.session.restore_transcript = false;
         let sessions = Arc::new(Mutex::new(GatewaySessionCache::new(config).unwrap()));
 
-        let error = run_channel_poll_loop(channel, router, waiters, sessions).unwrap_err();
+        let error = run_channel_poll_loop(channel, router, sessions, |_| {}).unwrap_err();
 
         assert_eq!(
             error,
@@ -1250,7 +1429,6 @@ mod tests {
             )
             .unwrap();
         router.close();
-        let waiters = Arc::new(ChannelPermissionWaiters::default());
         let mut config = AgentConfig::default();
         config.session.transcript = false;
         config.session.restore_transcript = false;
@@ -1261,7 +1439,6 @@ mod tests {
         run_turn_worker(
             router,
             channels,
-            waiters,
             Arc::clone(&sessions),
             Arc::new(GatewayAgentHealth::default()),
         )
@@ -1277,4 +1454,18 @@ mod tests {
             vec![MODEL_UNAVAILABLE_TEXT.to_string(), "recovered".to_string()]
         );
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn zombie_gateway_is_reported_as_stopped() {
+    let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while pid_running(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let running = pid_running(pid);
+    child.wait().unwrap();
+    assert!(!running);
 }

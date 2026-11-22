@@ -204,7 +204,9 @@ def test_session_injects_transient_current_time_context():
     )
     assert user_message.content.startswith("what time is it?")
     assert "\n\n## Current Time\n" in user_message.content
-    time_line = user_message.content.splitlines()[-1]
+    lines = user_message.content.splitlines()
+    time_line = lines[-2]
+    assert lines[-1].startswith("Use this only when needed.")
     assert len(time_line) == 25
     assert time_line[4] == "-"
     assert time_line[7] == "-"

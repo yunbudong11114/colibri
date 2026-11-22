@@ -18,7 +18,12 @@ Before every normal agent completion request, append this transient section to t
 ```text
 ## Current Time
 YYYY-MM-DD HH:MM (+HH:MM)
+Use this only when needed. Do not mention or repeat the current time unless the user asks or it is relevant.
 ```
+
+The final instruction is part of the transient runtime metadata. It prevents the
+model from treating clock availability as a request to announce the time in every
+reply.
 
 - Read the clock again for every model tool round so a long-running turn receives an updated value on its next completion request.
 - Use the host's local timezone and numeric UTC offset. Do not hard-code Beijing time and do not add a timezone configuration field.

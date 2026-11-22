@@ -19,7 +19,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "auth_weixin_uses_native_http_and_saves_token_without_printing_secret",
                 "gateway_session_cache_reuses_and_evicts_oldest_like_python",
                 "gateway_session_transcript_injects_channel_metadata_like_python",
-                "channel_permission_waiters_isolate_same_sender_across_channels",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
                 "gateway_channel_adapter_rejects_mismatched_envelope_like_python",
                 "gateway_channel_registry_accepts_fake_adapter_without_gateway_changes",
                 "gateway_channel_registry_rejects_duplicate_adapter_names",
@@ -31,12 +31,12 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "weixin_updates_keep_text_when_media_download_fails_like_python",
                 "weixin_aes_ecb_pkcs7_round_trip_matches_python",
                 "weixin_media_cleanup_removes_oldest_files_to_fit_budget_like_python",
-                "weixin_permission_numeric_choices_match_python",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
                 "weixin_download_inbound_media_decrypts_and_stores_file_like_python",
                 "weixin_send_media_encrypts_uploads_and_sends_metadata_like_python",
                 "weixin_send_text_uses_unique_client_id_like_python",
-                "gateway_hot_reload_applies_only_model_vision_and_web_search",
-                "hot_reload_preserves_session_permission_grants",
+                "gateway_hot_reload_uses_the_shared_direct_config",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
             ],
             status: "partial",
         },
@@ -54,13 +54,13 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "read_escape_sequence_consumes_arrow_key_bytes_like_python",
                 "repl_keeps_history_across_turns_for_arrow_navigation",
                 "steering_pump_forwards_line_to_steer",
-                "steering_pump_skips_read_while_permission_pending",
-                "steering_pump_notifies_permission_pending_once",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
+                "cli_ask_writes_without_permission_input",
                 "repl_continues_after_model_error_like_python",
                 "ask_returns_nonzero_for_exhausted_model_error",
                 "try_read_line_returns_none_when_stdin_not_tty",
-                "gateway_hot_reload_applies_only_model_vision_and_web_search",
-                "hot_reload_preserves_session_permission_grants",
+                "gateway_hot_reload_uses_the_shared_direct_config",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
             ],
             status: "partial",
         },
@@ -152,8 +152,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         },
         ParityEntry {
             python_file: "test_channel_permission.py",
-            rust_tests: &["weixin_permission_numeric_choices_match_python"],
-            status: "partial",
+            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            status: "intentional_difference",
         },
         ParityEntry {
             python_file: "test_memory.py",
@@ -192,25 +192,13 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         },
         ParityEntry {
             python_file: "test_permissions.py",
-            rust_tests: &[
-                "permission_policy_matches_python_session_and_user_grants",
-                "permission_policy_classifies_shell_redirection_as_file_path",
-                "permission_policy_keeps_descriptor_and_null_redirections_as_shell",
-                "permission_policy_keeps_inline_file_redirection_as_file_path",
-                "permission_policy_hard_deny_wins_over_shell_redirection_file_path",
-                "permission_policy_classifies_out_of_root_file_paths",
-                "hardware_device_session_and_user_permissions_match_python",
-                "hardware_allow_write_hard_deny_wins_over_user_grant_like_python",
-            ],
-            status: "partial",
+            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            status: "intentional_difference",
         },
         ParityEntry {
             python_file: "test_permissions_store.py",
-            rust_tests: &[
-                "permission_policy_matches_python_session_and_user_grants",
-                "user_permission_store_saves_and_loads_deduplicated_toml",
-            ],
-            status: "covered",
+            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            status: "intentional_difference",
         },
         ParityEntry {
             python_file: "test_session.py",
@@ -222,9 +210,9 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "submit_appends_media_paths_to_user_message_like_python",
                 "session_sends_media_result_through_media_sender_like_python",
                 "session_turns_media_sender_failure_into_tool_error_like_python",
-                "session_denies_tool_calls_when_permission_mode_is_deny",
+                "cli_ask_writes_without_permission_input",
                 "session_allows_read_only_tool_calls_by_default",
-                "session_denies_write_and_execute_tools_without_approval_by_default",
+                "cli_ask_reads_outside_legacy_roots_without_approval",
                 "session_writes_transcript_events",
                 "session_uses_model_assisted_compact_and_retains_latest_user_like_python",
                 "session_compacts_when_model_input_tokens_reach_threshold_like_python",
@@ -249,7 +237,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "steering_skip_result_constant_matches_python",
                 "format_steering_ack_matches_python",
                 "steer_rejected_when_turn_inactive",
-                "steer_rejected_while_permission_pending",
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
                 "steer_skips_remaining_tools_and_injects_user_message",
                 "steer_during_text_only_complete_is_applied",
                 "steering_queue_empty_after_normal_submit",
@@ -305,8 +293,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "image_understand_uses_fake_vision_model_for_allowed_image_like_python",
                 "shell_tool_reports_invalid_quoted_command_like_python",
                 "shell_tool_executes_compound_command_with_real_shell",
-                "shell_tool_rejects_denied_executable_in_compound_command",
-                "shell_tool_rejects_denied_executable_after_background_operator",
+                "cli_ask_ignores_legacy_shell_deny_and_creates_no_grants",
+                "cli_ask_ignores_legacy_shell_deny_and_creates_no_grants",
                 "shell_timeout_terminates_without_waiting_for_natural_exit_like_python",
                 "shell_timeout_kills_background_process_group_like_python",
                 "shell_run_bounds_large_output_and_preserves_tail_like_python",
@@ -460,6 +448,8 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_format_gateway_status_is_key_value",
             "test_gateway_process_stop_refuses_unverified_pid",
             "test_gateway_process_stop_terminates_verified_gateway_pid",
+            "test_gateway_stop_waits_for_exit_after_sigkill",
+            "test_zombie_gateway_is_not_running",
             "test_gateway_agent_health_persists_only_on_state_change",
             "test_gateway_log_lines_include_beijing_timestamp",
         ],
@@ -770,7 +760,7 @@ fn python_test_coverage_map_covers_all_unit_files() {
             entry.python_file
         );
         assert!(
-            entry.status == "covered" || entry.status == "partial",
+            matches!(entry.status, "covered" | "partial" | "intentional_difference"),
             "uncovered parity status for {}",
             entry.python_file
         );
@@ -809,8 +799,13 @@ fn python_rust_cli_ask_output_matches_with_status_enabled() {
 fn python_rust_cli_diagnostics_output_matches() {
     let fixture = CliFixture::new("diagnostics", false);
 
-    let python = run_python_cli(&fixture, &["diagnostics"]);
-    let rust = run_rust_cli(&fixture, &["diagnostics"]);
+    let mut python = run_python_cli(&fixture, &["diagnostics"]);
+    let mut rust = run_rust_cli(&fixture, &["diagnostics"]);
+    let rust_diagnostics = String::from_utf8(rust.stdout).unwrap();
+    assert!(rust_diagnostics.lines().any(|line| line == "execution=direct"));
+    rust.stdout = rust_diagnostics.replace("execution=direct\n", "").into_bytes();
+    python.stdout = String::from_utf8(python.stdout).unwrap()
+        .replace("user_permissions=missing\n", "").into_bytes();
 
     assert_same_output("diagnostics", &python, &rust);
 }

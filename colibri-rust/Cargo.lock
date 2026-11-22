@@ -57,7 +57,9 @@ dependencies = [
  "serde_yaml",
  "shell-words",
  "toml",
+ "toml_edit",
  "ureq",
+ "url",
 ]
 
 [[package]]

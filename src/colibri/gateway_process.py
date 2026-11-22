@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -64,37 +64,46 @@ class GatewayProcessManager:
             "started_at": format_beijing_timestamp(),
             "command": command,
         }
-        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return self.status()
+        try:
+            self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            process.kill()
+            process.wait()
+            raise
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            return self.status()
+        return replace(self.status(), running=False, agent_status="unhealthy", reason="startup_exited")
 
     def stop(self, *, timeout_seconds: float = 5.0) -> GatewayProcessStatus:
         status = self.status()
         if not status.running or status.pid is None:
             return status
-        if not _pid_matches_gateway(status.pid):
-            return GatewayProcessStatus(
-                running=status.running,
-                pid=status.pid,
-                state_path=status.state_path,
-                log_path=status.log_path,
-                config_path=status.config_path,
-                cwd=status.cwd,
-                started_at=status.started_at,
-                rss_kb=status.rss_kb,
-                reason="unverified_pid",
-            )
-        os.kill(status.pid, signal.SIGTERM)
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
+        failure = "stop_timeout"
+        for sig, timeout in ((signal.SIGTERM, timeout_seconds), (signal.SIGKILL, 2.0)):
             if not _pid_running(status.pid):
-                return self.status()
-            time.sleep(0.1)
-        if _pid_running(status.pid):
-            os.kill(status.pid, signal.SIGKILL)
-        return self.status()
+                break
+            if not _pid_matches_gateway(status.pid):
+                failure = "unverified_pid"
+                break
+            try:
+                os.kill(status.pid, sig)
+            except ProcessLookupError:
+                break
+            except OSError:
+                failure = "signal_failed"
+                break
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and _pid_running(status.pid):
+                time.sleep(0.1)
+        current = self.status()
+        return replace(current, reason=failure) if current.running else current
 
     def restart(self, config_path: Path | None = None) -> GatewayProcessStatus:
-        self.stop()
+        stopped = self.stop()
+        if stopped.running:
+            return stopped
         return self.start(config_path)
 
     def status(self) -> GatewayProcessStatus:
@@ -200,8 +209,11 @@ def _rss_kb(pid: int) -> int | None:
 
 
 def _pid_running(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
+    if pid is None or not 0 < pid <= 2**31 - 1:
         return False
+    state = _ps_field(pid, "stat")
+    if state:
+        return not state.startswith("Z")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -215,7 +227,10 @@ def _pid_matches_gateway(pid: int) -> bool:
     command = _pid_command(pid)
     if command is None:
         return False
-    return "colibri.cli" in command and "gateway" in command and "run" in command
+    if not command.endswith(" gateway run"):
+        return False
+    prefix = command.removesuffix(" gateway run")
+    return prefix.split(" --config ", 1)[0].endswith(" -m colibri.cli")
 
 
 def _pid_command(pid: int) -> str | None:
@@ -226,9 +241,13 @@ def _pid_command(pid: int) -> str | None:
             return text
     except OSError:
         pass
+    return _ps_field(pid, "command")
+
+
+def _ps_field(pid: int, field: str) -> str | None:
     try:
         result = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+            ["ps", "-o", f"{field}=", "-p", str(pid)],
             check=False,
             capture_output=True,
             text=True,

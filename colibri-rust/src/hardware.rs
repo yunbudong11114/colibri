@@ -104,7 +104,6 @@ pub fn configured_hardware_devices(config: &HardwareConfig) -> serde_json::Value
                     "transport": device.transport,
                     "baud_rate": device.baud_rate,
                     "capabilities": device.capabilities,
-                    "allow_write": device.allow_write,
                 })
             })
             .collect(),
@@ -115,7 +114,6 @@ pub fn resolve_hardware_device<'a>(
     config: &'a HardwareConfig,
     name: &str,
     capability: &str,
-    write: bool,
 ) -> Result<&'a HardwareDeviceConfig, HardwareError> {
     let device = config
         .devices
@@ -135,12 +133,6 @@ pub fn resolve_hardware_device<'a>(
         return Err(HardwareError::new(
             "unsupported_operation",
             format!("Device {} does not support {}", name, capability),
-        ));
-    }
-    if write && !device.allow_write {
-        return Err(HardwareError::new(
-            "permission_denied",
-            format!("Hardware writes are disabled for device: {}", name),
         ));
     }
     Ok(device)

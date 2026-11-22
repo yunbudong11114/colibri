@@ -140,3 +140,15 @@ pub fn parse_json_string_at(value: &str) -> Option<String> {
     }
     Some(out)
 }
+
+pub(crate) fn http_endpoint(value: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(value).map_err(|_| "请输入 HTTP(S) URL")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("请输入 HTTP(S) URL，地址不含账号密码".into());
+    }
+    Ok(url)
+}

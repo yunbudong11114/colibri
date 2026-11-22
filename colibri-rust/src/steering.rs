@@ -24,7 +24,6 @@ pub fn format_steering_ack(skipped: usize, steering_text: &str) -> String {
 pub struct SteeringState {
     queue: Mutex<VecDeque<String>>,
     turn_active: AtomicBool,
-    permission_pending: AtomicBool,
 }
 
 impl SteeringState {
@@ -32,13 +31,12 @@ impl SteeringState {
         Self {
             queue: Mutex::new(VecDeque::new()),
             turn_active: AtomicBool::new(false),
-            permission_pending: AtomicBool::new(false),
         }
     }
 
     pub fn steer(&self, text: &str) -> bool {
         let cleaned = text.trim();
-        if cleaned.is_empty() || !self.is_turn_active() || self.is_permission_pending() {
+        if cleaned.is_empty() || !self.is_turn_active() {
             return false;
         }
         let Ok(mut queue) = self.queue.lock() else {
@@ -55,16 +53,8 @@ impl SteeringState {
         self.turn_active.load(Ordering::SeqCst)
     }
 
-    pub fn is_permission_pending(&self) -> bool {
-        self.permission_pending.load(Ordering::SeqCst)
-    }
-
     pub fn set_turn_active(&self, active: bool) {
         self.turn_active.store(active, Ordering::SeqCst);
-    }
-
-    pub fn set_permission_pending(&self, pending: bool) {
-        self.permission_pending.store(pending, Ordering::SeqCst);
     }
 
     pub fn drain_one(&self) -> Option<String> {
@@ -102,16 +92,8 @@ impl SteerHandle {
         self.inner.is_turn_active()
     }
 
-    pub fn is_permission_pending(&self) -> bool {
-        self.inner.is_permission_pending()
-    }
-
     pub fn set_turn_active_for_test(&self, active: bool) {
         self.inner.set_turn_active(active);
-    }
-
-    pub fn set_permission_pending_for_test(&self, pending: bool) {
-        self.inner.set_permission_pending(pending);
     }
 
     pub fn drain_one_for_test(&self) -> Option<String> {

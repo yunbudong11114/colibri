@@ -14,7 +14,6 @@ use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
 use crate::process_output::{run_bounded_command, CommandRunError};
-use crate::shell_policy::denied_shell_executable;
 use crate::skills::run_skill_command;
 
 static TOOL_SPECS_CACHE: Mutex<Option<(Vec<String>, Vec<serde_json::Value>)>> = Mutex::new(None);
@@ -26,46 +25,8 @@ const ALIYUN_MCP_TOOL_NAME: &str = "bailian_web_search";
 pub struct ToolContext {
     pub config: Arc<AgentConfig>,
     pub cwd: PathBuf,
-    pub allowed_file_roots: Vec<PathBuf>,
     pub media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     pub image_analyzer: Option<Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolInfo {
-    pub name: String,
-    pub read_only: bool,
-}
-
-impl ToolInfo {
-    pub fn new(name: &str, read_only: bool) -> Self {
-        Self {
-            name: name.to_string(),
-            read_only,
-        }
-    }
-}
-
-pub fn tool_info(name: &str) -> ToolInfo {
-    ToolInfo::new(
-        name,
-        matches!(
-            name,
-            "files.list"
-                | "files.read"
-                | "memory.list"
-                | "memory.read"
-                | "memory.search"
-                | "skill.read"
-                | "image.understand"
-                | "hardware.probe"
-                | "hardware.devices"
-                | "serial.read"
-                | "gpio.read"
-                | "i2c.scan"
-                | "i2c.read"
-        ),
-    )
 }
 
 impl ToolContext {
@@ -73,16 +34,9 @@ impl ToolContext {
         Self {
             config: config.into(),
             cwd,
-            allowed_file_roots: Vec::new(),
             media_sender: None,
             image_analyzer: None,
         }
-    }
-
-    pub fn with_allowed_file_root(&self, root: PathBuf) -> Self {
-        let mut next = self.clone();
-        next.allowed_file_roots = vec![root];
-        next
     }
 
     pub fn with_media_sender(
@@ -148,7 +102,7 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     if has("shell") {
         specs.push(openai_tool(
             "shell.run",
-            "Run a shell command after Colibri permission approval. Do not use this to create or edit files; use files.write for generated artifacts and text file changes.",
+            "Run a shell command as the current user.",
             serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
         ));
     }
@@ -197,17 +151,17 @@ fn files_tool_specs() -> Vec<serde_json::Value> {
     vec![
         openai_tool(
             "files.list",
-            "List direct children of an allowed directory.",
+            "List direct children of a directory.",
             serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
         ),
         openai_tool(
             "files.read",
-            "Read a UTF-8 text file under an allowed root. Prefer start_line/end_line ranges for large files. Optional max_chars caps this read result and is itself capped by tools.max_result_chars.",
+            "Read a UTF-8 text file. Prefer start_line/end_line ranges for large files. Optional max_chars caps this read result and is itself capped by tools.max_result_chars.",
             serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"max_chars":{"type":"integer","minimum":1}},"required":["path"]}),
         ),
         openai_tool(
             "files.write",
-            "Write a UTF-8 text file under an allowed root. Use this for generated artifacts and file edits; do not use shell redirection or heredocs to create files.",
+            "Write a UTF-8 text file.",
             serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
         ),
         openai_tool(
@@ -352,12 +306,12 @@ pub fn run_tool_map(
         "hardware.devices" => hardware_devices(context),
         "serial.read" => hardware_serial_read(args, context),
         "serial.write" => hardware_serial_write(args, context),
-        "gpio.read" => hardware_controller_tool(args, context, "gpio", false, "gpio_read"),
-        "gpio.write" => hardware_controller_tool(args, context, "gpio", true, "gpio_write"),
-        "i2c.scan" => hardware_controller_tool(args, context, "i2c", false, "i2c_scan"),
-        "i2c.read" => hardware_controller_tool(args, context, "i2c", false, "i2c_read"),
-        "i2c.write" => hardware_controller_tool(args, context, "i2c", true, "i2c_write"),
-        "spi.transfer" => hardware_controller_tool(args, context, "spi", true, "spi_transfer"),
+        "gpio.read" => hardware_controller_tool(args, context, "gpio", "gpio_read"),
+        "gpio.write" => hardware_controller_tool(args, context, "gpio", "gpio_write"),
+        "i2c.scan" => hardware_controller_tool(args, context, "i2c", "i2c_scan"),
+        "i2c.read" => hardware_controller_tool(args, context, "i2c", "i2c_read"),
+        "i2c.write" => hardware_controller_tool(args, context, "i2c", "i2c_write"),
+        "spi.transfer" => hardware_controller_tool(args, context, "spi", "spi_transfer"),
         _ => ToolResult::error("unknown_tool", format!("Unknown tool: {}", name)),
     };
     Ok(result)
@@ -395,11 +349,10 @@ fn hardware_serial_read(args: &BTreeMap<String, String>, context: &ToolContext) 
         },
         None => context.config.hardware.max_transfer_bytes,
     };
-    let device =
-        match resolve_hardware_device(&context.config.hardware, device_name, "serial", false) {
-            Ok(device) => device,
-            Err(error) => return hardware_error_result(error),
-        };
+    let device = match resolve_hardware_device(&context.config.hardware, device_name, "serial") {
+        Ok(device) => device,
+        Err(error) => return hardware_error_result(error),
+    };
     match serial_read(&context.config.hardware, device, max_bytes) {
         Ok(data) => {
             let text = String::from_utf8_lossy(&data).into_owned();
@@ -421,11 +374,10 @@ fn hardware_serial_write(args: &BTreeMap<String, String>, context: &ToolContext)
         Ok(value) => value,
         Err(result) => return result,
     };
-    let device =
-        match resolve_hardware_device(&context.config.hardware, device_name, "serial", true) {
-            Ok(device) => device,
-            Err(error) => return hardware_error_result(error),
-        };
+    let device = match resolve_hardware_device(&context.config.hardware, device_name, "serial") {
+        Ok(device) => device,
+        Err(error) => return hardware_error_result(error),
+    };
     match serial_write(&context.config.hardware, device, data.as_bytes()) {
         Ok(written) => hardware_json_result(
             serde_json::json!({"device":device_name,"bytes_written":written}),
@@ -439,7 +391,6 @@ fn hardware_controller_tool(
     args: &BTreeMap<String, String>,
     context: &ToolContext,
     capability: &str,
-    write: bool,
     command: &str,
 ) -> ToolResult {
     let device_name = match required_hardware_string(args, "device") {
@@ -450,11 +401,10 @@ fn hardware_controller_tool(
         Ok(value) => value,
         Err(result) => return result,
     };
-    let device =
-        match resolve_hardware_device(&context.config.hardware, device_name, capability, write) {
-            Ok(device) => device,
-            Err(error) => return hardware_error_result(error),
-        };
+    let device = match resolve_hardware_device(&context.config.hardware, device_name, capability) {
+        Ok(device) => device,
+        Err(error) => return hardware_error_result(error),
+    };
     match serial_json_request(&context.config.hardware, device, command, arguments) {
         Ok(result) => hardware_json_result(
             serde_json::json!({"device":device_name,"result":result}),
@@ -622,12 +572,6 @@ fn is_hardware_tool(name: &str) -> bool {
 
 fn files_list(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
     let path = resolve_arg_path(args.get("path").map(String::as_str).unwrap_or("."), context);
-    if !is_allowed(&path, context) {
-        return ToolResult::error(
-            "permission_denied",
-            format!("Path is outside allowed roots: {}", path.display()),
-        );
-    }
     let entries = match fs::read_dir(&path) {
         Ok(entries) => entries,
         Err(error) => return ToolResult::error("io_error", error.to_string()),
@@ -649,12 +593,6 @@ fn files_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
         return ToolResult::error("invalid_arguments", "Missing path");
     };
     let path = resolve_arg_path(raw_path, context);
-    if !is_allowed(&path, context) {
-        return ToolResult::error(
-            "permission_denied",
-            format!("Path is outside allowed roots: {}", path.display()),
-        );
-    }
     if !path.exists() {
         return ToolResult::error("not_found", "Path does not exist");
     }
@@ -671,6 +609,16 @@ fn files_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     }
     match fs::read_to_string(&path) {
         Ok(mut text) => {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("config.toml") || name.starts_with("settings.json")
+                })
+            {
+                crate::secrets::redact_config_content(&mut text);
+            }
+            crate::secrets::redact_tool_output(&context.config, &mut text);
             if start_line.is_some() || end_line.is_some() {
                 text = select_line_range(&text, start_line, end_line);
             }
@@ -728,12 +676,6 @@ fn files_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRe
         return ToolResult::error("invalid_arguments", "Missing path");
     };
     let path = resolve_arg_path(raw_path, context);
-    if !is_allowed(&path, context) {
-        return ToolResult::error(
-            "permission_denied",
-            format!("Path is outside allowed roots: {}", path.display()),
-        );
-    }
     if let Some(parent) = path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
             return ToolResult::error("io_error", error.to_string());
@@ -761,9 +703,6 @@ fn files_send(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
         return ToolResult::error("invalid_arguments", "Missing path");
     };
     let path = resolve_arg_path(raw_path, context);
-    if !is_allowed(&path, context) {
-        return ToolResult::error("permission_denied", "Path is outside allowed roots");
-    }
     if !path.exists() {
         return ToolResult::error("not_found", "Path does not exist");
     }
@@ -795,9 +734,6 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
         Ok(_) => return ToolResult::error("invalid_arguments", "Missing command"),
         Err(error) => return ToolResult::error("invalid_arguments", error.to_string()),
     };
-    if denied_shell_executable(&command, &context.config.shell.deny).is_some() {
-        return ToolResult::error("permission_denied", "Command is denied");
-    }
     let mut process = platform_shell_command(&command);
     process.current_dir(&context.cwd);
     let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.0));
@@ -908,6 +844,15 @@ fn memory_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolR
     let Some((path, label)) = memory_target(args, context) else {
         return ToolResult::error("invalid_arguments", "Invalid memory file");
     };
+    let symlink = |path: &Path| fs::symlink_metadata(path).is_ok_and(|info| info.is_symlink());
+    if symlink(&path)
+        || (label.starts_with("topics/") && symlink(&context.config.memory.root.join("topics")))
+    {
+        return ToolResult::error(
+            "invalid_arguments",
+            "Memory writes do not support symbolic links",
+        );
+    }
     let Some(content) = args
         .get("content")
         .map(|value| value.trim())
@@ -981,7 +926,7 @@ fn memory_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolR
     }
 }
 
-fn memory_target(
+pub(crate) fn memory_target(
     args: &BTreeMap<String, String>,
     context: &ToolContext,
 ) -> Option<(PathBuf, String)> {
@@ -1126,9 +1071,6 @@ fn image_understand(args: &BTreeMap<String, String>, context: &ToolContext) -> T
         return ToolResult::error("vision_unavailable", "Image understanding is unavailable");
     };
     let path = resolve_arg_path(raw_path, context);
-    if !is_allowed(&path, context) {
-        return ToolResult::error("permission_denied", "Path is outside allowed roots");
-    }
     if !path.exists() {
         return ToolResult::error("not_found", "Path does not exist");
     }
@@ -1685,17 +1627,6 @@ fn resolve_arg_path(value: &str, context: &ToolContext) -> PathBuf {
         context.cwd.join(path)
     };
     canonicalize_existing_prefix(&joined)
-}
-
-pub fn is_allowed(path: &Path, context: &ToolContext) -> bool {
-    let canonical = canonicalize_existing_prefix(path);
-    let mut roots = context.config.files.roots.clone();
-    roots.push(context.cwd.clone());
-    roots.extend(context.allowed_file_roots.clone());
-    roots.into_iter().any(|root| {
-        let root = canonicalize_existing_prefix(&root);
-        canonical.starts_with(root)
-    })
 }
 
 pub fn content_type_for_path(path: &Path) -> String {

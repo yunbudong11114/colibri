@@ -7,6 +7,10 @@ from colibri.messages import Message
 
 
 _TIME_CONTEXT_SEPARATOR = "\n\n## Current Time\n"
+_TIME_USAGE_INSTRUCTION = (
+    "Use this only when needed. Do not mention or repeat the current time unless "
+    "the user asks or it is relevant."
+)
 
 
 def current_time_context(now: datetime | None = None) -> str:
@@ -17,7 +21,10 @@ def current_time_context(now: datetime | None = None) -> str:
 
 
 def _format_time_context(date_time: str, offset: timedelta | None) -> str:
-    return f"## Current Time\n{date_time} ({_format_utc_offset(offset)})"
+    return (
+        f"## Current Time\n{date_time} ({_format_utc_offset(offset)})\n"
+        f"{_TIME_USAGE_INSTRUCTION}"
+    )
 
 
 def append_time_context_to_latest_user(messages: list[Message], time_context: str) -> bool:
@@ -45,6 +52,10 @@ def user_text_without_time_context(content: str) -> str:
 
 
 def _is_formatted_time_line(value: str) -> bool:
+    time_line, separator, instruction = value.partition("\n")
+    if not separator or instruction != _TIME_USAGE_INSTRUCTION:
+        return False
+    value = time_line
     if len(value) != 25:
         return False
     punctuation = {

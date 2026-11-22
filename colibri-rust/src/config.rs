@@ -45,19 +45,8 @@ pub struct SessionConfig {
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
     pub enabled: Vec<String>,
-    pub default_permission: String,
     pub max_result_chars: usize,
     pub max_shell_seconds: f64,
-}
-
-#[derive(Clone, Debug)]
-pub struct ShellConfig {
-    pub deny: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct FilesConfig {
-    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,7 +87,6 @@ pub struct HardwareDeviceConfig {
     pub transport: String,
     pub baud_rate: u32,
     pub capabilities: Vec<String>,
-    pub allow_write: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -130,13 +118,19 @@ pub struct WeixinChannelConfig {
 }
 
 #[derive(Clone, Debug)]
+pub struct SpeechConfig {
+    pub backend: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct AgentConfig {
     pub model: ModelConfig,
     pub vision: VisionConfig,
     pub session: SessionConfig,
     pub tools: ToolsConfig,
-    pub shell: ShellConfig,
-    pub files: FilesConfig,
     pub skills: SkillsConfig,
     pub console: ConsoleConfig,
     pub memory: MemoryConfig,
@@ -144,6 +138,8 @@ pub struct AgentConfig {
     pub hardware: HardwareConfig,
     pub gateway: GatewayConfig,
     pub channels_weixin: WeixinChannelConfig,
+    pub speech: SpeechConfig,
+    pub mcp_servers: serde_json::Value,
 }
 
 impl Default for AgentConfig {
@@ -192,28 +188,11 @@ impl Default for AgentConfig {
                     "memory".to_string(),
                     "skills".to_string(),
                 ],
-                default_permission: "allow_read_confirm_write".to_string(),
                 max_result_chars: 32000,
                 max_shell_seconds: 30.0,
             },
-            shell: ShellConfig {
-                deny: vec![
-                    "rm".to_string(),
-                    "shutdown".to_string(),
-                    "reboot".to_string(),
-                    "mkfs".to_string(),
-                    "dd".to_string(),
-                    "sudo".to_string(),
-                ],
-            },
-            files: FilesConfig {
-                roots: vec![
-                    expand_user_path("~/.colibri/workspace"),
-                    PathBuf::from("/tmp/colibri"),
-                ],
-            },
             skills: SkillsConfig {
-                dir: expand_user_path("~/.colibri/skills"),
+                dir: colibri_home().join("skills"),
                 max_catalog: 32,
                 max_catalog_chars: 4000,
                 max_instruction_chars: 8000,
@@ -223,7 +202,7 @@ impl Default for AgentConfig {
                 plain_answer: true,
             },
             memory: MemoryConfig {
-                root: expand_user_path("~/.colibri/memory"),
+                root: colibri_home().join("memory"),
                 max_search_results: 5,
                 enabled: true,
                 max_recall_chars: 6000,
@@ -249,6 +228,13 @@ impl Default for AgentConfig {
                 max_pending_inbound: 8,
                 max_concurrent_turns: 1,
             },
+            speech: SpeechConfig {
+                backend: "auto".into(),
+                base_url: String::new(),
+                model: "whisper-1".into(),
+                api_key: String::new(),
+            },
+            mcp_servers: serde_json::json!([]),
             channels_weixin: WeixinChannelConfig {
                 enabled: false,
                 token: String::new(),
@@ -266,12 +252,14 @@ impl AgentConfig {
         let active = match path {
             Some(path) => Some(path.to_path_buf()),
             None => {
-                let default = expand_user_path(DEFAULT_USER_CONFIG);
+                let default = default_config_path();
                 default.exists().then_some(default)
             }
         };
         let Some(path) = active else {
-            return Ok(Self::default());
+            let mut config = Self::default();
+            config.enable_application_access();
+            return Ok(config);
         };
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("failed to read config {}: {}", path.display(), error))?;
@@ -281,6 +269,14 @@ impl AgentConfig {
             .map_err(|error| format!("failed to parse config {}: {}", path.display(), error))?;
         apply_toml_value(&mut config, &value)?;
         Ok(config)
+    }
+    fn enable_application_access(&mut self) {
+        if self.hardware.enabled && !self.tools.enabled.iter().any(|tool| tool == "hardware") {
+            self.tools.enabled.push("hardware".into());
+        }
+        if !self.memory.enabled {
+            self.tools.enabled.retain(|tool| tool != "memory");
+        }
     }
 }
 
@@ -292,6 +288,10 @@ pub fn expand_user_path(value: &str) -> PathBuf {
     } else {
         PathBuf::from(value)
     }
+}
+
+pub fn default_config_path() -> PathBuf {
+    colibri_home().join("config.toml")
 }
 
 pub fn colibri_home() -> PathBuf {
@@ -333,7 +333,10 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(), String> {
+pub(crate) fn apply_toml_value(
+    config: &mut AgentConfig,
+    value: &toml::Value,
+) -> Result<(), String> {
     validate_config_fields(value)?;
     if let Some(table) = value.get("model") {
         if let Some(value) = get_string(table, "provider") {
@@ -425,28 +428,38 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
             config.session.transcript_max_total_bytes = value;
         }
     }
+    if let Some(table) = value.get("speech") {
+        if let Some(value) = get_string(table, "backend") {
+            if !matches!(value.as_str(), "auto" | "offline" | "online") {
+                return Err("invalid speech.backend".into());
+            }
+            config.speech.backend = value;
+        }
+        if let Some(value) = get_string(table, "base_url") {
+            config.speech.base_url = value;
+        }
+        if let Some(value) = get_string(table, "model") {
+            config.speech.model = value;
+        }
+        if let Some(value) = get_string(table, "api_key") {
+            config.speech.api_key = value;
+        }
+    }
+    if let Some(servers) = value.get("mcp").and_then(|table| table.get("servers")) {
+        if !servers.is_array() {
+            return Err("invalid mcp.servers".into());
+        }
+        config.mcp_servers = serde_json::to_value(servers).map_err(|error| error.to_string())?;
+    }
     if let Some(table) = value.get("tools") {
         if let Some(value) = get_string_list(table, "enabled") {
             config.tools.enabled = value;
-        }
-        if let Some(value) = get_string(table, "default_permission") {
-            config.tools.default_permission = value;
         }
         if let Some(value) = get_usize(table, "max_result_chars") {
             config.tools.max_result_chars = value;
         }
         if let Some(value) = get_f64(table, "max_shell_seconds") {
             config.tools.max_shell_seconds = value;
-        }
-    }
-    if let Some(table) = value.get("shell") {
-        if let Some(value) = get_string_list(table, "deny") {
-            config.shell.deny = value;
-        }
-    }
-    if let Some(table) = value.get("files") {
-        if let Some(value) = get_path_list(table, "roots") {
-            config.files.roots = value;
         }
     }
     if let Some(table) = value.get("skills") {
@@ -598,19 +611,12 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
                     }
                     None => vec!["serial".to_string()],
                 };
-                let allow_write = match device.get("allow_write") {
-                    Some(value) => value.as_bool().ok_or_else(|| {
-                        "hardware device allow_write must be a boolean".to_string()
-                    })?,
-                    None => false,
-                };
                 devices.push(HardwareDeviceConfig {
                     name: name.to_string(),
                     path: PathBuf::from(path),
                     transport,
                     baud_rate,
                     capabilities,
-                    allow_write,
                 });
             }
             config.hardware.devices = devices;
@@ -657,6 +663,9 @@ fn apply_toml_value(config: &mut AgentConfig, value: &toml::Value) -> Result<(),
             config.channels_weixin.auth_timeout_seconds = value;
         }
     }
+    // Legacy access options remain parseable for existing files but do not select a runtime policy.
+    config.enable_application_access();
+
     Ok(())
 }
 
@@ -722,10 +731,17 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
     )?;
     validate_table(
         value,
+        "speech",
+        &["backend", "base_url", "model", "api_key"],
+        &[],
+    )?;
+    validate_table(
+        value,
         "tools",
         &[
             "enabled",
             "default_permission",
+            "execution",
             "max_result_chars",
             "max_shell_seconds",
         ],
@@ -851,15 +867,6 @@ fn get_string_list(table: &toml::Value, key: &str) -> Option<Vec<String>> {
             .as_array()?
             .iter()
             .filter_map(|value| value.as_str().map(ToString::to_string))
-            .collect(),
-    )
-}
-
-fn get_path_list(table: &toml::Value, key: &str) -> Option<Vec<PathBuf>> {
-    Some(
-        get_string_list(table, key)?
-            .iter()
-            .map(|item| expand_user_path(item))
             .collect(),
     )
 }

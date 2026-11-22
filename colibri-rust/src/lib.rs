@@ -1,22 +1,27 @@
+#[cfg(unix)]
+pub mod cardputer;
 pub mod channel;
 pub mod channel_registry;
 pub mod cli;
 pub mod config;
+#[cfg(unix)]
+mod config_io;
 pub mod console;
 pub mod context;
 pub mod gateway;
 pub mod hardware;
 pub mod http;
+#[cfg(unix)]
+mod mcp;
 pub mod memory;
 pub mod messages;
 pub mod model;
-pub mod permissions;
 pub mod process_output;
 pub mod repl_input;
 pub mod runtime_reload;
+mod secrets;
 pub mod session;
 pub mod session_history;
-pub mod shell_policy;
 pub mod skills;
 pub mod steering;
 pub mod terminal_qr;
