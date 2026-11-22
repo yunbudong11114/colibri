@@ -29,7 +29,7 @@ namespace {
 constexpr int Width = 320;
 constexpr int Height = 170;
 constexpr int PageSize = 6;
-constexpr int ChatWidth = 288;
+constexpr int ChatWidth = 290;
 constexpr int CodePadding = 2;
 constexpr int CodeBorder = 1;
 constexpr std::size_t MaxSpelling = 64;
@@ -48,9 +48,9 @@ const json SettingLabels{
     {"memory.enabled", "启用长期记忆"}, {"memory.root", "记忆目录"},
     {"mcp.servers", "MCP · 服务器 JSON"},
 };
-const std::vector<std::string> Menu{"MCP 与技能", "设置", "退出 Colibri"};
+const std::vector<std::string> Menu{"MCP 与技能", "设置", "快捷键", "退出 Colibri"};
 
-enum class Screen { Chat, Menu, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
+enum class Screen { Chat, Menu, Shortcuts, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
 
 const std::vector<std::string> CategoryNames{"模型", "图片理解", "语音", "搜索", "历史", "记忆", "MCP 配置", "显示"};
 const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "speech.", "web_search.", "session.", "memory.", "mcp.", "display."};
@@ -170,14 +170,14 @@ public:
     explicit View(WorkerLink& worker) : worker_(worker) {
         auto* root = lv_screen_active();
         lv_obj_remove_style_all(root);
-        const auto* normal = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 12);
+        const auto* normal = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 13);
         lv_obj_set_style_text_font(root, normal, 0);
-        bold_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 12);
-        italic_ = load_font(LV_FREETYPE_FONT_STYLE_ITALIC, 12);
+        bold_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 13);
+        italic_ = load_font(LV_FREETYPE_FONT_STYLE_ITALIC, 13);
         heading_ = bold_;
         code_ = code_font(normal);
 
-        const auto* chrome_font = normal;
+        const auto* chrome_font = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 12);
         // Alpha mask sampled from the launcher hummingbird.
         static const uint8_t pixels[] = {
             0, 18, 7, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 15, 18, 0,
@@ -205,41 +205,43 @@ public:
         bird.data = pixels;
         bird_ = lv_image_create(root);
         lv_image_set_src(bird_, &bird);
+        lv_image_set_pivot(bird_, 0, 0);
+        lv_image_set_scale(bird_, 341);
         lv_obj_set_pos(bird_, 10, 3);
-        title_ = label(root, 33, 1, 165, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_font(title_, load_font(LV_FREETYPE_FONT_STYLE_BOLD, 14), 0);
+        const auto* title_font = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 16);
+        title_ = label(root, 39, std::max(0, (26 - static_cast<int>(title_font->line_height)) / 2),
+                       159, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(title_, title_font, 0);
         for (size_t i = 0; i < signal_bars_.size(); ++i) {
             auto* bar = signal_bars_[i] = lv_obj_create(root);
             lv_obj_remove_style_all(bar);
             const int height = 3 + 3 * i;
             lv_obj_set_size(bar, 3, height);
-            lv_obj_set_pos(bar, 205 + 5 * i, 16 - height);
+            lv_obj_set_pos(bar, 205 + 5 * i, 18 - height);
             lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
             lv_obj_set_style_radius(bar, 1, 0);
         }
-        clock_label_ = label(root, 226, 2, 42);
-        battery_label_ = label(root, 272, 2, 41);
+        clock_label_ = label(root, 226, 4, 42);
+        battery_label_ = label(root, 272, 4, 41);
         for (auto* badge : {clock_label_, battery_label_}) {
             lv_obj_set_style_text_align(badge, LV_TEXT_ALIGN_CENTER, 0);
             lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
             lv_obj_set_style_text_color(badge, lv_color_hex(0xffffff), 0);
             lv_obj_set_style_radius(badge, 2, 0);
         }
-        lv_obj_set_style_bg_color(clock_label_, lv_color_hex(0x885725), 0);
-        lv_obj_set_style_bg_color(battery_label_, lv_color_hex(0x805187), 0);
         update_device_status();
         panel_ = lv_obj_create(root);
         lv_obj_remove_style_all(panel_);
-        lv_obj_set_pos(panel_, 7, 22);
-        lv_obj_set_size(panel_, 306, 99);
+        lv_obj_set_pos(panel_, 7, 26);
+        lv_obj_set_size(panel_, 306, 96);
         lv_obj_set_style_radius(panel_, 7, 0);
         lv_obj_set_scroll_dir(panel_, LV_DIR_VER);
         lv_obj_remove_flag(panel_, LV_OBJ_FLAG_SCROLL_ELASTIC);
         lv_obj_set_scrollbar_mode(panel_, LV_SCROLLBAR_MODE_AUTO);
-        body_ = label(panel_, 8, 4, 288, LV_LABEL_LONG_WRAP);
+        body_ = label(panel_, 8, 4, ChatWidth, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_line_space(body_, 3, 0);
         chat_thread_ = column(panel_, 8, 4, 8);
-        chat_hint_ = label(chat_thread_, 0, 0, 288, LV_LABEL_LONG_WRAP);
+        chat_hint_ = label(chat_thread_, 0, 0, ChatWidth, LV_LABEL_LONG_WRAP);
         lv_obj_add_flag(chat_hint_, LV_OBJ_FLAG_HIDDEN);
         for (std::size_t i = 0; i < menu_rows_.size(); ++i) {
             auto* row = label(panel_, 8, 3 + 22 * i, ChatWidth, LV_LABEL_LONG_DOT);
@@ -251,10 +253,13 @@ public:
             lv_obj_set_style_border_width(row, 2, 0);
             menu_rows_[i] = row;
         }
-        composer_ = label(root, 7, 125, 306);
-        lv_obj_set_height(composer_, 24);
+        constexpr int composer_y = 125;
+        constexpr int composer_height = 24;
+        const int composer_padding = std::max(0, (composer_height - static_cast<int>(normal->line_height)) / 2);
+        composer_ = label(root, 7, composer_y, 306);
+        lv_obj_set_height(composer_, composer_height);
         lv_obj_set_style_pad_left(composer_, 8, 0);
-        lv_obj_set_style_pad_top(composer_, 3, 0);
+        lv_obj_set_style_pad_top(composer_, composer_padding, 0);
         lv_obj_set_style_radius(composer_, 6, 0);
         for (size_t i = 0; i < voice_bars_.size(); ++i) {
             auto* bar = voice_bars_[i] = lv_obj_create(root);
@@ -264,9 +269,9 @@ public:
             lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
             lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
         }
-        status_ = label(root, 263, 128, 37);
+        status_ = label(root, 263, composer_y + composer_padding, 37);
         lv_obj_set_style_text_align(status_, LV_TEXT_ALIGN_RIGHT, 0);
-        voice_time_ = label(root, 215, 128, 85);
+        voice_time_ = label(root, 215, composer_y + composer_padding, 85);
         lv_obj_set_style_text_align(voice_time_, LV_TEXT_ALIGN_RIGHT, 0);
         candidates_ = label(root, 10, 152, 300);
         lv_obj_set_style_text_font(candidates_, chrome_font, 0);
@@ -275,6 +280,7 @@ public:
         lv_obj_remove_flag(footer_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(footer_, 10, 150);
         lv_obj_set_size(footer_, 300, 20);
+        lv_obj_set_style_text_font(footer_, chrome_font, 0);
         lv_obj_set_flex_flow(footer_, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(footer_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(footer_, 4, 0);
@@ -287,8 +293,8 @@ public:
             } else lv_obj_set_style_pad_right(part, 4, 0);
         }
         memory_editor_ = lv_textarea_create(root);
-        lv_obj_set_pos(memory_editor_, 7, 22);
-        lv_obj_set_size(memory_editor_, 306, 99);
+        lv_obj_set_pos(memory_editor_, 7, 26);
+        lv_obj_set_size(memory_editor_, 306, 96);
         lv_textarea_set_one_line(memory_editor_, false);
         lv_obj_remove_flag(memory_editor_, LV_OBJ_FLAG_SCROLL_ELASTIC);
         lv_obj_add_state(memory_editor_, LV_STATE_FOCUSED);
@@ -319,8 +325,10 @@ public:
             if (std::sscanf(line.c_str(), " wlan0: %*x %d", &quality) == 1)
                 level = std::clamp((quality + 17) / 18, 0, 4);
         }
-        for (int i = 0; i < 4; ++i)
-            lv_obj_set_style_bg_color(signal_bars_[i], lv_color_hex(i < level ? 0x49c965 : 0x52615b), 0);
+        signal_level_ = level;
+        color_signal();
+
+
     }
 
     bool running = true;
@@ -470,6 +478,14 @@ public:
             refresh();
             return;
         }
+        if (screen_ == Screen::Shortcuts) {
+            if (key == Key::Left || key == Key::Escape) {
+                screen_ = Screen::Menu;
+                selection_ = 2;
+            } else if (key == Key::Up || key == Key::Down) scroll(key);
+            refresh();
+            return;
+        }
         if (screen_ == Screen::CatalogItem) {
             if (key == Key::Left || key == Key::Escape) screen_ = Screen::CatalogList;
             else if (key == Key::Up || key == Key::Down) scroll(key);
@@ -553,7 +569,7 @@ public:
     }
 
     void text(const std::string& text) {
-        if (is_list(screen_) || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem) {
+        if (is_list(screen_) || screen_ == Screen::Shortcuts || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem) {
             if (text == "f" || text == "F") key(Key::Up);
             else if (text == "x" || text == "X") key(Key::Down);
             else if (text == "z" || text == "Z") key(Key::Left);
@@ -613,7 +629,17 @@ private:
     std::array<lv_obj_t*, 5> voice_bars_{};
     lv_obj_t* voice_time_ = nullptr;
     std::array<lv_obj_t*, 4> signal_bars_{};
-    lv_obj_t *clock_label_ = nullptr, *battery_label_ = nullptr;
+    lv_obj_t* clock_label_ = nullptr;
+    int signal_level_ = 0;
+
+    void color_signal() {
+        const unsigned on = dark_ ? 0xb6c9c4 : 0x38554c;
+        const unsigned off = dark_ ? 0x40514e : 0xb6c6be;
+        for (int i = 0; i < 4; ++i)
+            lv_obj_set_style_bg_color(signal_bars_[i], lv_color_hex(i < signal_level_ ? on : off), 0);
+    }
+
+    lv_obj_t *battery_label_ = nullptr;
     std::time_t status_second_ = 0;
     lv_obj_t *bird_ = nullptr, *footer_ = nullptr;
     std::array<lv_obj_t*, 6> footer_parts_{};
@@ -627,7 +653,7 @@ private:
         return time;
     }
 
-    bool busy_ = false, recording_ = false, offline_voice_ = false, chinese_ = false, dark_ = true;
+    bool busy_ = false, recording_ = false, offline_voice_ = false, chinese_ = true, dark_ = true;
     bool starting_ = false;
     std::string draft_, edited_, error_, status_text_, spelling_, model_hint_;
     std::size_t draft_cursor_ = 0, draft_view_start_ = 0;
@@ -674,7 +700,7 @@ private:
         lv_obj_remove_style_all(item);
         lv_obj_remove_flag(item, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(item, x, y);
-        lv_obj_set_size(item, 288, LV_SIZE_CONTENT);
+        lv_obj_set_size(item, ChatWidth, LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(item, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(item, gap, 0);
         return item;
@@ -684,7 +710,7 @@ private:
         unsigned text, background;
         switch (message.speaker) {
         case Speaker::User:
-            text = dark_ ? 0xbce0ff : 0x204e79;
+            text = dark_ ? 0xa1c9ec : 0x204e79;
             background = dark_ ? 0x284358 : 0xd6e7fb;
             break;
         case Speaker::Agent:
@@ -742,7 +768,7 @@ private:
     void render_markdown(lv_obj_t* body, const std::string& content, bool parse) {
         const auto blocks = parse ? markdown::parse(content) : std::vector<markdown::Block>{};
         if (blocks.empty()) {
-            auto* line = label(body, 0, 0, 288, LV_LABEL_LONG_WRAP);
+            auto* line = label(body, 0, 0, ChatWidth, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_line_space(line, 3, 0);
             lv_label_set_text(line, content.c_str());
             return;
@@ -762,7 +788,7 @@ private:
                 lv_obj_remove_style_all(rule);
                 lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
                 lv_obj_add_flag(rule, LV_OBJ_FLAG_USER_2);
-                lv_obj_set_size(rule, 288, 1);
+                lv_obj_set_size(rule, ChatWidth, 1);
                 lv_obj_set_style_margin_top(rule, gap, 0);
                 lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
                 continue;
@@ -812,9 +838,9 @@ private:
         auto* tag = label(block, 0, 0, LV_SIZE_CONTENT);
         lv_obj_set_style_text_font(tag, bold_, 0);
         lv_label_set_text(tag, speaker.c_str());
-        lv_obj_set_style_bg_opa(tag, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_opa(tag, LV_OPA_TRANSP, 0);
         lv_obj_set_style_radius(tag, 4, 0);
-        lv_obj_set_style_pad_left(tag, 5, 0);
+        lv_obj_set_style_pad_left(tag, 0, 0);
         lv_obj_set_style_pad_right(tag, 5, 0);
         auto* body = column(block, 0, 0, 0);
         render_markdown(body, content, speaker != "系统");
@@ -1092,7 +1118,8 @@ private:
                 selection_ = 0;
                 send({{"type", "settings"}}, "读取设置");
                 break;
-            case 2: running = false; break;
+            case 2: screen_ = Screen::Shortcuts; break;
+            case 3: running = false; break;
             }
             break;
         case Screen::CatalogMenu:
@@ -1236,7 +1263,7 @@ private:
 
     void refresh(bool bottom = false) {
         const auto background = lv_color_hex(dark_ ? 0x101b21 : 0xe7efe9);
-        const auto surface = lv_color_hex(dark_ ? 0x1b2c33 : 0xf8fbf7);
+        const auto surface = lv_color_hex(dark_ ? 0x17262c : 0xf8fbf7);
         const auto foreground = lv_color_hex(dark_ ? 0xe7f4ed : 0x192c28);
         const auto accent = lv_color_hex(dark_ ? 0x82dfab : 0x176240);
         lv_obj_set_style_bg_color(lv_screen_active(), background, 0);
@@ -1247,7 +1274,14 @@ private:
         lv_obj_set_style_text_color(composer_, foreground, 0);
         lv_obj_set_style_bg_color(composer_, dark_ ? lv_color_hex(0x233a3e) : lv_color_hex(0xd6e8dd), 0);
         lv_obj_set_style_bg_opa(composer_, LV_OPA_COVER, 0);
-        for (auto* item : {title_, status_, candidates_, voice_time_})
+        color_signal();
+        const auto muted = lv_color_hex(dark_ ? 0xb6c9c4 : 0x38554c);
+        for (auto* badge : {clock_label_, battery_label_}) {
+            lv_obj_set_style_bg_color(badge, surface, 0);
+            lv_obj_set_style_text_color(badge, muted, 0);
+        }
+        lv_obj_set_style_text_color(title_, foreground, 0);
+        for (auto* item : {status_, candidates_, voice_time_})
             lv_obj_set_style_text_color(item, accent, 0);
 
         std::string title = "对话";
@@ -1316,6 +1350,21 @@ private:
             if (!error_.empty()) content += "\n" + error_;
             composer = "› " + (secret ? std::string(std::min<std::size_t>(edited_.size(), 30), '*') : tail(edited_));
             hint = "Enter 保存   Tab 清空   Esc 返回";
+        } else if (screen_ == Screen::Shortcuts) {
+            title = "快捷键";
+            content = "Tab   切换英文 / 拼音\n"
+                      "Enter   发送 / 打开\n"
+                      "Esc   菜单 / 返回\n"
+                      "长按 Esc 1.5 秒   退出\n"
+                      "Fn+空格   开始 / 结束录音\n"
+                      "录音时 Esc   取消\n"
+                      "↑ / ↓   滚动消息\n"
+                      "Fn+L / Fn+M   最早 / 最新消息\n"
+                      "Fn+K / Fn+N   输入行首 / 行尾\n"
+                      "← / →   拼音候选翻页\n"
+                      "1–6   选候选，空格 / Enter 选首项\n"
+                      "菜单 F/X 选择，Z 返回，C 打开";
+            hint = "F/X 滚动  Esc 返回";
         } else if (screen_ == Screen::CatalogItem) {
             const auto& item = catalog_items_[selection_];
             title = "查看  /  " + CatalogKinds[catalog_kind_];
@@ -1351,8 +1400,8 @@ private:
             if (screen_ == Screen::Chat) composer = status_text_;
             else hint = status_text_;
         }
-        const bool reading = screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
-        lv_obj_set_height(panel_, reading && composer.empty() ? 127 : 99);
+        const bool reading = screen_ == Screen::Shortcuts || screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
+        lv_obj_set_height(panel_, reading && composer.empty() ? 124 : 96);
         if (chat_colors_dark_ != dark_) {
             for (const auto& message : chat_) color_chat_message(message);
             chat_colors_dark_ = dark_;

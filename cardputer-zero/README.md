@@ -7,7 +7,7 @@
 在 Cardputer Zero 的 Debian 13（ARM64）上安装 release 包：
 
 ```sh
-sudo apt install ./Colibri_0.1.50_m5stack1_arm64.deb
+sudo apt install ./Colibri_0.1.60_m5stack1_arm64.deb
 ```
 
 从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
