@@ -1,6 +1,6 @@
 use crate::config::{apply_toml_value, AgentConfig};
 use crate::http::http_endpoint as endpoint;
-use crate::model::{build_model, ModelClient};
+use crate::model::{build_model_for_path, ModelClient};
 use serde_json::{json, Map, Value};
 use std::fs::{self, File};
 use std::io;
@@ -252,7 +252,7 @@ impl Settings {
 }
 
 fn parse_document(document: &DocumentMut, home: &Path) -> Result<AgentConfig, String> {
-    let mut config = AgentConfig::default();
+    let mut config = AgentConfig::user_defaults();
     config.memory.root = home.join("memory");
     let value = document
         .to_string()
@@ -301,20 +301,8 @@ fn menu_fields(config: &AgentConfig) -> Map<String, Value> {
     }).as_object().unwrap().clone()
 }
 
-pub fn device_model(config: &AgentConfig) -> Result<Box<dyn ModelClient>, String> {
-    if config.model.provider == "openai_compatible" {
-        endpoint(&config.model.base_url)?;
-        if config.model.model.trim().is_empty() {
-            return Err("请在设置 → 模型填写模型 ID".into());
-        }
-    }
-    build_model(&config.model).map_err(|error| {
-        if error.contains("COLIBRI_API_KEY") {
-            "未配置模型 API Key。请打开 Esc → 设置 → 模型填写连接。".into()
-        } else {
-            error
-        }
-    })
+pub fn device_model(config: &AgentConfig, home: &Path) -> Result<Box<dyn ModelClient>, String> {
+    build_model_for_path(&config.model, &home.join("config.toml"))
 }
 
 fn validate_type(default: &Value, value: &Value) -> Result<(), String> {

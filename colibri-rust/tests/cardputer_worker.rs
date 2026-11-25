@@ -106,10 +106,6 @@ fn protocol_preserves_settings_memory_and_native_tools() {
     .unwrap();
     let chat_file = fixture.0.join("fixture.txt");
     fs::write(&chat_file, "content outside the data directory").unwrap();
-    let user_revision = format!(
-        "{:x}",
-        md5::compute(include_bytes!("../../src/colibri/memory_templates/USER.md"))
-    );
     let rows = pipe(
         &home,
         &[
@@ -118,8 +114,8 @@ fn protocol_preserves_settings_memory_and_native_tools() {
             json!({"type":"save","key":"memory.root","value":memories}),
             json!({"type":"save","key":"vision.model","value":"updated-vl"}),
             json!({"type":"memory_read","file":"USER.md"}),
-            json!({"type":"memory_save","file":"USER.md","revision":user_revision.clone(),"text":"测试偏好"}),
-            json!({"type":"memory_save","file":"USER.md","revision":null,"text":"过期内容"}),
+            json!({"type":"memory_save","file":"USER.md","text":"测试偏好"}),
+            json!({"type":"memory_read","file":"USER.md"}),
             json!({"type":"pinyin","spelling":"zhong"}),
             json!({"type":"submit","text":format!("tool:files.read {}",json!({"path":chat_file}))}),
             json!({"type":"new"}),
@@ -132,9 +128,11 @@ fn protocol_preserves_settings_memory_and_native_tools() {
     assert!(fields
         .iter()
         .any(|entry| entry["key"] == "vision.model" && entry["value"] == "fixture-vl"));
-    assert_eq!(rows[4]["revision"], user_revision);
-    assert_eq!(rows[5]["type"], "memory_saved");
-    assert_eq!(rows[6]["type"], "error");
+    assert_eq!(rows[4]["type"], "memory_file");
+    assert_eq!(rows[5]["type"], "error");
+    assert_eq!(rows[6]["type"], "memory_file");
+    assert_eq!(rows[4]["text"], rows[6]["text"]);
+    assert!(!rows[6]["text"].as_str().unwrap().contains("测试偏好"));
     assert!(rows[7]["text"].as_str().unwrap().contains('中'));
     let rows = rows
         .into_iter()
@@ -157,7 +155,7 @@ fn protocol_preserves_settings_memory_and_native_tools() {
     assert!(!transcripts.contains("\"type\":\"permission_decision\""));
     assert_eq!(
         fs::read_to_string(memories.join("USER.md")).unwrap(),
-        "测试偏好"
+        rows[4]["text"].as_str().unwrap()
     );
 }
 
@@ -299,7 +297,7 @@ fn streamable_http_negotiates_session_and_reads_sse() {
             write!(connection,"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{output}",output.len()).unwrap();
         }
     });
-    fs::write(fixture.0.join("settings.json"),json!({"mcp.servers":[{"name":"fixture","url":format!("http://{address}/mcp"),"token":"fixture-key"}]}).to_string()).unwrap();
+    fs::write(fixture.0.join("settings.json"),json!({"model.provider":"fake","mcp.servers":[{"name":"fixture","url":format!("http://{address}/mcp"),"token":"fixture-key"}]}).to_string()).unwrap();
     let output = worker(
         &fixture.0,
         &["--repl"],
@@ -651,4 +649,64 @@ fn task_progress_is_available_without_model_and_restores_local_scope() {
     assert!(
         text.contains("测试小屏进度") && text.contains("读取文件") && text.contains("结果可复现")
     );
+}
+
+#[test]
+fn missing_model_hint_uses_app_settings_path_and_keeps_configuration_available() {
+    let fixture = Fixture::new();
+    let rows = pipe(
+        &fixture.0,
+        &[json!({"type":"model_status"}), json!({"type":"settings"})],
+    );
+    assert!(rows[0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("未配置 AI 模型"));
+    assert!(rows[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("设置 → 配置 → 模型"));
+    assert!(rows[0]["text"].as_str().unwrap().contains("Enter"));
+    assert_eq!(rows[1]["type"], "settings");
+    let fields = rows[1]["fields"].as_array().unwrap();
+    assert!(fields.iter().any(|field| field["key"] == "model.base_url"));
+    assert!(!fields
+        .iter()
+        .any(|field| field["key"].as_str().unwrap().starts_with("display.")));
+}
+
+#[test]
+fn memory_menu_reads_agent_updates_and_rejects_save_requests() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("config.toml"),
+        "[model]\nprovider='fake'\n[session]\ntranscript=false\nrestore_transcript=false\n",
+    )
+    .unwrap();
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"submit","text":"tool:memory.write {\"file\":\"USER.md\",\"mode\":\"replace\",\"content\":\"Agent 更新的记忆\"}"}),
+            json!({"type":"memory_read","file":"USER.md"}),
+            json!({"type":"memory_save","file":"USER.md","text":"不应保存","revision":null}),
+            json!({"type":"memory_read","file":"USER.md"}),
+            json!({"type":"save","key":"memory.enabled","value":"false"}),
+            json!({"type":"memory_read","file":"USER.md"}),
+        ],
+    );
+    let rows = rows
+        .iter()
+        .filter(|row| row["type"] != "activity" && row["type"] != "status")
+        .collect::<Vec<_>>();
+    assert_eq!(rows[0]["type"], "reply");
+    assert!(rows[1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Agent 更新的记忆"));
+    assert_eq!(rows[2]["type"], "error");
+    assert_eq!(rows[1]["text"], rows[3]["text"]);
+    assert_eq!(rows[1]["text"], rows[5]["text"]);
+    assert!(!fs::read_to_string(fixture.0.join("memory/USER.md"))
+        .unwrap()
+        .contains("不应保存"));
 }

@@ -240,6 +240,13 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    pub(crate) fn user_defaults() -> Self {
+        let mut config = Self::default();
+        config.model.provider = "openai_compatible".into();
+        config.model.model.clear();
+        config
+    }
+
     pub fn load(path: Option<&Path>) -> Result<Self, String> {
         let active = match path {
             Some(path) => Some(path.to_path_buf()),
@@ -249,13 +256,26 @@ impl AgentConfig {
             }
         };
         let Some(path) = active else {
-            let mut config = Self::default();
+            let mut config = Self::user_defaults();
             config.enable_application_access();
             return Ok(config);
         };
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read config {}: {}", path.display(), error))?;
-        let mut config = Self::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut config = Self::user_defaults();
+                config.enable_application_access();
+                return Ok(config);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to read config {}: {}",
+                    path.display(),
+                    error
+                ))
+            }
+        };
+        let mut config = Self::user_defaults();
         let value = text
             .parse::<toml::Value>()
             .map_err(|error| format!("failed to parse config {}: {}", path.display(), error))?;

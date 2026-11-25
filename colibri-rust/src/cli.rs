@@ -13,7 +13,7 @@ use crate::gateway::{
     stop_gateway, GatewayStatus,
 };
 use crate::hardware::{probe_hardware, HardwareSimulator};
-use crate::model::build_model;
+use crate::model::build_model_for_path;
 use crate::repl_input::{
     read_repl_line_auto, stdin_supports_steering_pump, try_read_line, ReplReadError,
 };
@@ -128,6 +128,7 @@ Commands:
   help, --help                   Show this help
   ask <text>                     Send one request
   repl                           Start interactive chat
+  configure                      Configure the model step by step
   auth weixin                    Log in to Weixin with a QR code
   gateway <start|stop|restart|status|run>
                                  Manage the background gateway
@@ -138,6 +139,14 @@ Default config: ~/.colibri/config.toml (or $COLIBRI_HOME/config.toml)"#
         )
         .map_err(|error| error.to_string())?;
         return Ok(0);
+    }
+
+    if command == "configure" {
+        if !rest.is_empty() {
+            return Err("Usage: colibri [--config path] configure".into());
+        }
+        let mut output = stdout.lock().map_err(|_| "stdout lock poisoned")?;
+        return crate::configure::run(&mut stdin, &mut *output, config_path, prefer_process_tty);
     }
 
     if command == "gateway" {
@@ -233,9 +242,14 @@ Default config: ~/.colibri/config.toml (or $COLIBRI_HOME/config.toml)"#
             };
             let plain_answer = config.console.plain_answer;
             let status_enabled = config.console.status;
+            let model = build_model_for_path(
+                &config.model,
+                config_path
+                    .as_deref()
+                    .unwrap_or(&crate::config::default_config_path()),
+            )?;
             status.write("ready", &[("model", config.model.model.as_str())]);
             status.write("thinking", &[]);
-            let model = build_model(&config.model)?;
             let restore = config.session.restore_transcript;
             let session_config = config.session.clone();
             let status_stderr = Arc::clone(&stderr);
@@ -402,7 +416,12 @@ fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
 ) -> Result<i32, String> {
     let plain_answer = config.console.plain_answer;
     let status_enabled = config.console.status;
-    let model = build_model(&config.model)?;
+    let model = build_model_for_path(
+        &config.model,
+        config_path
+            .as_deref()
+            .unwrap_or(&crate::config::default_config_path()),
+    )?;
     let status_stderr = Arc::clone(&stderr);
     let mut session = AgentSession::new(config.clone(), model).with_status_callback(
         status_enabled,

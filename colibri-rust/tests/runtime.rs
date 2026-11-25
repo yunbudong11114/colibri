@@ -310,7 +310,7 @@ fn load_without_path_reads_user_default_config() {
 }
 
 #[test]
-fn load_without_path_falls_back_when_user_default_missing() {
+fn load_without_path_reports_unconfigured_model_when_user_default_missing() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("config-user-default-missing");
     let old_home = std::env::var_os("HOME");
@@ -319,7 +319,8 @@ fn load_without_path_falls_back_when_user_default_missing() {
     let config = AgentConfig::load(None).unwrap();
 
     restore_home(old_home);
-    assert_eq!(config.model.model, "fake-colibri-model");
+    assert!(config.model.model.is_empty());
+    assert_eq!(config.model.provider, "openai_compatible");
 }
 
 #[test]
@@ -629,7 +630,11 @@ fn repl_exits_on_quit_like_python_cli() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("repl-quit");
     let config_path = temp.join("config.toml");
-    fs::write(&config_path, "[model]\nprovider = \"fake\"\n").unwrap();
+    fs::write(
+        &config_path,
+        "[model]\nprovider = \"fake\"\nmodel = \"fake-colibri-model\"\n",
+    )
+    .unwrap();
     let args = vec![
         "--config".to_string(),
         config_path.display().to_string(),
@@ -4114,7 +4119,7 @@ fn gateway_cli_reports_failed_stop_restart_and_start() {
     fs::write(&config, "[model\n").unwrap();
     let start = run(&["--config", config.to_str().unwrap(), "gateway", "start"]);
     assert_eq!(start.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&start.stdout).contains("reason=startup_exited"));
+    assert!(String::from_utf8_lossy(&start.stderr).contains("failed to parse config"));
 
     let server = start_http_server(|_, _| {
         |_| TestHttpResponse::json(r#"{"ret":0,"msgs":[],"get_updates_buf":"cursor"}"#)
@@ -4122,7 +4127,7 @@ fn gateway_cli_reports_failed_stop_restart_and_start() {
     fs::write(
         &config,
         format!(
-            "[session]\ntranscript = false\n[channels.weixin]\nenabled = true\ntoken = \"test-token\"\nbase_url = {:?}\n",
+            "[model]\nprovider = 'fake'\n[session]\ntranscript = false\n[channels.weixin]\nenabled = true\ntoken = \"test-token\"\nbase_url = {:?}\n",
             server.base_url
         ),
     )

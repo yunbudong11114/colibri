@@ -16,15 +16,15 @@ App、REPL、gateway 启动时共用 Rust memory 初始化：开启记忆后，�
 在 Cardputer Zero 的 Debian 13（ARM64）上安装 release 包：
 
 ```sh
-sudo apt install ./Colibri_0.2.1_m5stack1_arm64.deb
+sudo apt install ./Colibri_0.3.4_m5stack1_arm64.deb
 ```
 
-从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
+从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 配置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
 
 | 按键 | 操作 |
 | --- | --- |
 | Enter | 发送草稿，或打开当前菜单项 |
-| Esc | 短按松开打开菜单或返回，长按 1.5 秒退出 |
+| Esc | 短按松开打开设置或返回，长按 1.5 秒退出 |
 | Page Up（Fn+L） / Page Down（Fn+M） | 跳到第一条 / 最后一条可见消息 |
 | Home（Fn+K） / End（Fn+N） | 草稿光标跳到行首 / 行尾 |
 | Fn+空格 | 在聊天中开始或结束语音录音。Esc 取消录音 |
@@ -45,15 +45,15 @@ sudo apt install ./Colibri_0.2.1_m5stack1_arm64.deb
 
 ## 图片理解
 
-在 **Esc → 设置 → 图片理解** 可以编辑视觉模型、API 地址、密钥、超时和图片大小上限。已有 `config.toml` 的 `[vision]` 配置会显示在菜单中，密钥以掩码显示。菜单保存的字段优先。清空模型、地址或密钥可沿用对应的聊天设置。
+在 **Esc → 设置 → 配置 → 图片理解** 可以编辑视觉模型、API 地址、密钥、超时和图片大小上限。已有 `config.toml` 的 `[vision]` 配置会显示在菜单中，密钥以掩码显示。菜单保存的字段优先。清空模型、地址或密钥可沿用对应的聊天设置。
 
 ## 长期记忆
 
-在 **Esc → 设置 → 记忆** 可以启用长期记忆或修改目录。它默认开启，从设备用户的 `~/.colibri/memory/` 加载 `SOUL.md`、`USER.md`、`MEMORY.md`。界面与设备 REPL 共用这些文件和设置。记忆菜单可阅读并编辑上述三个文件、`INDEX.md` 和 `topics/` 下已有的主题文件。阅读页按 C 或 Enter 编辑，Tab 切换中英文，Enter 换行，Esc 打开保存菜单。选「保存修改」后才写回设备文件。
+在 **Esc → 设置 → 配置 → 长期记忆** 可以启用长期记忆或修改目录。一级 **设置 → 记忆** 用于查看文件。它默认开启，从设备用户的 `~/.colibri/memory/` 加载 `SOUL.md`、`USER.md`、`MEMORY.md`。界面与设备 REPL 共用这些文件和设置。记忆菜单只读展示上述三个文件、`INDEX.md` 和 `topics/` 下已有的主题文件。F/X 滚动，C 或 Enter 刷新，Esc 返回。文件内容更新交给 Agent 的 `memory.write` 或通用文件工具，菜单没有编辑或保存入口。记忆开关和目录配置仍可修改。
 
-主菜单的 **压缩上下文** 调用 `/compact`，压缩时在输入框显示三点跳动动效，自动压缩结束后恢复思考状态。**清理屏幕** 对应 `/clear`，只隐藏旧消息，不删除历史，也不清除 Agent 上下文。可选上下文内存预算位于设置的“历史与上下文”，0 表示未设置。
+在聊天输入 `/compact` 可压缩上下文，压缩时在输入框显示三点跳动动效，自动压缩结束后恢复思考状态。`/clear` 用于清理屏幕，只隐藏旧消息，不删除历史，也不清除 Agent 上下文。可选上下文内存预算位于设置的“历史与上下文”，0 表示未设置。
 
-主菜单的 **MCP 与技能** 可查看名称和说明。MCP 服务的说明取配置中的 `description`；技能说明来自 `SKILL.md` 的 `description`。两类列表都可离线查看。
+“设置 → 插件”中的 **MCP / 技能** 可查看名称和说明。MCP 服务的说明取配置中的 `description`；技能说明来自 `SKILL.md` 的 `description`。两类列表都可离线查看。
 
 启用长期记忆后，可以在聊天或 REPL 里请 Colibri 记住一条信息。Agent 可以直接追加或覆盖记忆。
 
@@ -110,3 +110,13 @@ Debian 13 ARM64 构建使用 Rust/Cargo、CMake、Ninja、C++ 编译器和 FreeT
 上下文容量默认自动识别，`input_context_tokens` 仅供自定义部署可选覆盖，`max_output_tokens` 控制输出预算。旧 session 压缩选项需要从 config.toml 删除。
 
 模型容量在首次实际请求时联网获取，最多等待5秒。能力缓存有效期10分钟，过期后活动请求触发后台刷新；失败保留最近成功值。缓存位于 Colibri home 的 `cache/model-capabilities`，线上读取值不会写进 `config.toml` 或 App 配置页。启动界面和打开设置直接使用本地状态。
+
+## 设置与首次模型配置
+
+首页 Esc 打开“设置”，一级顺序为任务进度、记忆、配置、帮助、插件、退出 Colibri。配置包含模型、图片理解、搜索、历史与上下文、长期记忆和 MCP 配置。帮助包含快捷键、斜杠命令两个只读文本页。应用只保留深色风格，不提供主题切换。
+
+模型未配置或字段不完整时，各入口统一提示“未配置 AI 模型”。App 可按 Enter 进入模型配置，或走“设置 → 配置 → 模型”。终端运行 `colibri configure`，按步骤选择服务、填写 API 地址、模型 ID 和密钥；可用 `colibri --config PATH configure` 指定文件。密钥不回显，确认后才保存；输入 `:cancel`、EOF 或拒绝保存不会改变配置。切换端点不会携带原密钥。向导只检查配置格式，不发联网认证请求。REPL 和 gateway 的提示均给出配置命令，gateway 在启动子进程前预检，后台不会等待配置输入。
+
+未显式指定模型的用户配置不再回落到模拟模型；只有明确设置 `model.provider="fake"` 才使用模拟模型。
+
+无输入框或底部提示栏的设置、配置、帮助和插件页面统一使用完整正文高度；聊天、编辑和实际显示提示的表单才预留底部区域。插件分类统一显示为 MCP、技能。

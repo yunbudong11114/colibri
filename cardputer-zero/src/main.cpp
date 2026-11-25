@@ -55,10 +55,8 @@ constexpr int ChatWidth = 290;
 constexpr int CodePadding = 2;
 constexpr int CodeBorder = 1;
 constexpr std::size_t MaxSpelling = 64;
-enum class Screen { Task, Chat, Menu, Shortcuts, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
+enum class Screen { Task, Chat, Menu, HelpMenu, Help, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryFiles, MemoryTopics, MemoryView, CatalogMenu, CatalogList, CatalogItem };
 
-const std::vector<std::string> CatalogKinds{"MCP 服务", "技能"};
-constexpr std::size_t MemoryEditMaxBytes = 64 * 1024;
 const std::vector<std::string> MemoryFiles{"SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"};
 const std::vector<std::string> ModelModes{"服务商预设", "自定义连接"};
 
@@ -76,9 +74,9 @@ constexpr ProviderPreset Presets[]{
 };
 
 bool is_list(Screen screen) {
-    return screen == Screen::Menu || screen == Screen::Settings || screen == Screen::Fields ||
+    return screen == Screen::Menu || screen == Screen::HelpMenu || screen == Screen::Settings || screen == Screen::Fields ||
            screen == Screen::ModelMode || screen == Screen::Providers || screen == Screen::ModelForm ||
-           screen == Screen::MemoryTopics || screen == Screen::MemoryActions ||
+           screen == Screen::MemoryFiles || screen == Screen::MemoryTopics ||
            screen == Screen::CatalogMenu || screen == Screen::CatalogList;
 }
 
@@ -296,12 +294,6 @@ public:
                 lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
             } else lv_obj_set_style_pad_right(part, 4, 0);
         }
-        memory_editor_ = lv_textarea_create(root);
-        lv_obj_set_pos(memory_editor_, 7, 26);
-        lv_obj_set_size(memory_editor_, 306, 96);
-        lv_textarea_set_one_line(memory_editor_, false);
-        lv_obj_remove_flag(memory_editor_, LV_OBJ_FLAG_SCROLL_ELASTIC);
-        lv_obj_add_state(memory_editor_, LV_STATE_FOCUSED);
         send({{"type", "model_status"}}, "检查配置");
         starting_ = busy_;
         refresh();
@@ -452,12 +444,11 @@ public:
         } else if (type == "memory_topics") {
             memory_topics_ = event.at("files").get<std::vector<std::string>>();
             selection_ = 0;
-        } else if (type == "memory_file" || type == "memory_saved") {
+        } else if (type == "memory_file") {
             memory_file_ = event.at("file").get<std::string>();
             memory_text_ = text;
-            memory_revision_ = event.at("revision");
             screen_ = Screen::MemoryView;
-            error_ = type == "memory_saved" ? "已保存" : "";
+            error_.clear();
         } else if (type == "model_saved") {
             fields_ = event.at("fields");
             model_hint_.clear();
@@ -480,8 +471,8 @@ public:
             return;
         } else if (type == "error") {
             starting_ = false;
-            if (screen_ == Screen::Edit || screen_ == Screen::ModelForm || screen_ == Screen::MemoryActions ||
-                screen_ == Screen::MemoryTopics || screen_ == Screen::CatalogList || (screen_ == Screen::Fields && category_ == MemoryCategory))
+            if (screen_ == Screen::Edit || screen_ == Screen::ModelForm ||
+                screen_ == Screen::MemoryFiles || screen_ == Screen::MemoryTopics || screen_ == Screen::MemoryView || screen_ == Screen::CatalogList || (screen_ == Screen::Fields && category_ == MemoryCategory))
                 error_ = text;
             else append("系统", text);
         }
@@ -516,16 +507,16 @@ public:
             refresh();
             return;
         }
-        if (screen_ == Screen::Shortcuts) {
+        if (screen_ == Screen::Help) {
             if (key == Key::Left || key == Key::Escape) {
-                screen_ = Screen::Menu;
-                selection_ = ShortcutsMenuIndex;
+                screen_ = Screen::HelpMenu;
+                selection_ = help_kind_;
             } else if (key == Key::Up || key == Key::Down) scroll(key);
             refresh();
             return;
         }
         if (screen_ == Screen::Task) {
-            if (key == Key::Left || key == Key::Escape) { screen_ = Screen::Menu; selection_ = 0; }
+            if (key == Key::Left || key == Key::Escape) { screen_ = Screen::Menu; selection_ = TaskMenuIndex; }
             else if (key == Key::Enter || key == Key::Right) send({{"type", "task_status"}}, "读取任务");
             else if (key == Key::Up || key == Key::Down) scroll(key);
             refresh(); return;
@@ -536,8 +527,8 @@ public:
             refresh();
             return;
         }
-        if (screen_ == Screen::MemoryView || screen_ == Screen::MemoryEdit) {
-            memory_key(key);
+        if (screen_ == Screen::MemoryView) {
+            memory_view_key(key);
             refresh();
             return;
         }
@@ -578,6 +569,13 @@ public:
                 } else {
                     send({{"type", "save"}, {"key", edit_field_.at("key")}, {"value", edited_}}, "保存");
                 }
+            } else if (screen_ == Screen::Chat && !model_hint_.empty() && draft_ != ClearCommand) {
+                screen_ = Screen::ModelMode;
+                category_ = 0;
+                selection_ = 0;
+                send({{"type", "settings"}}, "读取配置");
+                refresh();
+                return;
             } else if (draft_ == ClearCommand) {
                 draft_.clear();
                 draft_cursor_ = draft_view_start_ = 0;
@@ -585,10 +583,6 @@ public:
                 refresh();
                 return;
             } else if (draft_.find_first_not_of(" \t\n") != std::string::npos) {
-                if (!model_hint_.empty()) {
-                    refresh(true);
-                    return;
-                }
                 append("我", draft_);
                 send({{"type", "submit"}, {"text", draft_}}, "思考中");
                 draft_.clear();
@@ -613,7 +607,7 @@ public:
     }
 
     void text(const std::string& text) {
-        if (is_list(screen_) || screen_ == Screen::Shortcuts || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem || screen_ == Screen::Task) {
+        if (is_list(screen_) || screen_ == Screen::Help || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem || screen_ == Screen::Task) {
             if (text == "f" || text == "F") key(Key::Up);
             else if (text == "x" || text == "X") key(Key::Down);
             else if (text == "z" || text == "Z") key(Key::Left);
@@ -638,8 +632,7 @@ public:
         } else if (!spelling_.empty() && text.size() == 1 && text[0] >= '1' && text[0] <= '6') {
             choose(text[0] - '1');
         } else if (spelling_.empty()) {
-            if (screen_ == Screen::MemoryEdit) insert_memory_text(text);
-            else insert_draft(text);
+            insert_draft(text);
         }
         refresh();
     }
@@ -648,10 +641,10 @@ private:
     static constexpr std::string_view ClearCommand = "/clear";
     WorkerLink& worker_;
     Screen screen_ = Screen::Chat, edit_parent_ = Screen::Fields, model_parent_ = Screen::ModelMode;
-    lv_obj_t *title_, *status_, *panel_, *body_, *composer_, *candidates_, *memory_editor_;
+    lv_obj_t *title_, *status_, *panel_, *body_, *composer_, *candidates_;
     lv_obj_t *chat_thread_, *chat_hint_;
     std::string task_text_;
-    std::array<lv_obj_t*, 4> menu_rows_{};
+    std::array<lv_obj_t*, 6> menu_rows_{};
     const lv_font_t *bold_, *italic_, *heading_, *code_;
     enum class Speaker { User, Agent, System };
     struct ChatMessage {
@@ -663,11 +656,9 @@ private:
     };
     std::deque<ChatMessage> chat_;
     std::size_t chat_bytes_ = 0;
-    bool chat_colors_dark_ = true;
     Screen memory_parent_ = Screen::Fields;
     std::size_t memory_selection_ = 0;
     std::string memory_file_, memory_text_;
-    json memory_revision_;
     std::vector<std::string> memory_topics_;
     json catalog_items_ = json::array();
     std::size_t catalog_kind_ = 0;
@@ -679,8 +670,8 @@ private:
     int signal_level_ = 0;
 
     void color_signal() {
-        const unsigned on = dark_ ? 0xb6c9c4 : 0x38554c;
-        const unsigned off = dark_ ? 0x40514e : 0xb6c6be;
+        const unsigned on = 0xb6c9c4;
+        const unsigned off = 0x40514e;
         for (int i = 0; i < 4; ++i)
             lv_obj_set_style_bg_color(signal_bars_[i], lv_color_hex(i < signal_level_ ? on : off), 0);
     }
@@ -699,7 +690,8 @@ private:
         return time;
     }
 
-    bool busy_ = false, recording_ = false, chinese_ = true, dark_ = true;
+    std::size_t help_kind_ = 0;
+    bool busy_ = false, recording_ = false, chinese_ = true;
     bool starting_ = false;
     std::string draft_, edited_, error_, status_text_, spelling_, model_hint_;
     std::size_t draft_cursor_ = 0, draft_view_start_ = 0;
@@ -756,31 +748,31 @@ private:
         unsigned text, background;
         switch (message.speaker) {
         case Speaker::User:
-            text = dark_ ? 0xa1c9ec : 0x204e79;
-            background = dark_ ? 0x284358 : 0xd6e7fb;
+            text = 0xa1c9ec;
+            background = 0x284358;
             break;
         case Speaker::Agent:
-            text = dark_ ? 0xa3efbe : 0x18583e;
-            background = dark_ ? 0x23493f : 0xd4eddf;
+            text = 0xa3efbe;
+            background = 0x23493f;
             break;
         case Speaker::System:
-            text = dark_ ? 0xd2dade : 0x425459;
-            background = dark_ ? 0x34434b : 0xdfebec;
+            text = 0xd2dade;
+            background = 0x34434b;
             break;
         }
         lv_obj_set_style_text_color(message.tag, lv_color_hex(text), 0);
         lv_obj_set_style_bg_color(message.tag, lv_color_hex(background), 0);
-        lv_obj_set_style_text_color(message.body, lv_color_hex(dark_ ? 0xe7f4ed : 0x192c28), 0);
+        lv_obj_set_style_text_color(message.body, lv_color_hex(0xe7f4ed), 0);
         for (uint32_t i = 0; i < lv_obj_get_child_count(message.body); ++i) {
             auto* item = lv_obj_get_child(message.body, i);
             if (lv_obj_has_flag(item, LV_OBJ_FLAG_USER_3)) {
-                lv_obj_set_style_bg_color(item, lv_color_hex(dark_ ? 0x354c61 : 0xc3d3e6), 0);
-                lv_obj_set_style_border_color(item, lv_color_hex(dark_ ? 0x89adc6 : 0x526d88), 0);
+                lv_obj_set_style_bg_color(item, lv_color_hex(0x354c61), 0);
+                lv_obj_set_style_border_color(item, lv_color_hex(0x89adc6), 0);
             } else if (lv_obj_has_flag(item, LV_OBJ_FLAG_USER_1)) {
-                lv_obj_set_style_bg_color(item, lv_color_hex(dark_ ? 0x213333 : 0xe6efec), 0);
-                lv_obj_set_style_border_color(item, lv_color_hex(dark_ ? 0x72aa96 : 0x4b7567), 0);
+                lv_obj_set_style_bg_color(item, lv_color_hex(0x213333), 0);
+                lv_obj_set_style_border_color(item, lv_color_hex(0x72aa96), 0);
             } else if (lv_obj_has_flag(item, LV_OBJ_FLAG_USER_2)) {
-                lv_obj_set_style_bg_color(item, lv_color_hex(dark_ ? 0x558476 : 0x87ada0), 0);
+                lv_obj_set_style_bg_color(item, lv_color_hex(0x558476), 0);
             }
         }
     }
@@ -963,11 +955,7 @@ private:
         }
         if (page_ >= candidate_pages_.size() || slot >= candidate_pages_[page_].count) return;
         const auto& candidate = choices_[candidate_pages_[page_].first + slot];
-        if (screen_ == Screen::MemoryEdit) {
-            if (std::string_view(lv_textarea_get_text(memory_editor_)).size() + candidate.text.size() > MemoryEditMaxBytes)
-                return;
-            insert_memory_text(candidate.text);
-        } else if (!insert_draft(candidate.text)) return;
+        if (!insert_draft(candidate.text)) return;
         spelling_.erase(0, candidate.consumed);
         query_pinyin();
     }
@@ -1010,12 +998,6 @@ private:
         lv_obj_scroll_by_bounded(panel_, 0, key == Key::Up ? 25 : -25, LV_ANIM_OFF);
     }
 
-    void insert_memory_text(const std::string& text) {
-        std::string_view current = lv_textarea_get_text(memory_editor_);
-        if (current.size() + text.size() <= MemoryEditMaxBytes)
-            lv_textarea_add_text(memory_editor_, text.c_str());
-    }
-
     void open_memory(const std::string& name) {
         memory_parent_ = screen_;
         memory_selection_ = selection_;
@@ -1023,49 +1005,14 @@ private:
         send({{"type", "memory_read"}, {"file", name}}, "读取文件");
     }
 
-    void memory_key(Key key) {
-        if (screen_ == Screen::MemoryView) {
-            if (key == Key::Escape || key == Key::Left) {
-                screen_ = memory_parent_;
-                selection_ = memory_selection_;
-                error_.clear();
-            } else if (key == Key::Enter || key == Key::Right) {
-                lv_textarea_set_text(memory_editor_, memory_text_.c_str());
-                lv_textarea_set_cursor_pos(memory_editor_, 0);
-                clear_pinyin();
-                error_.clear();
-                screen_ = Screen::MemoryEdit;
-            } else if (key == Key::Up || key == Key::Down) scroll(key);
-            return;
-        }
-        if (key == Key::Escape) {
-            if (!spelling_.empty()) clear_pinyin();
-            else if (memory_text_ == lv_textarea_get_text(memory_editor_)) screen_ = Screen::MemoryView;
-            else {
-                screen_ = Screen::MemoryActions;
-                selection_ = 0;
-            }
-        } else if (key == Key::Tab) {
-            chinese_ = !chinese_;
-            clear_pinyin();
-        } else if (!spelling_.empty()) {
-            if (key == Key::Enter) choose(0);
-            else if (key == Key::Backspace) {
-                spelling_.pop_back();
-                query_pinyin();
-            } else if (key == Key::Left && page_ > 0) --page_;
-            else if (key == Key::Right && page_ + 1 < candidate_pages_.size()) ++page_;
-        } else {
-            switch (key) {
-            case Key::Enter: insert_memory_text("\n"); break;
-            case Key::Backspace: lv_textarea_delete_char(memory_editor_); break;
-            case Key::Left: lv_textarea_cursor_left(memory_editor_); break;
-            case Key::Right: lv_textarea_cursor_right(memory_editor_); break;
-            case Key::Up: lv_textarea_cursor_up(memory_editor_); break;
-            case Key::Down: lv_textarea_cursor_down(memory_editor_); break;
-            default: break;
-            }
-        }
+    void memory_view_key(Key key) {
+        if (key == Key::Escape || key == Key::Left) {
+            screen_ = memory_parent_;
+            selection_ = memory_selection_;
+            error_.clear();
+        } else if (key == Key::Enter || key == Key::Right) {
+            send({{"type", "memory_read"}, {"file", memory_file_}}, "刷新记忆");
+        } else if (key == Key::Up || key == Key::Down) scroll(key);
     }
 
     void refresh_group() {
@@ -1114,6 +1061,7 @@ private:
             for (const auto& item : MainMenu) rows.emplace_back(item.label);
             return rows;
         }
+        case Screen::HelpMenu: return HelpSections;
         case Screen::Settings: return CategoryNames;
         case Screen::ModelMode: return ModelModes;
         case Screen::Providers: {
@@ -1124,7 +1072,6 @@ private:
         case Screen::ModelForm:
             return {"Base URL", key_indicator().empty() ? "API Key" : "API Key · 已填", "模型 ID", "保存连接"};
         case Screen::Fields: {
-            if (category_ == DisplayCategory) return {dark_ ? "明暗主题 · 深色" : "明暗主题 · 浅色"};
             std::vector<std::string> rows;
             for (const auto& field : group_fields_) {
                 const auto key = field.value("key", "");
@@ -1136,10 +1083,11 @@ private:
                 }
                 rows.push_back(std::move(label));
             }
-            if (category_ == MemoryCategory) {
-                rows.insert(rows.end(), MemoryFiles.begin(), MemoryFiles.end());
-                rows.emplace_back("主题文件");
-            }
+            return rows;
+        }
+        case Screen::MemoryFiles: {
+            auto rows = MemoryFiles;
+            rows.emplace_back("主题文件");
             return rows;
         }
         case Screen::MemoryTopics: {
@@ -1147,7 +1095,6 @@ private:
             for (const auto& file : memory_topics_) rows.push_back(file.substr(7));
             return rows;
         }
-        case Screen::MemoryActions: return {"保存修改", "继续编辑", "放弃修改"};
         case Screen::CatalogMenu: return CatalogKinds;
         case Screen::CatalogList: {
             std::vector<std::string> rows;
@@ -1161,14 +1108,15 @@ private:
     void go_back() {
         switch (screen_) {
         case Screen::Menu: screen_ = Screen::Chat; break;
+        case Screen::HelpMenu: screen_ = Screen::Menu; selection_ = HelpMenuIndex; break;
         case Screen::Settings: screen_ = Screen::Menu; selection_ = SettingsMenuIndex; break;
         case Screen::CatalogMenu: screen_ = Screen::Menu; selection_ = CatalogMenuIndex; break;
         case Screen::CatalogList: screen_ = Screen::CatalogMenu; selection_ = catalog_kind_; break;
         case Screen::Fields:
         case Screen::ModelMode: screen_ = Screen::Settings; selection_ = category_; break;
         case Screen::Providers: screen_ = Screen::ModelMode; selection_ = 0; break;
-        case Screen::MemoryTopics: screen_ = Screen::Fields; selection_ = group_fields_.size() + MemoryFiles.size(); break;
-        case Screen::MemoryActions: screen_ = Screen::MemoryEdit; break;
+        case Screen::MemoryFiles: screen_ = Screen::Menu; selection_ = MemoryMenuIndex; break;
+        case Screen::MemoryTopics: screen_ = Screen::MemoryFiles; selection_ = MemoryFiles.size(); break;
         case Screen::ModelForm:
             screen_ = model_parent_;
             selection_ = screen_ == Screen::Providers ? preset_ : 1;
@@ -1183,6 +1131,10 @@ private:
         switch (screen_) {
         case Screen::Menu:
             switch (MainMenu[selection_].action) {
+            case MenuAction::Memory:
+                screen_ = Screen::MemoryFiles;
+                selection_ = 0;
+                break;
             case MenuAction::Task:
                 screen_ = Screen::Task;
                 task_text_ = "读取任务进度…";
@@ -1197,17 +1149,13 @@ private:
                 selection_ = 0;
                 send({{"type", "settings"}}, "读取设置");
                 break;
-            case MenuAction::Compact:
-                screen_ = Screen::Chat;
-                send({{"type", "submit"}, {"text", "/compact"}}, "压缩上下文");
-                break;
-            case MenuAction::Clear:
-                screen_ = Screen::Chat;
-                send({{"type", "clear_chat"}}, "清理屏幕");
-                break;
-            case MenuAction::Shortcuts: screen_ = Screen::Shortcuts; break;
+            case MenuAction::Help: screen_ = Screen::HelpMenu; selection_ = 0; break;
             case MenuAction::Quit: running = false; break;
             }
+            break;
+        case Screen::HelpMenu:
+            help_kind_ = selection_;
+            screen_ = Screen::Help;
             break;
         case Screen::CatalogMenu:
             catalog_kind_ = selection_;
@@ -1224,40 +1172,26 @@ private:
             refresh_group();
             break;
         case Screen::Fields:
-            if (category_ == DisplayCategory) dark_ = !dark_;
-            else if (selection_ < group_fields_.size()) {
+            if (selection_ < group_fields_.size()) {
                 const auto& field = group_fields_[selection_];
                 if (field.value("key", "") == "memory.enabled") {
                     edit_parent_ = Screen::Fields;
                     send({{"type", "save"}, {"key", "memory.enabled"},
                           {"value", field.value("value", "") == "true" ? "false" : "true"}}, "保存");
                 } else open_editor(field);
-            } else {
-                const auto index = selection_ - group_fields_.size();
-                if (index < MemoryFiles.size()) open_memory(MemoryFiles[index]);
-                else {
-                    memory_topics_.clear();
-                    screen_ = Screen::MemoryTopics;
-                    selection_ = 0;
-                    error_.clear();
-                    send({{"type", "memory_topics"}}, "读取主题");
-                }
+            }
+            break;
+        case Screen::MemoryFiles:
+            if (selection_ < MemoryFiles.size()) open_memory(MemoryFiles[selection_]);
+            else {
+                memory_topics_.clear();
+                screen_ = Screen::MemoryTopics;
+                selection_ = 0;
+                error_.clear();
+                send({{"type", "memory_topics"}}, "读取主题");
             }
             break;
         case Screen::MemoryTopics: open_memory(memory_topics_[selection_]); break;
-        case Screen::MemoryActions:
-            if (selection_ == 0) {
-                error_.clear();
-                send({{"type", "memory_save"}, {"file", memory_file_},
-                      {"text", lv_textarea_get_text(memory_editor_)}, {"revision", memory_revision_}}, "保存");
-            } else if (selection_ == 1) {
-                screen_ = Screen::MemoryEdit;
-                error_.clear();
-            } else {
-                screen_ = Screen::MemoryView;
-                error_.clear();
-            }
-            break;
         case Screen::ModelMode:
             if (selection_ == 0) {
                 screen_ = Screen::Providers;
@@ -1349,20 +1283,20 @@ private:
     }
 
     void refresh(bool bottom = false) {
-        const auto background = lv_color_hex(dark_ ? 0x101b21 : 0xe7efe9);
-        const auto surface = lv_color_hex(dark_ ? 0x17262c : 0xf8fbf7);
-        const auto foreground = lv_color_hex(dark_ ? 0xe7f4ed : 0x192c28);
-        const auto accent = lv_color_hex(dark_ ? 0x82dfab : 0x176240);
+        const auto background = lv_color_hex(0x101b21);
+        const auto surface = lv_color_hex(0x17262c);
+        const auto foreground = lv_color_hex(0xe7f4ed);
+        const auto accent = lv_color_hex(0x82dfab);
         lv_obj_set_style_bg_color(lv_screen_active(), background, 0);
         lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(panel_, surface, 0);
         lv_obj_set_style_bg_opa(panel_, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(body_, foreground, 0);
         lv_obj_set_style_text_color(composer_, foreground, 0);
-        lv_obj_set_style_bg_color(composer_, dark_ ? lv_color_hex(0x233a3e) : lv_color_hex(0xd6e8dd), 0);
+        lv_obj_set_style_bg_color(composer_, lv_color_hex(0x233a3e), 0);
         lv_obj_set_style_bg_opa(composer_, LV_OPA_COVER, 0);
         color_signal();
-        const auto muted = lv_color_hex(dark_ ? 0xb6c9c4 : 0x38554c);
+        const auto muted = lv_color_hex(0xb6c9c4);
         for (auto* badge : {clock_label_, battery_label_}) {
             lv_obj_set_style_bg_color(badge, surface, 0);
             lv_obj_set_style_text_color(badge, muted, 0);
@@ -1379,10 +1313,10 @@ private:
         if (starting_) content = "正在加载对话…";
         else if (!show_chat) {
             content = model_hint_.empty() ?
-                "输入问题开始对话。\n用 Tab 切换拼音，或用 Esc 打开设置。" : model_hint_;
+                "输入问题开始对话。\n用 Tab 切换拼音，或用 Esc 打开配置。" : model_hint_;
         }
         std::string composer = screen_ == Screen::Chat && !starting_ ? draft_preview() : "";
-        std::string hint = "Esc 菜单  Tab 中/英  Fn+空格 语音";
+        std::string hint = "Esc 设置  Tab 中/英  Fn+空格 语音";
         if (!spelling_.empty()) {
             hint = candidate_pages_.empty() ? "继续输入拼音" : candidate_pages_[page_].text;
             if (candidate_pages_.size() > 1) hint += " ‹ ›";
@@ -1394,39 +1328,47 @@ private:
         if (is_list(screen_)) {
             const auto rows = list_rows();
             switch (screen_) {
-            case Screen::Menu: title = "菜单"; break;
-            case Screen::Settings: title = "设置"; break;
-            case Screen::Fields: title = "设置  /  " + CategoryNames[category_]; break;
-            case Screen::ModelMode: title = "设置  /  模型"; break;
+            case Screen::Menu: title = "设置"; break;
+            case Screen::HelpMenu: title = "帮助"; break;
+            case Screen::Settings: title = "配置"; break;
+            case Screen::Fields: title = "配置  /  " + CategoryNames[category_]; break;
+            case Screen::ModelMode: title = "配置  /  模型"; break;
             case Screen::Providers: title = "模型  /  服务商预设"; break;
             case Screen::ModelForm: title = "模型  /  " + model_title_; break;
+            case Screen::MemoryFiles: title = "记忆"; break;
             case Screen::MemoryTopics: title = "记忆  /  主题文件"; break;
-            case Screen::MemoryActions: title = "编辑  /  " + memory_file_; break;
-            case Screen::CatalogMenu: title = "MCP 与技能"; break;
+            case Screen::CatalogMenu: title = "插件"; break;
             case Screen::CatalogList: title = "查看  /  " + CatalogKinds[catalog_kind_]; break;
             default: break;
             }
             content.clear();
             show_menu_rows = !rows.empty();
-            const auto visible = menu_rows_.size();
+            composer = screen_ == Screen::ModelForm && error_.empty() ? "OpenAI 兼容接口" : error_;
+            const auto visible = screen_ == Screen::Menu ? menu_rows_.size() : (composer.empty() ? 5u : 4u);
+            const int row_step = screen_ == Screen::Menu ? 20 : 22;
             const auto max_first = rows.size() > visible ? rows.size() - visible : 0;
             const auto first = std::min(selection_ > 2 ? selection_ - 2 : 0, max_first);
             for (std::size_t i = 0; i < visible && first + i < rows.size(); ++i) {
                 auto* row = menu_rows_[i];
+                const int row_height = row_step - 1;
+                lv_obj_set_y(row, 3 + row_step * i);
+                lv_obj_set_height(row, row_height);
+                const auto* font = lv_obj_get_style_text_font(row, LV_PART_MAIN);
+                lv_obj_set_style_pad_top(row, std::max(0, (row_height - static_cast<int>(font->line_height)) / 2), 0);
                 const bool selected = first + i == selection_;
                 lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
                 lv_label_set_text(row, rows[first + i].c_str());
                 lv_obj_set_style_border_color(row, accent, 0);
                 lv_obj_set_style_border_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
                 lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-                lv_obj_set_style_bg_color(row, lv_color_hex(selected ? (dark_ ? 0x356654 : 0xb5ddc7) : (dark_ ? 0x243940 : 0xe5eee8)), 0);
-                lv_obj_set_style_text_color(row, selected ? lv_color_hex(dark_ ? 0xf0fff7 : 0x13382b) : foreground, 0);
+                lv_obj_set_style_bg_color(row, lv_color_hex(selected ? 0x356654 : 0x243940), 0);
+                lv_obj_set_style_text_color(row, selected ? lv_color_hex(0xf0fff7) : foreground, 0);
             }
             if (rows.empty() && screen_ == Screen::MemoryTopics) content = "暂无主题文件";
             if (rows.empty() && screen_ == Screen::CatalogList)
-                content = catalog_kind_ == 0 ? "尚未配置 MCP 服务" : "没有可用技能";
-            composer = screen_ == Screen::ModelForm && error_.empty() ? "OpenAI 兼容接口" : error_;
-            hint = "F/X 选择     Enter 打开     Esc 返回";
+                content = catalog_kind_ == 0 ? "尚未配置 MCP" : "没有可用技能";
+            hint = screen_ == Screen::Menu && MainMenu[selection_].action == MenuAction::Quit
+                ? "F/X 选择     Enter 退出     Esc 返回" : "F/X 选择     Enter 打开     Esc 返回";
         } else if (screen_ == Screen::Edit) {
             title = "编辑";
             const auto& field = edit_field_;
@@ -1439,20 +1381,10 @@ private:
             if (!error_.empty()) content += "\n" + error_;
             composer = "› " + (secret ? std::string(std::min<std::size_t>(edited_.size(), 30), '*') : tail(edited_));
             hint = "Enter 保存   Tab 清空   Esc 返回";
-        } else if (screen_ == Screen::Shortcuts) {
-            title = "快捷键";
-            content = "Tab   切换英文 / 拼音\n"
-                      "Enter   发送 / 打开\n"
-                      "Esc   菜单 / 返回\n"
-                      "长按 Esc 1.5 秒   退出\n"
-                      "Fn+空格   开始 / 结束录音\n"
-                      "录音时 Esc   取消\n"
-                      "↑ / ↓   滚动消息\n"
-                      "Fn+L / Fn+M   最早 / 最新消息\n"
-                      "Fn+K / Fn+N   输入行首 / 行尾\n"
-                      "← / →   拼音候选翻页\n"
-                      "1–6   选候选，空格 / Enter 选首项\n"
-                      "菜单 F/X 选择，Z 返回，C 打开";
+        } else if (screen_ == Screen::Help) {
+            title = "帮助 / " + HelpSections[help_kind_];
+            content = HelpTexts[help_kind_];
+            composer.clear();
             hint = "F/X 滚动  Esc 返回";
         } else if (screen_ == Screen::Task) {
             title = "任务进度";
@@ -1469,22 +1401,7 @@ private:
             title = "记忆  /  " + memory_file_;
             content = memory_text_.empty() ? "文件为空" : memory_text_;
             composer = error_;
-            hint = "F/X 滚动  C/Enter 编辑  Z/Esc 返回";
-        } else if (screen_ == Screen::MemoryEdit) {
-            title = "编辑  /  " + memory_file_;
-            content.clear();
-            composer = tail(spelling_);
-            if (spelling_.empty()) hint = "Tab 中/英  Enter 换行  Esc 保存菜单";
-        }
-        if (screen_ == Screen::MemoryEdit) {
-            lv_obj_add_flag(panel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(memory_editor_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_style_bg_color(memory_editor_, surface, 0);
-            lv_obj_set_style_text_color(memory_editor_, foreground, 0);
-            lv_obj_set_style_border_color(memory_editor_, accent, 0);
-        } else {
-            lv_obj_remove_flag(panel_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(memory_editor_, LV_OBJ_FLAG_HIDDEN);
+            hint = "F/X 滚动  C/Enter 刷新  Z/Esc 返回";
         }
         lv_label_set_text(title_, title.c_str());
         const bool show_mode = screen_ == Screen::Chat && !starting_ && !recording_ && !busy_;
@@ -1494,12 +1411,8 @@ private:
             if (screen_ == Screen::Chat) composer = status_text_;
             else hint = status_text_;
         }
-        const bool reading = screen_ == Screen::Task || screen_ == Screen::Shortcuts || screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
-        lv_obj_set_height(panel_, reading && composer.empty() ? 124 : 96);
-        if (chat_colors_dark_ != dark_) {
-            for (const auto& message : chat_) color_chat_message(message);
-            chat_colors_dark_ = dark_;
-        }
+        const bool reserve_composer = screen_ == Screen::Chat || screen_ == Screen::Edit || !composer.empty();
+        lv_obj_set_height(panel_, reserve_composer ? 96 : 124);
         if (show_chat) {
             lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(chat_thread_, LV_OBJ_FLAG_HIDDEN);
@@ -1552,7 +1465,7 @@ private:
                 lv_label_set_text(part, word.c_str());
                 lv_obj_set_style_text_color(part, i % 2 ? foreground : accent, 0);
                 if (i % 2 == 0)
-                    lv_obj_set_style_bg_color(part, lv_color_hex(dark_ ? 0x243e36 : 0xd2e8db), 0);
+                    lv_obj_set_style_bg_color(part, lv_color_hex(0x243e36), 0);
             }
         } else lv_label_set_text(candidates_, hint.c_str());
     }

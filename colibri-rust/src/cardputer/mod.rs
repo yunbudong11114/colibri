@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use self::settings::{device_model, Settings};
 use self::voice::Recording;
-use crate::config_io::{atomic_write, lock};
+use crate::config_io::atomic_write;
 
 const MAX_MEMORY_BYTES: usize = 64 * 1024;
 type Notice = Arc<dyn Fn(&str) + Send + Sync>;
@@ -58,8 +58,9 @@ impl App {
     fn model_hint(&self) -> String {
         self.settings
             .config()
-            .and_then(|config| device_model(&config))
+            .and_then(|config| device_model(&config, &self.settings.home))
             .err()
+            .map(app_model_guidance)
             .unwrap_or_default()
     }
 
@@ -145,7 +146,7 @@ impl App {
         if self.session.is_none() || self.settings_changed || fingerprint != self.loaded_config {
             let config = self.settings.config()?;
             crate::memory::initialize(&config)?;
-            let model = device_model(&config)?;
+            let model = device_model(&config, &self.settings.home)?;
             let transcript = self.open_transcript(&config)?;
             let mut session = AgentSession::from_shared(
                 Arc::new(config),
@@ -196,7 +197,7 @@ impl App {
     fn reload(&mut self) -> Result<(), String> {
         if self.session.is_some() {
             self.settings_changed = true;
-            device_model(&self.settings.config()?)?;
+            device_model(&self.settings.config()?, &self.settings.home)?;
         }
         Ok(())
     }
@@ -318,30 +319,15 @@ fn read_memory(root: &Path, name: &str) -> Result<Value, String> {
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(json!({"file":name,"text":"","revision":null}))
+            return Err("记忆文件不存在".into())
         }
         Err(error) => return Err(error.to_string()),
     };
     if bytes.len() > MAX_MEMORY_BYTES {
-        return Err("文件超过 64 KiB，请在设备终端编辑".into());
+        return Err("文件超过 64 KiB，请让 Agent 分段读取".into());
     }
     let content = std::str::from_utf8(&bytes).map_err(|_| "记忆文件不是 UTF-8 文本")?;
-    Ok(json!({"file":name,"text":content,"revision":format!("{:x}",md5::compute(bytes))}))
-}
-
-fn save_memory(root: &Path, name: &str, content: &str, revision: &Value) -> Result<Value, String> {
-    if content.len() > MAX_MEMORY_BYTES {
-        return Err("文件超过 64 KiB".into());
-    }
-    let path = memory_path(root, name)?;
-    let parent = path.parent().ok_or("记忆目录无效")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let _lock = lock(&root.join(".memory-editor.lock")).map_err(|e| e.to_string())?;
-    if read_memory(root, name)?["revision"] != *revision {
-        return Err("文件已在别处修改，请重新打开后再保存".into());
-    }
-    atomic_write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
-    read_memory(root, name)
+    Ok(json!({"file":name,"text":content}))
 }
 
 fn required<'a>(request: &'a Value, field: &str) -> Result<&'a str, String> {
@@ -417,15 +403,6 @@ fn handle(app: &mut App, request: Value) -> Result<Option<Value>, String> {
             "memory_file",
             read_memory(&app.memory_root()?, required(&request, "file")?)?,
         ),
-        "memory_save" => event(
-            "memory_saved",
-            save_memory(
-                &app.memory_root()?,
-                required(&request, "file")?,
-                required(&request, "text")?,
-                &request["revision"],
-            )?,
-        ),
         "submit" => event(
             "reply",
             json!({"text":app.ask(required(&request,"text")?)?}),
@@ -495,7 +472,7 @@ fn pipe(home: PathBuf) -> Result<(), String> {
         let value = match result {
             Ok(Some(value)) => value,
             Ok(None) => break,
-            Err(error) => event("error", json!({"text":error})),
+            Err(error) => event("error", json!({"text":app_model_guidance(error)})),
         };
         if let Err(error) = send(&value) {
             if error.kind() == io::ErrorKind::BrokenPipe {
@@ -509,7 +486,9 @@ fn pipe(home: PathBuf) -> Result<(), String> {
 
 fn repl(home: PathBuf) -> Result<(), String> {
     let mut app = App::new(home, Arc::new(|message| println!("{message}")));
-    crate::memory::initialize(&app.settings.config()?)?;
+    let config = app.settings.config()?;
+    crate::memory::initialize(&config)?;
+    device_model(&config, &app.settings.home)?;
     let terminal = io::stdin().is_terminal();
     println!(
         "Colibri REPL  /compact  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit"
@@ -631,11 +610,12 @@ pub fn run() -> Result<(), String> {
         } else {
             0
         };
-        if env::args()
-            .skip(1)
-            .nth(command_index)
-            .is_some_and(|arg| matches!(arg.as_str(), "version" | "--version" | "help" | "--help"))
-        {
+        if env::args().skip(1).nth(command_index).is_some_and(|arg| {
+            matches!(
+                arg.as_str(),
+                "version" | "--version" | "help" | "--help" | "configure"
+            )
+        }) {
             std::process::exit(crate::cli::run(args.collect()));
         }
         let home = colibri_home();
@@ -665,5 +645,13 @@ pub fn run() -> Result<(), String> {
         repl(home)
     } else {
         pipe(home)
+    }
+}
+
+fn app_model_guidance(error: String) -> String {
+    if error.starts_with("未配置 AI 模型") {
+        "未配置 AI 模型。\n按 Enter 配置，或进入\n设置 → 配置 → 模型。".into()
+    } else {
+        error
     }
 }

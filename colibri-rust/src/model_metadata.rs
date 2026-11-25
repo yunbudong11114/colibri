@@ -408,6 +408,9 @@ mod tests {
                         }
                         data.push(byte[0]);
                     }
+                    if !data.ends_with(b"\r\n\r\n") {
+                        continue;
+                    }
                     let headers = String::from_utf8_lossy(&data);
                     let (status, extra, body) = if headers.starts_with("GET ") {
                         h.fetch_add(1, Ordering::AcqRel);

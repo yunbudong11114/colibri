@@ -272,6 +272,21 @@ pub(crate) fn model_key_required(url: &url::Url) -> bool {
 }
 
 pub fn build_model(config: &ModelConfig) -> Result<Box<dyn ModelClient>, String> {
+    build_model_for_path(config, &crate::config::default_config_path())
+}
+
+pub fn build_model_for_path(
+    config: &ModelConfig,
+    path: &std::path::Path,
+) -> Result<Box<dyn ModelClient>, String> {
+    construct_model(config).map_err(|error| {
+        let path_text = path.to_string_lossy();
+        let quoted = shell_words::quote(&path_text);
+        format!("未配置 AI 模型。\n原因：{error}\n配置文件：{}\n请运行：colibri --config {quoted} configure\n按提示逐步填写 API 地址、模型 ID 和密钥。",path.display())
+    })
+}
+
+fn construct_model(config: &ModelConfig) -> Result<Box<dyn ModelClient>, String> {
     match config.provider.as_str() {
         "fake" => Ok(Box::new(FakeModel::new())),
         "openai_compatible" => {

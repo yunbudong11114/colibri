@@ -19,18 +19,38 @@ inline const nlohmann::json SettingLabels{
     {"memory.enabled", "启用长期记忆"}, {"memory.root", "记忆目录"},
     {"mcp.servers", "MCP · 服务器 JSON"},
 };
-enum class MenuAction { Task, Catalog, Settings, Compact, Clear, Shortcuts, Quit };
+inline const std::vector<std::string> CatalogKinds{"MCP", "技能"};
+enum class MenuAction { Settings, Help, Catalog, Task, Memory, Quit };
 struct MenuEntry { const char* label; MenuAction action; };
 inline constexpr MenuEntry MainMenu[]{
-    {"任务进度", MenuAction::Task}, {"MCP 与技能", MenuAction::Catalog}, {"设置", MenuAction::Settings},
-    {"压缩上下文", MenuAction::Compact}, {"清理屏幕", MenuAction::Clear},
-    {"快捷键", MenuAction::Shortcuts}, {"退出 Colibri", MenuAction::Quit},
+    {"任务进度", MenuAction::Task}, {"记忆", MenuAction::Memory}, {"配置", MenuAction::Settings},
+    {"帮助", MenuAction::Help}, {"插件", MenuAction::Catalog},
+    {"退出 Colibri", MenuAction::Quit},
 };
-inline const std::vector<std::string> CategoryNames{"模型", "图片理解", "搜索", "历史与上下文", "记忆", "MCP 配置", "显示"};
-inline const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "web_search.", "session.", "memory.", "mcp.", "display."};
+inline const std::vector<std::string> HelpSections{"快捷键", "斜杠命令"};
+inline constexpr const char* HelpTexts[]{
+    "Tab   切换英文 / 拼音\n"
+    "Enter   发送 / 打开\n"
+    "Esc   设置 / 返回\n"
+    "长按 Esc 1.5 秒   退出\n"
+    "Fn+空格   开始 / 结束录音\n"
+    "录音时 Esc   取消\n"
+    "↑ / ↓   滚动消息\n"
+    "Fn+L / Fn+M   最早 / 最新消息\n"
+    "Fn+K / Fn+N   输入行首 / 行尾\n"
+    "← / →   拼音候选翻页\n"
+    "1–6   选候选，空格 / Enter 选首项\n"
+    "设置 F/X 选择，Z 返回，C 打开",
+    "/clear   清理屏幕，保留历史和上下文\n"
+    "/compact   压缩 Agent 上下文\n"
+    "以上命令在聊天输入框发送。"
+};
+inline const std::vector<std::string> CategoryNames{"模型", "图片理解", "搜索", "历史与上下文", "长期记忆", "MCP 配置"};
+inline const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "web_search.", "session.", "memory.", "mcp."};
 inline constexpr std::size_t MemoryCategory = 4;
-inline constexpr std::size_t DisplayCategory = 6;
-inline constexpr std::size_t ShortcutsMenuIndex = 5;
+inline constexpr std::size_t TaskMenuIndex = 0;
+inline constexpr std::size_t MemoryMenuIndex = 1;
+inline constexpr std::size_t HelpMenuIndex = 3;
 inline constexpr std::size_t SettingsMenuIndex = 2;
-inline constexpr std::size_t CatalogMenuIndex = 1;
+inline constexpr std::size_t CatalogMenuIndex = 4;
 } // namespace colibri_ui

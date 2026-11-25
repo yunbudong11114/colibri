@@ -28,16 +28,27 @@ int main() {
     }
     std::set<MenuAction> actions;
     for (const auto& item : MainMenu) assert(actions.insert(item.action).second);
-    assert(actions.count(MenuAction::Compact) && actions.count(MenuAction::Clear));
-    assert(MainMenu[ShortcutsMenuIndex].action == MenuAction::Shortcuts);
-    assert(MainMenu[0].action == MenuAction::Task);
+    assert(actions.size()==6);
+    assert(std::string(MainMenu[0].label)=="任务进度");
+    assert(std::string(MainMenu[1].label)=="记忆");
+    assert(std::string(MainMenu[2].label)=="配置");
+    assert(std::string(MainMenu[3].label)=="帮助");
+    assert(std::string(MainMenu[4].label)=="插件");
+    assert(MainMenu[MemoryMenuIndex].action==MenuAction::Memory);
+    assert(MainMenu[5].action==MenuAction::Quit);
+    assert(MainMenu[HelpMenuIndex].action==MenuAction::Help);
+    assert(MainMenu[TaskMenuIndex].action==MenuAction::Task);
+    assert(HelpSections.size()==2);
+    assert(std::string(HelpTexts[0]).find("Fn+空格")!=std::string::npos);
+    assert(std::string(HelpTexts[1]).find("/clear")!=std::string::npos);
+    assert(std::string(HelpTexts[1]).find("/compact")!=std::string::npos);
     for (auto status : {"执行命令", "等待命令", "整理任务", "处理文件", "调用工具"})
         assert(has_activity_dots(composer_activity(true,true,false,status)));
     assert(MainMenu[SettingsMenuIndex].action == MenuAction::Settings);
     assert(MainMenu[CatalogMenuIndex].action == MenuAction::Catalog);
     assert(CategoryPrefixes.size() == CategoryNames.size());
     assert(CategoryPrefixes[MemoryCategory] == "memory.");
-    assert(CategoryPrefixes[DisplayCategory] == "display.");
+    for (const auto& prefix : CategoryPrefixes) assert(prefix != "display.");
     for (const auto& prefix : CategoryPrefixes) assert(prefix != "speech.");
     for (const auto& item : SettingLabels.items()) assert(item.key().find("speech.") != 0);
 }

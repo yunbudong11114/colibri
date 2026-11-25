@@ -59,30 +59,24 @@ uv run python -m colibri.cli diagnostics
 
 The runtime itself is standard-library only. `pytest` is used for development tests.
 
-## Rust Port
+## Rust Runtime
 
-A Cargo-based Rust port lives in `colibri-rust/`. Its target is configuration and behavior parity with the Python runtime while keeping memory use low. It uses focused crates such as `toml`, `serde_json`, and a blocking Rust HTTP client instead of a large async/network stack or external HTTP executable.
+The shared Rust core in `colibri-rust/` powers CLI, REPL, gateway and the Cardputer worker. It uses a blocking HTTP client and focused crates without a large async runtime.
 
 ```bash
-/opt/homebrew/bin/uv run python -m pytest
 cargo test --manifest-path colibri-rust/Cargo.toml
 cargo build --release --manifest-path colibri-rust/Cargo.toml
-./colibri-rust/target/release/colibri ask "hello"
+./colibri-rust/target/release/colibri configure
+./colibri-rust/target/release/colibri repl
 ./colibri-rust/target/release/colibri diagnostics
 ./colibri-rust/target/release/colibri gateway status
 ```
 
-If `--config` is omitted, the Rust binary follows the Python runtime and reads `~/.colibri/config.toml` when it exists; otherwise it uses the built-in fake model defaults. For an isolated local smoke test:
+User configuration is `~/.colibri/config.toml` (or `$COLIBRI_HOME/config.toml`); `--config PATH` selects another file. Missing model configuration produces setup guidance rather than silently selecting a fake model. Run `colibri configure`, or `colibri --config PATH configure`, for step-by-step setup. Secret input is hidden; changes are saved only after confirmation. An explicitly configured `model.provider="fake"` remains available for tests.
 
-```bash
-env HOME=/tmp/colibri-rust-smoke ./colibri-rust/target/release/colibri ask "hello"
-```
+The core includes OpenAI-compatible models, memory, transcript recovery and compaction, persistent task evidence, managed background shell jobs, bounded file reads/search/patches, skills, general MCP discovery and calls, search, vision, file/media sending, and Weixin authentication and gateway channels. Runtime access is unrestricted at the application layer; the system prompt asks the agent to confirm dangerous operations. There is no tool grant or permission approval layer. Operating-system and service credentials still apply.
 
-Rust supports the local CLI runtime, fake model, OpenAI-compatible requests and tool-calling payloads through a Rust-native blocking HTTP client, markdown memory, transcripts, transcript restore, built-in local tools for files, file sending, shell, image understanding, memory, skills, Baidu web search, and Aliyun Bailian hosted WebSearch MCP, plus Weixin QR auth/API, inbound and outbound Weixin media, and gateway process management. Config parsing uses the same TOML syntax as Python's `tomllib`, including `[vision]`, `[session]`, and nested `[channels.weixin]` sections. `shell.run` follows the Python behavior by validating shell quoting, scanning each unquoted compound command segment against `shell.deny`, checking user exact command and executable shell grants, and executing the original command through the platform shell. `files.send` returns the same media result shape and requires an active channel media sender. `image.understand` uses the same vision defaults and fake-model response path as Python. Weixin auth renders the same terminal-block QR format for supported payload sizes. Gateway foreground handling is channel-neutral: enabled adapters are assembled by the channel registry, feed bounded per-session queues, and provide media, outbound, and optional interactive-permission behavior without transport branches in the gateway. Permission replies are keyed by the complete `channel:sender_id` session key, and idle shutdown waits for active turns before closing sessions. The hosted MCP integration is scoped to the existing `web.search` tool and does not add a general top-level MCP runtime.
-
-The Rust test suite is derived from the Python unit suite. `colibri-rust/tests/parity.rs` scans every Python `tests/unit/test_*.py::test_*` function, requires every function to appear in the coverage map, verifies every named Rust counterpart exists, records file-level coverage as `covered` or `partial`, and directly compares Python/Rust CLI output for deterministic commands such as `ask`, `diagnostics`, and `gateway` usage. Runtime tests cover the matching Rust library behavior for config, tools, permissions, memory, transcript, transcript restore, models, gateway, channel registration, permission-waiter isolation, web search, skills, vision, media sending, Weixin auth, and Weixin media download/upload.
-
-The Rust session applies the same default safety boundary: read-only tools run automatically, `tools.default_permission = "deny"` rejects tool calls, `tools.default_permission = "allow"` allows them, and user grants in `~/.colibri/permissions.toml` are honored. File permissions support `~` expansion, out-of-root file subjects, and simple `shell.run` write-target detection for redirection or `tee` commands. CLI `ask`, `repl`, and Weixin prompts use numeric permission choices: `1` once, `2` session, `3` shell session executable, `4` user, `5` shell user executable, and `0` deny.
+Rust tests cover shared behavior and entry-point workflows. The Python reference suite supplies coverage mappings and deterministic comparisons; new requirements such as model setup and full application access are validated directly in Rust.
 
 ## Configuration
 

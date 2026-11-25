@@ -13,7 +13,7 @@ use crate::channel::{
 use crate::channel_registry::build_enabled_channels;
 use crate::config::{colibri_home, rss_kb as process_rss_kb, AgentConfig};
 use crate::messages::MediaPart;
-use crate::model::{build_model, ModelClient};
+use crate::model::{build_model_for_path, ModelClient};
 use crate::runtime_reload::{PartialRuntimeReloader, RuntimeReloadResult, RuntimeSnapshot};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
@@ -147,7 +147,10 @@ impl GatewaySessionCache {
     ) -> Result<Self, String> {
         let active_path = config_path.unwrap_or_else(crate::config::default_config_path);
         let config = Arc::new(config);
-        let model = Arc::new(Mutex::new(build_model(&config.model)?));
+        let model = Arc::new(Mutex::new(build_model_for_path(
+            &config.model,
+            &active_path,
+        )?));
         let runtime_reloader = PartialRuntimeReloader::new(
             active_path,
             RuntimeSnapshot {
@@ -477,6 +480,13 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
     if status.running {
         return Ok(status);
     }
+    let config = AgentConfig::load(config_path.as_deref())?;
+    let _ = build_model_for_path(
+        &config.model,
+        config_path
+            .as_deref()
+            .unwrap_or(&crate::config::default_config_path()),
+    )?;
     let home = colibri_home();
     let run_dir = home.join("run");
     let log_dir = home.join("logs");
@@ -889,6 +899,10 @@ impl<T> InboundRouter<T> {
 /// Foreground gateway: enabled channel pollers → inbound router → turn workers.
 pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<i32, String> {
     crate::memory::initialize(&config)?;
+    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new_with_config_path(
+        config.clone(),
+        config_path,
+    )?));
     gateway_log(format!(
         "started pid={} model={}",
         std::process::id(),
@@ -902,10 +916,7 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
     let max_turns = config.gateway.max_concurrent_turns.max(1);
     let router = Arc::new(InboundRouter::new(max_pending));
     let (error_tx, error_rx) = mpsc::channel::<String>();
-    let sessions = Arc::new(Mutex::new(GatewaySessionCache::new_with_config_path(
-        config.clone(),
-        config_path,
-    )?));
+
     let health = Arc::new(GatewayAgentHealth::default());
     let mut workers = Vec::with_capacity(max_turns);
     for _ in 0..max_turns {

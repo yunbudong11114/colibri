@@ -7,6 +7,8 @@ pub mod cli;
 pub mod config;
 #[cfg(unix)]
 mod config_io;
+#[cfg(unix)]
+mod configure;
 pub mod console;
 pub mod context;
 pub mod gateway;

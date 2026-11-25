@@ -70,7 +70,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "default_config_matches_python_runtime_defaults",
                 "load_config_overrides_nested_values",
                 "load_without_path_reads_user_default_config",
-                "load_without_path_falls_back_when_user_default_missing",
+                "load_without_path_reports_unconfigured_model_when_user_default_missing",
                 "hardware_config_overrides_and_rejects_invalid_values",
             ],
             status: "covered",
