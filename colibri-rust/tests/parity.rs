@@ -847,14 +847,16 @@ fn python_rust_hardware_simulator_output_matches() {
         .arg(&fixture.config_path)
         .args(["hardware", "simulate"])
         .current_dir(repo_root())
-        .env("HOME", &fixture.home);
+        .env("HOME", &fixture.home)
+        .env_remove("COLIBRI_HOME");
     let mut rust_command = Command::new(env!("CARGO_BIN_EXE_colibri"));
     rust_command
         .arg("--config")
         .arg(&fixture.config_path)
         .args(["hardware", "simulate"])
         .current_dir(repo_root())
-        .env("HOME", &fixture.home);
+        .env("HOME", &fixture.home)
+        .env_remove("COLIBRI_HOME");
 
     let python = run_command_with_input(python_command, input);
     let rust = run_command_with_input(rust_command, input);
@@ -947,7 +949,8 @@ fn run_python_cli(fixture: &CliFixture, args: &[&str]) -> Output {
         .arg(&fixture.config_path)
         .args(args)
         .current_dir(repo_root())
-        .env("HOME", &fixture.home);
+        .env("HOME", &fixture.home)
+        .env_remove("COLIBRI_HOME");
     command.output().expect("run Python CLI")
 }
 
@@ -958,7 +961,8 @@ fn run_rust_cli(fixture: &CliFixture, args: &[&str]) -> Output {
         .arg(&fixture.config_path)
         .args(args)
         .current_dir(repo_root())
-        .env("HOME", &fixture.home);
+        .env("HOME", &fixture.home)
+        .env_remove("COLIBRI_HOME");
     command.output().expect("run Rust CLI")
 }
 

@@ -506,7 +506,7 @@ mod tests {
         config.skills.max_catalog = 0;
         let model = OpenAiCompatibleModel::from_config(&config.model).unwrap();
         let mut session =
-            AgentSession::new(config, Box::new(model)).with_working_directory(fixture.home.clone());
+            AgentSession::new(config, Box::new(model)).with_runtime_home(fixture.home.clone());
         assert_eq!(fixture.hits.load(Ordering::Acquire), 0);
         assert_eq!(session.submit("hello").unwrap().text, "done");
         assert_eq!(

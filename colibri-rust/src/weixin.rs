@@ -350,11 +350,12 @@ where
     let qr_id = json_string_field(&qr_response.body, "qrcode")
         .ok_or_else(|| "Weixin auth did not return a QR code id".to_string())?;
     emit_line("Scan this Weixin QR code with WeChat:")?;
-    if let Some(rendered) = render_terminal_qr(&qr_payload) {
+    let mut qr_view = crate::auth_qr_view::AuthQrView::open(&qr_payload)?;
+    if qr_view.is_none() {
+        let rendered =
+            render_terminal_qr(&qr_payload).ok_or("Weixin QR payload cannot be encoded")?;
         emit_line(&rendered)?;
     }
-    emit_line("QR payload:")?;
-    emit_line(&qr_payload)?;
 
     let deadline =
         Instant::now() + Duration::from_secs(config.channels_weixin.auth_timeout_seconds);
@@ -367,6 +368,9 @@ where
         let status_response =
             request_json("GET", &status_url, &weixin_headers(false, ""), None, 35)?;
         fail_on_http("Weixin get_qrcode_status", &status_response)?;
+        if let Some(view) = qr_view.as_mut() {
+            view.ensure_open()?;
+        }
         let state = json_string_field(&status_response.body, "status").unwrap_or_default();
         if state == "confirmed" {
             let token = json_string_field(&status_response.body, "bot_token").unwrap_or_default();

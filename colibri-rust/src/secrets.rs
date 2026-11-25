@@ -54,7 +54,7 @@ fn replace(text: &mut String, mut secrets: Vec<String>) {
     }
 }
 
-pub(crate) fn redact_tool_output(config: &AgentConfig, text: &mut String) {
+pub(crate) fn values(config: &AgentConfig) -> Vec<String> {
     let mut secrets: Vec<String> = [
         &config.model.api_key,
         &config.vision.api_key,
@@ -69,7 +69,14 @@ pub(crate) fn redact_tool_output(config: &AgentConfig, text: &mut String) {
         secrets.push(key);
     }
     collect(&config.mcp_servers, &mut secrets, false);
-    replace(text, secrets);
+    secrets.retain(|v| !v.is_empty());
+    secrets.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    secrets.dedup();
+    secrets
+}
+
+pub(crate) fn redact_tool_output(config: &AgentConfig, text: &mut String) {
+    replace(text, values(config));
 }
 
 pub(crate) fn redact_config_content(text: &mut String) {

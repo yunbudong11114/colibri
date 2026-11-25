@@ -1,0 +1,4 @@
+Project Nayuki QR Code generator, v1.8.0 (MIT)
+https://github.com/nayuki/QR-Code-generator/tree/v1.8.0/rust
+src/lib.rs is unchanged upstream source and contains the complete license.
+SHA-256 src/lib.rs: a4546464799faaea27393dd60a24be08349618fb98333decbaf686d4c98ca410

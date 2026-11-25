@@ -29,6 +29,10 @@ int main() {
     std::set<MenuAction> actions;
     for (const auto& item : MainMenu) assert(actions.insert(item.action).second);
     assert(actions.count(MenuAction::Compact) && actions.count(MenuAction::Clear));
+    assert(MainMenu[ShortcutsMenuIndex].action == MenuAction::Shortcuts);
+    assert(MainMenu[0].action == MenuAction::Task);
+    for (auto status : {"执行命令", "等待命令", "整理任务", "处理文件", "调用工具"})
+        assert(has_activity_dots(composer_activity(true,true,false,status)));
     assert(MainMenu[SettingsMenuIndex].action == MenuAction::Settings);
     assert(MainMenu[CatalogMenuIndex].action == MenuAction::Catalog);
     assert(CategoryPrefixes.size() == CategoryNames.size());

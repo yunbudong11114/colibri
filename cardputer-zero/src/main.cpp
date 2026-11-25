@@ -1,8 +1,10 @@
 #include "input.hpp"
+#include "qr_view.hpp"
 #include "markdown.hpp"
 #include "worker_link.hpp"
 #include "menu.hpp"
 #include "composer_activity.hpp"
+#include "display_idle.hpp"
 #include <lvgl.h>
 #if !COLIBRI_DESKTOP && defined(__linux__)
 #include <ft2build.h>
@@ -53,7 +55,7 @@ constexpr int ChatWidth = 290;
 constexpr int CodePadding = 2;
 constexpr int CodeBorder = 1;
 constexpr std::size_t MaxSpelling = 64;
-enum class Screen { Chat, Menu, Shortcuts, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
+enum class Screen { Task, Chat, Menu, Shortcuts, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
 
 const std::vector<std::string> CatalogKinds{"MCP 服务", "技能"};
 constexpr std::size_t MemoryEditMaxBytes = 64 * 1024;
@@ -428,7 +430,10 @@ public:
         }
         recording_ = type == "recording";
 
-        if (type == "model_status") {
+        if (type == "task_status") {
+            task_text_ = text;
+            screen_ = Screen::Task;
+        } else if (type == "model_status") {
             starting_ = false;
             model_hint_ = text;
             for (const auto& message : event.value("history", json::array())) {
@@ -514,10 +519,16 @@ public:
         if (screen_ == Screen::Shortcuts) {
             if (key == Key::Left || key == Key::Escape) {
                 screen_ = Screen::Menu;
-                selection_ = 2;
+                selection_ = ShortcutsMenuIndex;
             } else if (key == Key::Up || key == Key::Down) scroll(key);
             refresh();
             return;
+        }
+        if (screen_ == Screen::Task) {
+            if (key == Key::Left || key == Key::Escape) { screen_ = Screen::Menu; selection_ = 0; }
+            else if (key == Key::Enter || key == Key::Right) send({{"type", "task_status"}}, "读取任务");
+            else if (key == Key::Up || key == Key::Down) scroll(key);
+            refresh(); return;
         }
         if (screen_ == Screen::CatalogItem) {
             if (key == Key::Left || key == Key::Escape) screen_ = Screen::CatalogList;
@@ -602,7 +613,7 @@ public:
     }
 
     void text(const std::string& text) {
-        if (is_list(screen_) || screen_ == Screen::Shortcuts || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem) {
+        if (is_list(screen_) || screen_ == Screen::Shortcuts || screen_ == Screen::MemoryView || screen_ == Screen::CatalogItem || screen_ == Screen::Task) {
             if (text == "f" || text == "F") key(Key::Up);
             else if (text == "x" || text == "X") key(Key::Down);
             else if (text == "z" || text == "Z") key(Key::Left);
@@ -639,6 +650,7 @@ private:
     Screen screen_ = Screen::Chat, edit_parent_ = Screen::Fields, model_parent_ = Screen::ModelMode;
     lv_obj_t *title_, *status_, *panel_, *body_, *composer_, *candidates_, *memory_editor_;
     lv_obj_t *chat_thread_, *chat_hint_;
+    std::string task_text_;
     std::array<lv_obj_t*, 4> menu_rows_{};
     const lv_font_t *bold_, *italic_, *heading_, *code_;
     enum class Speaker { User, Agent, System };
@@ -1171,6 +1183,11 @@ private:
         switch (screen_) {
         case Screen::Menu:
             switch (MainMenu[selection_].action) {
+            case MenuAction::Task:
+                screen_ = Screen::Task;
+                task_text_ = "读取任务进度…";
+                send({{"type", "task_status"}}, "读取任务");
+                break;
             case MenuAction::Catalog:
                 screen_ = Screen::CatalogMenu;
                 selection_ = 0;
@@ -1437,6 +1454,11 @@ private:
                       "1–6   选候选，空格 / Enter 选首项\n"
                       "菜单 F/X 选择，Z 返回，C 打开";
             hint = "F/X 滚动  Esc 返回";
+        } else if (screen_ == Screen::Task) {
+            title = "任务进度";
+            content = task_text_.empty() ? "当前没有记录的任务" : task_text_;
+            composer.clear();
+            hint = "F/X 滚动  Enter 刷新  Esc 返回";
         } else if (screen_ == Screen::CatalogItem) {
             const auto& item = catalog_items_[selection_];
             title = "查看  /  " + CatalogKinds[catalog_kind_];
@@ -1472,7 +1494,7 @@ private:
             if (screen_ == Screen::Chat) composer = status_text_;
             else hint = status_text_;
         }
-        const bool reading = screen_ == Screen::Shortcuts || screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
+        const bool reading = screen_ == Screen::Task || screen_ == Screen::Shortcuts || screen_ == Screen::CatalogItem || screen_ == Screen::MemoryView;
         lv_obj_set_height(panel_, reading && composer.empty() ? 124 : 96);
         if (chat_colors_dark_ != dark_) {
             for (const auto& message : chat_) color_chat_message(message);
@@ -1556,6 +1578,7 @@ uint32_t ticks() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--weixin-qr-view") return run_qr_view();
     if (argc > 1) {
         const char* worker = std::getenv("COLIBRI_WORKER");
         if (!worker) worker = COLIBRI_WORKER_PATH;
@@ -1578,6 +1601,7 @@ int main(int argc, char** argv) {
         if (!display || lv_linux_fbdev_set_file(display, framebuffer ? framebuffer : "/dev/fb0") != LV_RESULT_OK)
             return 1;
 #endif
+        DisplayIdle idle(ticks(), !COLIBRI_DESKTOP);
         View view(worker);
 #if COLIBRI_DESKTOP
         if (argc == 3 && std::string(argv[1]) == "--screenshot")
@@ -1585,12 +1609,19 @@ int main(int argc, char** argv) {
 #endif
         const auto first_frame_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
         while (view.running && poll_input([&](Key key) { view.key(key); },
-                                          [&](const std::string& text) { view.text(text); })) {
+                                          [&](const std::string& text) { view.text(text); },
+                                          [&](unsigned code, int value) {
+                                              const bool was_sleeping = idle.sleeping();
+                                              const bool consumed = idle.input(code, value, ticks());
+                                              if (was_sleeping && !idle.sleeping()) lv_obj_invalidate(lv_screen_active());
+                                              return consumed;
+                                          })) {
             if (!view.running) break;
             for (const auto& event : worker.receive()) view.receive(event);
+            idle.update(ticks());
             view.update_device_status();
-            view.update_composer_animation();
-            if (!view.restoring_history() || std::chrono::steady_clock::now() >= first_frame_deadline)
+            if (!idle.sleeping()) view.update_composer_animation();
+            if (!idle.sleeping() && (!view.restoring_history() || std::chrono::steady_clock::now() >= first_frame_deadline))
                 lv_timer_handler();
             std::this_thread::sleep_for(std::chrono::milliseconds(12));
         }

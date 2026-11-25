@@ -53,6 +53,9 @@ impl PartialRuntimeReloader {
             Ok(config) => config,
             Err(error) => return RuntimeReloadResult::Rejected(error),
         };
+        if let Err(error) = crate::memory::initialize(&candidate) {
+            return RuntimeReloadResult::Rejected(error);
+        }
         let model = match build_model(&candidate.model) {
             Ok(model) => Arc::new(Mutex::new(model)),
             Err(error) => return RuntimeReloadResult::Rejected(error),

@@ -32,7 +32,7 @@ impl Drop for Fixture {
 }
 
 fn worker(home: &Path, args: &[&str], lines: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_colibri-cardputer-worker"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_colibri-worker"))
         .arg("--home")
         .arg(home)
         .args(args)
@@ -106,6 +106,10 @@ fn protocol_preserves_settings_memory_and_native_tools() {
     .unwrap();
     let chat_file = fixture.0.join("fixture.txt");
     fs::write(&chat_file, "content outside the data directory").unwrap();
+    let user_revision = format!(
+        "{:x}",
+        md5::compute(include_bytes!("../../src/colibri/memory_templates/USER.md"))
+    );
     let rows = pipe(
         &home,
         &[
@@ -114,7 +118,7 @@ fn protocol_preserves_settings_memory_and_native_tools() {
             json!({"type":"save","key":"memory.root","value":memories}),
             json!({"type":"save","key":"vision.model","value":"updated-vl"}),
             json!({"type":"memory_read","file":"USER.md"}),
-            json!({"type":"memory_save","file":"USER.md","revision":null,"text":"测试偏好"}),
+            json!({"type":"memory_save","file":"USER.md","revision":user_revision.clone(),"text":"测试偏好"}),
             json!({"type":"memory_save","file":"USER.md","revision":null,"text":"过期内容"}),
             json!({"type":"pinyin","spelling":"zhong"}),
             json!({"type":"submit","text":format!("tool:files.read {}",json!({"path":chat_file}))}),
@@ -128,10 +132,14 @@ fn protocol_preserves_settings_memory_and_native_tools() {
     assert!(fields
         .iter()
         .any(|entry| entry["key"] == "vision.model" && entry["value"] == "fixture-vl"));
-    assert_eq!(rows[4]["revision"], Value::Null);
+    assert_eq!(rows[4]["revision"], user_revision);
     assert_eq!(rows[5]["type"], "memory_saved");
     assert_eq!(rows[6]["type"], "error");
     assert!(rows[7]["text"].as_str().unwrap().contains('中'));
+    let rows = rows
+        .into_iter()
+        .filter(|row| row["type"] != "activity")
+        .collect::<Vec<_>>();
     assert!(rows[8]["text"]
         .as_str()
         .unwrap()
@@ -532,6 +540,10 @@ fn compact_menu_protocol_uses_shared_session_without_clearing_display_history() 
             json!({"type":"submit","text":"continue"}),
         ],
     );
+    let rows = rows
+        .into_iter()
+        .filter(|row| row["type"] == "reply")
+        .collect::<Vec<_>>();
     assert_eq!(rows.len(), 3);
     for row in &rows {
         assert_eq!(row["type"], "reply");
@@ -554,7 +566,7 @@ fn manual_compaction_emits_transient_activity_before_reply() {
     );
     let start = rows
         .iter()
-        .position(|row| row["type"] == "activity")
+        .position(|row| row["type"] == "activity" && row["text"] == "压缩上下文")
         .unwrap();
     assert_eq!(rows[start]["text"], "压缩上下文");
     assert_eq!(rows.last().unwrap()["type"], "reply");
@@ -563,4 +575,80 @@ fn manual_compaction_emits_transient_activity_before_reply() {
         .unwrap()
         .contains("已压缩"));
     assert!(rows.iter().all(|row| row["type"] != "status"));
+}
+
+#[test]
+fn first_launch_initializes_memory_before_model_configuration() {
+    let fixture = Fixture::new();
+    pipe(&fixture.0, &[json!({"type":"model_status"})]);
+    for name in [
+        "SOUL.md",
+        "USER.md",
+        "MEMORY.md",
+        "INDEX.md",
+        "topics/sample.md",
+    ] {
+        assert!(fixture.0.join("memory").join(name).is_file(), "{name}");
+    }
+}
+
+#[test]
+fn startup_reports_memory_errors_and_keeps_settings_available() {
+    let fixture = Fixture::new();
+    let blocked = fixture.0.join("blocked");
+    fs::write(&blocked, "keep this file").unwrap();
+    fs::write(
+        fixture.0.join("config.toml"),
+        format!("[memory]\nroot='{}'\n", blocked.display()),
+    )
+    .unwrap();
+    let recovered = fixture.0.join("recovered");
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"settings"}),
+            json!({"type":"save","key":"memory.root","value":recovered}),
+            json!({"type":"memory_read","file":"USER.md"}),
+        ],
+    );
+    assert_eq!(rows[0]["type"], "error");
+    assert!(rows[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Memory initialization failed"));
+    assert_eq!(rows[1]["type"], "settings");
+    assert_eq!(rows[3]["type"], "memory_file");
+    assert!(!rows[3]["text"].as_str().unwrap().is_empty());
+    assert!(recovered.join("USER.md").is_file());
+    assert_eq!(fs::read_to_string(blocked).unwrap(), "keep this file");
+}
+
+#[test]
+fn disabled_memory_on_first_launch_creates_no_memory_directory() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("config.toml"), "[memory]\nenabled=false\n").unwrap();
+    pipe(&fixture.0, &[json!({"type":"model_status"})]);
+    assert!(!fixture.0.join("memory").exists());
+}
+
+#[test]
+fn task_progress_is_available_without_model_and_restores_local_scope() {
+    let fixture = Fixture::new();
+    let rows = pipe(&fixture.0, &[json!({"type":"task_status"})]);
+    assert_eq!(rows[0]["type"], "task_status");
+    assert!(rows[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("当前没有记录的任务"));
+    let context = colibri_rust::tools::ToolContext::new(
+        colibri_rust::config::AgentConfig::default(),
+        fixture.0.clone(),
+    )
+    .with_runtime_home(fixture.0.clone());
+    assert!(colibri_rust::tools::run_tool("task.start",&json!({"objective":"测试小屏进度","steps":["读取文件","验证结果"],"acceptance":["结果可复现"]}).to_string(),&context).unwrap().ok);
+    let rows = pipe(&fixture.0, &[json!({"type":"task_status"})]);
+    let text = rows[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("测试小屏进度") && text.contains("读取文件") && text.contains("结果可复现")
+    );
 }

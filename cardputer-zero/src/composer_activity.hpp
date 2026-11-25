@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <initializer_list>
 #include <string_view>
 
 namespace colibri_ui {
@@ -10,7 +11,9 @@ inline ComposerActivity composer_activity(bool chat, bool busy, bool recording, 
     if (!busy) return ComposerActivity::Idle;
     if (status == "压缩上下文") return ComposerActivity::Compacting;
     if (status == "正在转写") return ComposerActivity::Transcribing;
-    return status == "思考中" ? ComposerActivity::Thinking : ComposerActivity::Idle;
+    for (auto stage : {"思考中", "执行命令", "等待命令", "整理任务", "处理文件", "调用工具"})
+        if (status == stage) return ComposerActivity::Thinking;
+    return ComposerActivity::Idle;
 }
 inline bool has_activity_dots(ComposerActivity activity) {
     return activity == ComposerActivity::Thinking || activity == ComposerActivity::Transcribing || activity == ComposerActivity::Compacting;

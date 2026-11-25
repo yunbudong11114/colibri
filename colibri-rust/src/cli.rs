@@ -101,12 +101,53 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
         return Ok(2);
     };
     let rest = &args[index + 1..];
+    #[cfg(unix)]
+    if command == "__job-run" {
+        crate::jobs::run_worker(std::path::Path::new(
+            rest.first().ok_or("Missing job directory")?,
+        ))?;
+        return Ok(0);
+    }
+
+    if matches!(command, "version" | "--version") {
+        writeln!(
+            stdout.lock().map_err(|_| "stdout lock poisoned")?,
+            "Colibri {}",
+            env!("CARGO_PKG_VERSION")
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(0);
+    }
+    if matches!(command, "help" | "--help") {
+        writeln!(
+            stdout.lock().map_err(|_| "stdout lock poisoned")?,
+            r#"Usage: colibri [--config path] <command>
+
+Commands:
+  version, --version             Show version
+  help, --help                   Show this help
+  ask <text>                     Send one request
+  repl                           Start interactive chat
+  auth weixin                    Log in to Weixin with a QR code
+  gateway <start|stop|restart|status|run>
+                                 Manage the background gateway
+  diagnostics                    Show runtime diagnostics
+  hardware <probe|simulate>      Inspect or simulate hardware
+
+Default config: ~/.colibri/config.toml (or $COLIBRI_HOME/config.toml)"#
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(0);
+    }
 
     if command == "gateway" {
         return gateway_command(rest, config_path, &stdout, &stderr);
     }
 
     let config = AgentConfig::load(config_path.as_deref())?;
+    if matches!(command, "ask" | "repl") {
+        crate::memory::initialize(&config)?;
+    }
     let mut status = StatusWriter {
         enabled: config.console.status,
         stderr: Arc::clone(&stderr),

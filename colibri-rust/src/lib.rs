@@ -1,3 +1,4 @@
+mod auth_qr_view;
 #[cfg(unix)]
 pub mod cardputer;
 pub mod channel;
@@ -34,3 +35,10 @@ pub mod tools;
 pub mod transcript;
 pub mod vision;
 pub mod weixin;
+
+mod file_ops;
+
+#[cfg(unix)]
+mod jobs;
+#[cfg(unix)]
+mod tasks;

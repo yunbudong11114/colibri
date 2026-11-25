@@ -17,10 +17,31 @@ impl AgentSession {
         skills: &str,
         before_message: usize,
     ) {
-        if memory.is_empty() && skills.is_empty() && self.context_updates.is_empty() {
-            return;
-        }
         let mut text = crate::model_history::runtime_context(memory, skills);
+        let cwd = self
+            .working_directory
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        text += &format!("\n\nRuntime facts: os={}, arch={}, cwd={}. Shell is non-interactive. Tool availability is defined by the current schemas.", std::env::consts::OS, std::env::consts::ARCH, cwd.display());
+        #[cfg(unix)]
+        {
+            text += &format!(" uid={}", unsafe { libc::geteuid() });
+            let context = crate::tools::ToolContext::new(self.config.clone(), cwd)
+                .with_runtime_home(self.runtime_home.clone())
+                .with_scope(
+                    self.transcript_metadata
+                        .get("session_key")
+                        .cloned()
+                        .unwrap_or_else(|| "local".into()),
+                );
+            text += &format!("\n{}", crate::tasks::summary(&context));
+            for job in crate::jobs::list(&context).iter().take(3) {
+                text += &format!(
+                    "\nBackground job {}: {}. Use shell.poll before reporting its outcome.",
+                    job.job_id, job.status
+                );
+            }
+        }
         crate::secrets::redact_tool_output(&self.config, &mut text);
         if self
             .context_updates
@@ -159,7 +180,7 @@ impl AgentSession {
         if latest_user == 0 {
             return false;
         }
-        self.notify_activity("压缩上下文");
+        self.notify_activity("compacting");
         let threshold = self.compaction_token_threshold();
         let target = if reason == "manual" || reason == "overflow" {
             0
@@ -210,7 +231,7 @@ impl AgentSession {
             }),
         );
         if reason != "manual" {
-            self.notify_activity("思考中");
+            self.notify_activity("thinking");
         }
         true
     }
@@ -230,9 +251,7 @@ impl AgentSession {
             update.before_message.hash(&mut hasher);
             update.text.hash(&mut hasher);
         }
-        serde_json::to_string(tools)
-            .unwrap_or_default()
-            .hash(&mut hasher);
+        hash_tool_schemas(tools, &mut hasher);
         hasher.finish()
     }
 
@@ -317,5 +336,38 @@ impl AgentSession {
             ));
         }
         Ok(addition)
+    }
+}
+
+fn hash_tool_schemas(tools: &[serde_json::Value], hasher: &mut impl Hasher) {
+    struct Sink<'a, H>(&'a mut H);
+    impl<H: Hasher> std::io::Write for Sink<'_, H> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let _ = serde_json::to_writer(Sink(hasher), tools);
+    // str::hash appends a delimiter after the UTF-8 bytes.
+    hasher.write_u8(0xff);
+}
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    #[test]
+    fn streaming_fingerprint_matches_string_hash() {
+        for tools in [
+            vec![],
+            vec![serde_json::json!({"中文":"quoted\\text", "array":[true,42,null]})],
+        ] {
+            let mut expected = DefaultHasher::new();
+            serde_json::to_string(&tools).unwrap().hash(&mut expected);
+            let mut actual = DefaultHasher::new();
+            hash_tool_schemas(&tools, &mut actual);
+            assert_eq!(expected.finish(), actual.finish());
+        }
     }
 }

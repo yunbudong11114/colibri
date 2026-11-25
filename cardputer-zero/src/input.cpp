@@ -42,7 +42,9 @@ int enqueue(void*, SDL_Event* event) {
 }
 }
 
-bool poll_input(const KeyHandler& key, const TextHandler& text) {
+bool set_input_exclusive(bool) { return true; }
+
+bool poll_input(const KeyHandler& key, const TextHandler& text, const InputFilter& filter) {
     static const bool ready = [] {
         SDL_AddEventWatch(enqueue, nullptr);
         SDL_StartTextInput();
@@ -54,9 +56,16 @@ bool poll_input(const KeyHandler& key, const TextHandler& text) {
         std::lock_guard lock(events_mutex);
         pending.swap(events);
     }
+    static bool suppress_text = false;
     for (const auto& event : pending) {
         if (event.type == SDL_QUIT || event.type == SDL_WINDOWEVENT) return false;
-        if (event.type == SDL_TEXTINPUT) text(event.text.text);
+        if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+            const bool consumed = filter && filter(event.key.keysym.scancode,
+                event.type == SDL_KEYUP ? 0 : event.key.repeat ? 2 : 1);
+            if (event.type == SDL_KEYDOWN) suppress_text = consumed;
+            if (consumed) continue;
+        }
+        if (event.type == SDL_TEXTINPUT && !suppress_text) text(event.text.text);
         if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) && event.key.keysym.sym == SDLK_ESCAPE) {
             if (!handle_escape(event.type == SDL_KEYUP ? 0 : event.key.repeat ? 2 : 1, key)) return false;
             continue;
@@ -122,6 +131,11 @@ Keyboard keyboard() {
     return {fd, false};
 }
 
+const Keyboard& input_device() {
+    static const auto device = keyboard();
+    return device;
+}
+
 char character(unsigned code, bool shift, bool caps, bool cardputer) {
     // OEM symbol events documented by CardputerZero/launcher (M5Stack, MIT).
     static constexpr unsigned symbol_codes[] = {
@@ -159,13 +173,18 @@ char character(unsigned code, bool shift, bool caps, bool cardputer) {
 }
 }
 
-bool poll_input(const KeyHandler& key, const TextHandler& text) {
-    static const auto device = keyboard();
+bool set_input_exclusive(bool exclusive) {
+    return input_device().fd >= 0 && ioctl(input_device().fd, EVIOCGRAB, exclusive ? 1 : 0) == 0;
+}
+
+bool poll_input(const KeyHandler& key, const TextHandler& text, const InputFilter& filter) {
+    const auto& device = input_device();
     const int fd = device.fd;
     static bool left_shift = false, right_shift = false, caps = false, fn = false;
     input_event event{};
     while (fd >= 0 && read(fd, &event, sizeof(event)) == sizeof(event)) {
         if (event.type != EV_KEY) continue;
+        if (filter && filter(event.code, event.value)) continue;
         if (event.code == KEY_ESC) {
             if (!handle_escape(event.value, key)) return false;
             continue;

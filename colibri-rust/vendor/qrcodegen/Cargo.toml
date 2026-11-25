@@ -1,0 +1,6 @@
+[package]
+name = "qrcodegen"
+version = "1.8.0"
+edition = "2018"
+license = "MIT"
+description = "Project Nayuki QR Code generator, vendored v1.8.0"

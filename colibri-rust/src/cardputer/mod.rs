@@ -1,4 +1,5 @@
 //! Cardputer protocol adapter for the shared Rust runtime.
+mod task_view;
 use crate::mcp;
 mod pinyin;
 mod settings;
@@ -143,6 +144,7 @@ impl App {
         let fingerprint = config_fingerprint(&self.settings.home.join("config.toml"));
         if self.session.is_none() || self.settings_changed || fingerprint != self.loaded_config {
             let config = self.settings.config()?;
+            crate::memory::initialize(&config)?;
             let model = device_model(&config)?;
             let transcript = self.open_transcript(&config)?;
             let mut session = AgentSession::from_shared(
@@ -152,6 +154,7 @@ impl App {
                 Default::default(),
             )
             .with_working_directory(self.settings.home.clone())
+            .with_runtime_home(self.settings.home.clone())
             .with_status_callback(false, Arc::clone(&self.notice));
             if let Some(activity) = &self.activity {
                 session = session.with_activity_callback(Arc::clone(activity));
@@ -199,7 +202,9 @@ impl App {
     }
 
     fn memory_root(&self) -> Result<PathBuf, String> {
-        Ok(self.settings.config()?.memory.root)
+        let config = self.settings.config()?;
+        crate::memory::initialize(&config)?;
+        Ok(config.memory.root)
     }
 
     fn mcp(
@@ -359,6 +364,12 @@ fn send(value: &Value) -> io::Result<()> {
 
 fn handle(app: &mut App, request: Value) -> Result<Option<Value>, String> {
     let result = match required(&request, "type")? {
+        "task_status" => {
+            let context =
+                crate::tools::ToolContext::new(app.settings.config()?, app.settings.home.clone())
+                    .with_runtime_home(app.settings.home.clone());
+            event("task_status", json!({"text":task_view::render(&context)}))
+        }
         "model_status" => {
             let history = app
                 .startup_history()
@@ -456,8 +467,25 @@ fn pipe(home: PathBuf) -> Result<(), String> {
             let _ = send(&event("status", json!({"text":message})));
         }),
     );
+    if let Err(error) = app
+        .settings
+        .config()
+        .and_then(|config| crate::memory::initialize(&config))
+    {
+        send(&event("error", json!({"text":error}))).map_err(|e| e.to_string())?;
+    }
     app.activity = Some(Arc::new(|stage| {
-        let _ = send(&event("activity", json!({"text":stage})));
+        let text = match stage {
+            "thinking" => "思考中",
+            "compacting" => "压缩上下文",
+            "running_command" => "执行命令",
+            "waiting_command" => "等待命令",
+            "planning_task" => "整理任务",
+            "working_files" => "处理文件",
+            "calling_tool" => "调用工具",
+            _ => stage,
+        };
+        let _ = send(&event("activity", json!({"text":text})));
     }));
     for line in io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -481,6 +509,7 @@ fn pipe(home: PathBuf) -> Result<(), String> {
 
 fn repl(home: PathBuf) -> Result<(), String> {
     let mut app = App::new(home, Arc::new(|message| println!("{message}")));
+    crate::memory::initialize(&app.settings.config()?)?;
     let terminal = io::stdin().is_terminal();
     println!(
         "Colibri REPL  /compact  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit"
@@ -551,8 +580,45 @@ fn repl(home: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+// Hardware presentation is selected by this adapter, never by the shared harness.
+fn configure_qr_presenter() {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() || env::var_os("COLIBRI_QR_VIEWER").is_some() {
+            return;
+        }
+        let mut pid = unsafe { libc::getppid() };
+        for _ in 0..16 {
+            if pid <= 1 {
+                break;
+            }
+            if std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .as_deref()
+                == Some(std::path::Path::new(
+                    "/usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch",
+                ))
+            {
+                env::set_var("COLIBRI_QR_VIEWER", "/usr/bin/colibri --weixin-qr-view");
+                break;
+            }
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            pid = stat
+                .rsplit_once(')')
+                .and_then(|(_, v)| v.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+}
+
 pub fn run() -> Result<(), String> {
+    configure_qr_presenter();
     let mut args = env::args().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "__job-run") {
+        std::process::exit(crate::cli::run(args.collect()));
+    }
     let command = args
         .peek()
         .is_some_and(|arg| !matches!(arg.as_str(), "--repl" | "--home"));
@@ -560,6 +626,18 @@ pub fn run() -> Result<(), String> {
         libc::umask(0o077);
     }
     if command {
+        let command_index = if args.peek().is_some_and(|arg| arg == "--config") {
+            2
+        } else {
+            0
+        };
+        if env::args()
+            .skip(1)
+            .nth(command_index)
+            .is_some_and(|arg| matches!(arg.as_str(), "version" | "--version" | "help" | "--help"))
+        {
+            std::process::exit(crate::cli::run(args.collect()));
+        }
         let home = colibri_home();
         let legacy = expand_user_path("~/.local/share/colibri-cardputer");
         settings::migrate(&legacy, &home).map_err(|e| e.to_string())?;

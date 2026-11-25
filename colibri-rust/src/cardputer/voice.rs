@@ -174,7 +174,7 @@ impl Recording {
         let board = env::var("COLIBRI_DEVICE_AUDIO")
             .map(|v| v == "1")
             .unwrap_or_else(|_| {
-                env::current_exe().is_ok_and(|path| path.starts_with("/usr/lib/colibri-cardputer"))
+                env::current_exe().is_ok_and(|path| path.starts_with("/usr/lib/colibri"))
             });
         let runtime = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)

@@ -146,7 +146,7 @@ fn automatic_compaction_reports_activity_then_returns_to_thinking() {
         .push(Message::new("assistant", "old evidence ".repeat(6000)));
     assert_eq!(app.submit("continue").unwrap().text, "fake: continue");
     let stages = stages.lock().unwrap();
-    assert_eq!(stages.as_slice(), ["压缩上下文", "思考中"]);
+    assert_eq!(stages.as_slice(), ["thinking", "compacting", "thinking"]);
     assert!(!app
         .messages
         .iter()

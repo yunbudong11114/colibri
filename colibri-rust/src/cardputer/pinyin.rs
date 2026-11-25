@@ -38,7 +38,7 @@ pub(super) fn single_characters(spelling: &str) -> &'static str {
 fn lexicon() -> &'static Lexicon {
     static WORDS: OnceLock<Lexicon> = OnceLock::new();
     WORDS.get_or_init(|| {
-        let installed = Path::new("/usr/share/colibri-cardputer/pinyin/words.tsv");
+        let installed = Path::new("/usr/share/colibri/pinyin/words.tsv");
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../cardputer-zero/assets/pinyin/words.tsv");
         let contents = std::fs::read_to_string(if source.is_file() { &source } else { installed })

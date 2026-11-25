@@ -25,6 +25,9 @@ const ALIYUN_MCP_TOOL_NAME: &str = "bailian_web_search";
 pub struct ToolContext {
     pub config: Arc<AgentConfig>,
     pub cwd: PathBuf,
+    pub runtime_home: PathBuf,
+    pub scope: String,
+    pub execution_host: Option<PathBuf>,
     pub media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
     pub image_analyzer: Option<Arc<dyn Fn(&Path, &str) -> Result<String, String> + Send + Sync>>,
 }
@@ -34,9 +37,25 @@ impl ToolContext {
         Self {
             config: config.into(),
             cwd,
+            runtime_home: crate::config::colibri_home(),
+            scope: "local".into(),
+            execution_host: None,
             media_sender: None,
             image_analyzer: None,
         }
+    }
+
+    pub fn with_execution_host(mut self, host: PathBuf) -> Self {
+        self.execution_host = Some(host);
+        self
+    }
+    pub fn with_runtime_home(mut self, home: PathBuf) -> Self {
+        self.runtime_home = home;
+        self
+    }
+    pub fn with_scope(mut self, scope: String) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub fn with_media_sender(
@@ -102,8 +121,8 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     if has("shell") {
         specs.push(openai_tool(
             "shell.run",
-            "Run a shell command as the current user.",
-            serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
+            "Run a non-interactive shell command as the current user. For builds/downloads/long commands set background=true, then shell.poll until terminal status. Starting a job is not completion. Set timeout_seconds to cover expected work; cwd optionally overrides the current directory.",
+            serde_json::json!({"type":"object","properties":{"command":{"type":"string"},"background":{"type":"boolean"},"cwd":{"type":"string"},"timeout_seconds":{"type":"number","minimum":0.001,"maximum":86400}},"required":["command"]}),
         ));
     }
     if has("web") {
@@ -144,11 +163,26 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
             serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["skill","command"]}),
         ));
     }
+    #[cfg(unix)]
+    {
+        if has("shell") {
+            specs.push(openai_tool("shell.poll", "Read incremental background output and status. Continue from next_offset. Use tail=true if truncated. Completed with exit_code=0 is success; running is not success.", serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":5000},"tail":{"type":"boolean"}},"required":["job_id"]})));
+            specs.push(openai_tool("shell.cancel", "Request cancellation of a background job; poll afterwards to confirm settlement.", serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})));
+        }
+        if has("shell") || has("files") {
+            specs.push(openai_tool("task.start", "Record a multi-step execution task before substantial work. Keep simple questions direct. Existing tasks require replace=true only when the user changed the objective. Record concrete externally checkable acceptance criteria.", serde_json::json!({"type":"object","properties":{"objective":{"type":"string"},"steps":{"type":"array","items":{"type":"string"}},"acceptance":{"type":"array","items":{"type":"string"}},"replace":{"type":"boolean"}},"required":["objective","steps","acceptance"]})));
+            specs.push(openai_tool("task.update", "Update durable progress. Step numbers are 1-based; completed steps need evidence_ids returned by actual successful tools, including relevant checks. Set a concrete blocker when work cannot continue; clear blocker with an empty string to resume. All completed steps settle the task.", serde_json::json!({"type":"object","properties":{"step":{"type":"integer","minimum":1},"status":{"type":"string","enum":["pending","running","completed"]},"evidence_ids":{"type":"array","items":{"type":"string"}},"next_action":{"type":"string"},"blocker":{"type":"string"}}})));
+            specs.push(openai_tool("task.inspect", "Read the current task, acceptance checks, steps and actual evidence references after interruption or compaction.", serde_json::json!({"type":"object","properties":{}})));
+        }
+    }
     specs
 }
 
 fn files_tool_specs() -> Vec<serde_json::Value> {
     vec![
+        openai_tool("files.search", "Bounded literal text search with file paths and line numbers. Reports truncation explicitly; use shell tools for regex or larger scans.", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query"]})),
+        #[cfg(unix)]
+        openai_tool("files.patch", "Replace exactly one unique old_text occurrence atomically, preserving permissions. Include enough unique context; optionally pass expected_sha256 to detect a stale read. Files above 1 MiB require streaming system tools.", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"expected_sha256":{"type":"string"}},"required":["path","old_text","new_text"]})),
         openai_tool(
             "files.list",
             "List direct children of a directory.",
@@ -290,7 +324,36 @@ pub fn run_tool_map(
     }
     let result = match name {
         "files.list" => files_list(args, context),
-        "files.read" => files_read(args, context),
+        "files.read" => crate::file_ops::read(args, context),
+        "files.search" => crate::file_ops::search(args, context),
+        #[cfg(unix)]
+        "files.patch" => crate::file_ops::patch(args, context),
+        #[cfg(unix)]
+        "shell.poll" => crate::jobs::poll(args, context),
+        #[cfg(unix)]
+        "shell.cancel" => crate::jobs::cancel(args, context),
+        #[cfg(unix)]
+        "task.start" | "task.update" | "task.inspect" => {
+            let value = serde_json::Value::Object(
+                args.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            if matches!(
+                                k.as_str(),
+                                "steps" | "acceptance" | "evidence_ids" | "step" | "replace"
+                            ) {
+                                serde_json::from_str(v)
+                                    .unwrap_or_else(|_| serde_json::Value::String(v.clone()))
+                            } else {
+                                serde_json::Value::String(v.clone())
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            crate::tasks::run(name, &value, context)
+        }
         "files.write" => files_write(args, context),
         "files.send" => files_send(args, context),
         "shell.run" => shell_run(args, context),
@@ -588,89 +651,6 @@ fn files_list(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     ToolResult::ok(names.join("\n"))
 }
 
-fn files_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let Some(raw_path) = args.get("path").filter(|value| !value.is_empty()) else {
-        return ToolResult::error("invalid_arguments", "Missing path");
-    };
-    let path = resolve_arg_path(raw_path, context);
-    if !path.exists() {
-        return ToolResult::error("not_found", "Path does not exist");
-    }
-    if !path.is_file() {
-        return ToolResult::error("not_file", "Path is not a file");
-    }
-    let Some((start_line, end_line, max_chars)) = read_range_args(args) else {
-        return ToolResult::error("invalid_arguments", "Invalid line range or max_chars");
-    };
-    if let (Some(start), Some(end)) = (start_line, end_line) {
-        if start > end {
-            return ToolResult::error("invalid_arguments", "start_line must be <= end_line");
-        }
-    }
-    match fs::read_to_string(&path) {
-        Ok(mut text) => {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with("config.toml") || name.starts_with("settings.json")
-                })
-            {
-                crate::secrets::redact_config_content(&mut text);
-            }
-            crate::secrets::redact_tool_output(&context.config, &mut text);
-            if start_line.is_some() || end_line.is_some() {
-                text = select_line_range(&text, start_line, end_line);
-            }
-            let limit = max_chars
-                .unwrap_or(context.config.tools.max_result_chars)
-                .min(context.config.tools.max_result_chars);
-            let (text, truncated) = truncate(text, limit);
-            let mut result = ToolResult::ok(text);
-            result.truncated = truncated;
-            result
-        }
-        Err(error) => ToolResult::error("io_error", error.to_string()),
-    }
-}
-
-fn read_range_args(
-    args: &BTreeMap<String, String>,
-) -> Option<(Option<usize>, Option<usize>, Option<usize>)> {
-    Some((
-        positive_usize_arg(args, "start_line")?,
-        positive_usize_arg(args, "end_line")?,
-        positive_usize_arg(args, "max_chars")?,
-    ))
-}
-
-fn positive_usize_arg(args: &BTreeMap<String, String>, name: &str) -> Option<Option<usize>> {
-    let Some(value) = args.get(name) else {
-        return Some(None);
-    };
-    let parsed = value.parse::<usize>().ok()?;
-    if parsed == 0 {
-        return None;
-    }
-    Some(Some(parsed))
-}
-
-fn select_line_range(text: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
-    let start = start_line.unwrap_or(1).saturating_sub(1);
-    let end = end_line.unwrap_or(usize::MAX);
-    text.split_inclusive('\n')
-        .enumerate()
-        .filter_map(|(index, segment)| {
-            let line_no = index + 1;
-            if line_no > start && line_no <= end {
-                Some(segment)
-            } else {
-                None
-            }
-        })
-        .collect::<String>()
-}
-
 fn files_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
     let Some(raw_path) = args.get("path").filter(|value| !value.is_empty()) else {
         return ToolResult::error("invalid_arguments", "Missing path");
@@ -734,9 +714,24 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
         Ok(_) => return ToolResult::error("invalid_arguments", "Missing command"),
         Err(error) => return ToolResult::error("invalid_arguments", error.to_string()),
     };
+    #[cfg(unix)]
+    if args.get("background").is_some_and(|v| v == "true") {
+        return crate::jobs::start(args, context);
+    }
     let mut process = platform_shell_command(&command);
-    process.current_dir(&context.cwd);
-    let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.0));
+    let cwd = args
+        .get("cwd")
+        .map(|v| resolve_arg_path(v, context))
+        .unwrap_or_else(|| context.cwd.clone());
+    process.current_dir(cwd);
+    let seconds = match args.get("timeout_seconds") {
+        Some(v) => match v.parse::<f64>() {
+            Ok(n) if n.is_finite() && n > 0.0 && n <= 86400.0 => n,
+            _ => return ToolResult::error("invalid_arguments", "Invalid timeout_seconds"),
+        },
+        None => context.config.tools.max_shell_seconds.max(0.0),
+    };
+    let timeout = Duration::from_secs_f64(seconds);
     match run_bounded_command(process, timeout, context.config.tools.max_result_chars) {
         Err(CommandRunError::Timeout) => ToolResult::error("timeout", "Command timed out"),
         Err(CommandRunError::Io(error)) => ToolResult::error("execution_error", error),

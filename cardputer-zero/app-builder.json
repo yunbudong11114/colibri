@@ -1,7 +1,8 @@
 {
   "app_name": "Colibri",
-  "package_name": "colibri-cardputer",
-  "version": "0.1.75",
+  "package_name": "colibri",
+  "version": "0.3.1",
+  "bin_name": "colibri",
   "description": "Keyboard-first Colibri chat for Cardputer Zero",
   "store": {
     "summary": "Keyboard-first AI chat with pinyin, voice, MCP, and a terminal REPL.",

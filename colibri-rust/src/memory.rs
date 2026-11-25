@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -10,7 +13,6 @@ const TRUNCATED_SUFFIX: &str = "\n...[truncated]";
 const SOUL_LIMIT: usize = 1000;
 const USER_LIMIT: usize = 1000;
 const MEMORY_LIMIT: usize = 2000;
-const BOOTSTRAP_SENTINELS: &[&str] = &["SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"];
 const SOUL_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/SOUL.md");
 const USER_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/USER.md");
 const MEMORY_TEMPLATE: &str = include_str!("../../src/colibri/memory_templates/MEMORY.md");
@@ -59,7 +61,7 @@ impl MemoryContext {
                 truncated: false,
             }));
         }
-        let _ = bootstrap(&self.config);
+        initialize(&self.config)?;
         let cache_key = memory_cache_key(
             &self.config.memory.root,
             self.config.memory.max_recall_chars,
@@ -113,37 +115,93 @@ impl MemoryContext {
     }
 }
 
-pub fn bootstrap(config: &AgentConfig) -> Result<(), String> {
+const TEMPLATES: &[(&str, &str)] = &[
+    ("SOUL.md", SOUL_TEMPLATE),
+    ("USER.md", USER_TEMPLATE),
+    ("MEMORY.md", MEMORY_TEMPLATE),
+    ("INDEX.md", INDEX_TEMPLATE),
+    ("topics/sample.md", TOPIC_TEMPLATE),
+];
+
+/// Prepare memory without a model or network, preserving every existing file.
+pub fn initialize(config: &AgentConfig) -> Result<(), String> {
     if !config.memory.enabled {
         return Ok(());
     }
     let root = &config.memory.root;
-    if has_bootstrap_sentinel(root) {
+    initialize_root(root).map_err(|error| {
+        format!(
+            "Memory initialization failed at {}: {error}",
+            root.display()
+        )
+    })
+}
+
+fn initialize_root(root: &Path) -> io::Result<()> {
+    if TEMPLATES.iter().all(|(name, _)| root.join(name).is_file()) {
         return Ok(());
     }
-    for (relative, content) in [
-        ("SOUL.md", SOUL_TEMPLATE),
-        ("USER.md", USER_TEMPLATE),
-        ("MEMORY.md", MEMORY_TEMPLATE),
-        ("INDEX.md", INDEX_TEMPLATE),
-        ("topics/sample.md", TOPIC_TEMPLATE),
-    ] {
-        let path = root.join(relative);
-        if path.exists() {
+    fs::create_dir_all(root)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(root.join(".initialize.lock"))?;
+    lock.lock()?;
+    for &(name, content) in TEMPLATES {
+        let path = root.join(name);
+        if path.is_file() {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        fs::write(path, content).map_err(|error| error.to_string())?;
+        write_missing(&path, content.as_bytes()).map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
     }
     Ok(())
 }
 
-fn has_bootstrap_sentinel(root: &Path) -> bool {
-    BOOTSTRAP_SENTINELS
-        .iter()
-        .any(|name| root.join(name).is_file())
+struct PendingFile(PathBuf);
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn write_missing(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let (pending, mut file) = loop {
+        let temp = parent.join(format!(
+            ".memory-init-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temp) {
+            Ok(file) => break (PendingFile(temp), file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    match fs::hard_link(&pending.0, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_file() => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn memory_cache_key(root: &Path, max_recall_chars: usize) -> MemoryCacheKey {

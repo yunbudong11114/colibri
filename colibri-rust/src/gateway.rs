@@ -888,6 +888,7 @@ impl<T> InboundRouter<T> {
 
 /// Foreground gateway: enabled channel pollers → inbound router → turn workers.
 pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<i32, String> {
+    crate::memory::initialize(&config)?;
     gateway_log(format!(
         "started pid={} model={}",
         std::process::id(),

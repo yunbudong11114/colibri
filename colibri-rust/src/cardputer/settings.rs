@@ -183,7 +183,7 @@ impl Settings {
                 return Ok(());
             }
             if matches!(key, "model.provider" | "model.base_url" | "model.model") {
-                let current = parse_document(stored)?;
+                let current = parse_document(stored, &self.home)?;
                 let previous = match key {
                     "model.provider" => &current.model.provider,
                     "model.base_url" => &current.model.base_url,
@@ -211,7 +211,7 @@ impl Settings {
             return Err("请输入有效的 API 地址和模型 ID".into());
         }
         self.update(|stored| {
-            let config = parse_document(stored)?;
+            let config = parse_document(stored, &self.home)?;
             let same = config.model.base_url.trim_end_matches('/') == base;
             if !same || config.model.model != model.trim() {
                 if let Some(table) = stored.get_mut("model").and_then(|item| item.as_table_mut()) {
@@ -242,17 +242,18 @@ impl Settings {
     }
 
     fn write_document(&self, document: &DocumentMut) -> Result<(), String> {
-        parse_document(document)?;
+        parse_document(document, &self.home)?;
         atomic_write(&self.path(), document.to_string().as_bytes()).map_err(|e| e.to_string())
     }
 
     pub fn config(&self) -> Result<AgentConfig, String> {
-        parse_document(&self.document()?)
+        parse_document(&self.document()?, &self.home)
     }
 }
 
-fn parse_document(document: &DocumentMut) -> Result<AgentConfig, String> {
+fn parse_document(document: &DocumentMut, home: &Path) -> Result<AgentConfig, String> {
     let mut config = AgentConfig::default();
+    config.memory.root = home.join("memory");
     let value = document
         .to_string()
         .parse()

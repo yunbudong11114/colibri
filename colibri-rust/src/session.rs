@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const SYSTEM_PROMPT: &str = "Your name is Colibri. You are a lightweight personal agent running on the CardputerZero, a multi-interface device powered by the CM0 chip. Prefer short, practical responses and respect low memory, battery, and tool limits. Before any dangerous, destructive, or irreversible operation, ask the user and wait for their explicit approval.";
+pub const SYSTEM_PROMPT: &str = "Your name is Colibri, a practical personal agent. Use the actual runtime facts and available tool schemas; do not assume the host device or operating system. Tools have full application access as the current OS user. For a multi-step execution task, use task.start/update to preserve the objective, acceptance checks, progress and next action. On recovery, inspect the task and verify uncertain side effects before repeating commands. Use background shell jobs for long commands, poll their final exit status, and check the requested outcome before marking steps completed. Starting a job is not completing it. Prefer bounded file reads, search and unique-context patches. Do not dump credentials. Report only tests and checks that actually ran; distinguish completed work, pending work and concrete blockers. Keep simple questions direct. Before any dangerous, destructive, or irreversible operation, ask the user and wait for explicit approval.";
 pub const MODEL_UNAVAILABLE_TEXT: &str = "模型暂时不可用，请检查网络后重试。";
 pub const TRUNCATED_TOOL_CALL_TEXT: &str = "Tool call was truncated because the model reached its output limit; retry the call with complete arguments.";
 
@@ -47,6 +47,8 @@ pub struct AgentSession {
     history_loaded: bool,
     direct_tools: Option<Box<dyn SessionToolExtension>>,
     working_directory: Option<PathBuf>,
+    runtime_home: PathBuf,
+    last_failure: Option<(u64, usize)>,
     steering: Arc<SteeringState>,
     steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
     usage_anchor: Option<UsageAnchor>,
@@ -109,13 +111,15 @@ impl AgentSession {
             history_loaded: false,
             direct_tools: None,
             working_directory: None,
+            runtime_home: crate::config::colibri_home(),
+            last_failure: None,
             steering: Arc::new(SteeringState::new()),
             steer_notifier: None,
             usage_anchor: None,
         }
     }
 
-    pub(crate) fn with_working_directory(mut self, cwd: PathBuf) -> Self {
+    pub fn with_working_directory(mut self, cwd: PathBuf) -> Self {
         self.working_directory = Some(cwd);
         self
     }
@@ -138,6 +142,11 @@ impl AgentSession {
     pub(crate) fn replace_transcript(&mut self, transcript: Option<Arc<Mutex<TranscriptWriter>>>) {
         self.close();
         self.transcript = transcript;
+    }
+
+    pub fn with_runtime_home(mut self, home: PathBuf) -> Self {
+        self.runtime_home = home;
+        self
     }
 
     pub fn with_history_loader(self, loader: Box<dyn Fn() -> Vec<Message> + Send>) -> Self {
@@ -267,7 +276,7 @@ impl AgentSession {
                 .rposition(|message| message.role == "user")
                 .is_some_and(|index| index > 0)
             {
-                self.notify_activity("压缩上下文");
+                self.notify_activity("compacting");
                 self.refresh_request_capabilities()?;
             }
             let changed = self.compact_now("manual");
@@ -302,8 +311,15 @@ impl AgentSession {
         let analyzer = Arc::new(move |path: &Path, prompt: &str| {
             analyze_image(&analyzer_config, path, prompt)
         });
-        let mut context =
-            ToolContext::new(Arc::clone(&self.config), cwd).with_image_analyzer(analyzer);
+        let mut context = ToolContext::new(Arc::clone(&self.config), cwd)
+            .with_runtime_home(self.runtime_home.clone())
+            .with_scope(
+                self.transcript_metadata
+                    .get("session_key")
+                    .cloned()
+                    .unwrap_or_else(|| "local".into()),
+            )
+            .with_image_analyzer(analyzer);
         if let Some(sender) = &self.media_sender {
             context = context.with_media_sender(Arc::clone(sender));
         }
@@ -326,10 +342,7 @@ impl AgentSession {
             &skill_text,
             self.messages.len().saturating_sub(1),
         );
-        let mut tools = tool_specs_for_config(&self.config);
-        if let Some(extension) = &self.direct_tools {
-            tools.extend(extension.specs());
-        }
+        let tools = tool_specs_for_config(&self.config);
         let steering = Arc::clone(&self.steering);
         steering.set_turn_active(true);
         let _turn_guard = TurnGuard { steering };
@@ -337,10 +350,7 @@ impl AgentSession {
     }
 
     fn refresh_request_capabilities(&mut self) -> Result<(), String> {
-        let home = self
-            .working_directory
-            .clone()
-            .unwrap_or_else(crate::config::colibri_home);
+        let home = self.runtime_home.clone();
         self.request_capabilities = self
             .model
             .lock()
@@ -363,7 +373,14 @@ impl AgentSession {
         tools: &[serde_json::Value],
         context: &ToolContext,
     ) -> Result<AgentResponse, String> {
+        let mut completion_reminded = false;
         loop {
+            let mut active_tools = tools.to_vec();
+            if let Some(extension) = &self.direct_tools {
+                active_tools.extend(extension.specs());
+            }
+            let tools = active_tools.as_slice();
+            self.notify_activity("thinking");
             let latest_memory = MemoryContext::new(Arc::clone(&self.config)).load()?;
             let (latest_skills, _, _) = skill_catalog(context);
             self.sync_runtime_context(&latest_memory.text, &latest_skills, self.messages.len());
@@ -403,10 +420,7 @@ impl AgentSession {
                             && !overflow_retried =>
                     {
                         overflow_retried = true;
-                        let home = self
-                            .working_directory
-                            .clone()
-                            .unwrap_or_else(crate::config::colibri_home);
+                        let home = self.runtime_home.clone();
                         if let Ok(mut model) = self.model.lock() {
                             model.invalidate_capabilities(&home);
                         }
@@ -448,6 +462,22 @@ impl AgentSession {
                 if let Some(steered) = self.steering.drain_one() {
                     self.apply_steering(&steered, 0);
                     continue;
+                }
+                #[cfg(unix)]
+                if let Some(pending) = crate::tasks::incomplete(context) {
+                    if !completion_reminded {
+                        completion_reminded = true;
+                        self.messages.push(Message::new("user", &pending));
+                        self.write_transcript(
+                            "task_continuation",
+                            serde_json::json!({"text":pending}),
+                        );
+                        continue;
+                    }
+                    return Ok(AgentResponse {
+                        text: format!("任务尚未完成。\n{assistant_text}"),
+                        error_type: Some("task_incomplete".into()),
+                    });
                 }
                 return Ok(AgentResponse {
                     text: assistant_text,
@@ -496,6 +526,15 @@ impl AgentSession {
 
     fn execute_tool_call(&mut self, call: &ToolCall, context: &ToolContext) -> Result<(), String> {
         let execution_arguments = string_arguments(&call.arguments);
+        #[cfg(unix)]
+        let task_id = crate::tasks::active_id(context);
+        self.notify_activity(match call.name.as_str() {
+            "shell.run" => "running_command",
+            "shell.poll" => "waiting_command",
+            name if name.starts_with("task.") => "planning_task",
+            name if name.starts_with("files.") => "working_files",
+            _ => "calling_tool",
+        });
         self.write_transcript(
             "tool_call",
             serde_json::json!({"id":call.id,"name":call.name,"arguments":call.arguments}),
@@ -506,9 +545,51 @@ impl AgentSession {
             .and_then(|extension| extension.run(call, context));
         let mut result = match extension_result {
             Some(result) => result,
-            None => run_tool_map(&call.name, &execution_arguments, context)?,
+            None => run_tool_map(&call.name, &execution_arguments, context)
+                .unwrap_or_else(|e| ToolResult::error("tool_error", e)),
         };
         crate::secrets::redact_tool_output(&self.config, &mut result.text);
+        #[cfg(unix)]
+        if let Some(id) = task_id {
+            match crate::tasks::record(context, &id, call, &result) {
+                Ok(Some(evidence)) => {
+                    result.text = format!("evidence_id={evidence}\n{}", result.text)
+                }
+                Err(error) => {
+                    result.text += &format!("\nTask evidence could not be saved: {error}")
+                }
+                _ => {}
+            }
+        }
+        #[cfg(unix)]
+        if result.ok && call.name.starts_with("task.") && call.name != "task.inspect" {
+            if let Ok(state) = crate::tasks::snapshot(context) {
+                let mut text = state.to_string();
+                crate::secrets::redact_tool_output(&self.config, &mut text);
+                self.write_transcript("task_state", serde_json::json!({"state":serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default()}));
+            }
+        }
+        if !result.ok {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            call.name.hash(&mut hash);
+            serde_json::to_string(&call.arguments)
+                .unwrap_or_default()
+                .hash(&mut hash);
+            result.error_type.hash(&mut hash);
+            let key = hash.finish();
+            let count = self
+                .last_failure
+                .filter(|(old, _)| *old == key)
+                .map(|(_, n)| n + 1)
+                .unwrap_or(1);
+            self.last_failure = Some((key, count));
+            if count == 3 {
+                result.text += "\nThe same call has failed three times. Inspect the error and change the approach; do not repeat it unchanged. Record a concrete blocker if external input is required.";
+            }
+        } else {
+            self.last_failure = None;
+        }
         let result = self.send_media_result_if_needed(result);
         let content = if result.ok {
             result.text

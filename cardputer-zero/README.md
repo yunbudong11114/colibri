@@ -4,10 +4,19 @@
 
 ## 安装和使用
 
+Debian 包名、终端命令均为 `colibri`，显示名为 **Colibri**。程序安装到 `/usr/bin/colibri`，私有 worker 和语音模型位于 `/usr/lib/colibri/`，字体与词库位于 `/usr/share/colibri/`，启动器入口为 `colibri.desktop`。配置仍使用 `~/.colibri/`。
+
+运行 `colibri version`（或 `colibri --version`）查看编译版本；`colibri help`（或 `colibri --help`）查看命令用法。这些命令无需有效配置，也不会启动 Agent。
+
+App、REPL、gateway 启动时共用 Rust memory 初始化：开启记忆后，在当前 `memory.root` 下补齐默认文件，已有内容不覆盖，不依赖 API Key 或首条消息。关闭记忆以及运行版本、帮助、状态查询时，不创建 memory。初始化失败会明确提示；可在设置里修正目录。
+
+微信登录使用 `colibri auth weixin`：普通终端显示紧凑半块二维码；掌机原生 CLI 会临时打开小屏扫码页，扫码完成或按 Esc 取消后回到 CLI。无需添加配置。原始登录链接不再默认输出，二维码仍是临时登录凭据，请勿公开分享。
+
+
 在 Cardputer Zero 的 Debian 13（ARM64）上安装 release 包：
 
 ```sh
-sudo apt install ./Colibri_0.1.75_m5stack1_arm64.deb
+sudo apt install ./Colibri_0.2.1_m5stack1_arm64.deb
 ```
 
 从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
@@ -29,6 +38,10 @@ sudo apt install ./Colibri_0.1.75_m5stack1_arm64.deb
 当前发行仅提供离线语音，使用 Sherpa-NCNN 小型中英双语 Zipformer，无需网络或密钥。API 转写入口及配置暂不释出，旧的语音服务配置不会触发在线回退。模型缺失时会明确提示。转写时输入框显示三个依次跳动的圆点，中英混说与字母缩写可能需要在草稿里修正。
 
 **终端 REPL**使用 `colibri --repl`。支持 `/new`、`/voice`、`/set KEY VALUE`、`/mcp` 和 `/quit`。图形界面的聊天和记忆编辑支持离线连续全拼，例如输入 `nihao` 后选「你好」，终端由终端输入法提供中文输入。
+
+## 自动熄屏
+
+应用沿用系统 `Settings → Screen → DarkTime`，未设置时默认 30 秒，0 表示关闭自动熄屏。Colibri 不提供额外配置项。首次按键只唤醒屏幕，松开后再操作；熄屏期间 Agent、网关和转写继续运行。唤醒或正常退出恢复原亮度，不修改系统亮度设置。
 
 ## 图片理解
 

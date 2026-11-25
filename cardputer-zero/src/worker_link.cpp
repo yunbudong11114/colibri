@@ -72,20 +72,21 @@ std::vector<json> WorkerLink::receive() {
     std::vector<json> messages;
     if (output_ < 0) return messages;
     char buffer[8192];
-    ssize_t count;
-    while ((count = read(output_, buffer, sizeof(buffer))) > 0) {
-        pending_.append(buffer, count);
-    }
-    std::size_t newline;
-    while ((newline = pending_.find('\n')) != std::string::npos) {
-        auto message = json::parse(pending_.substr(0, newline), nullptr, false);
-        pending_.erase(0, newline + 1);
-        if (message.is_object()) messages.push_back(std::move(message));
-    }
-    if (!count) {
-        close(output_);
-        output_ = -1;
-        messages.push_back({{"type", "error"}, {"text", "运行时已退出"}});
+    constexpr std::size_t read_budget = 64 * 1024;
+    for (std::size_t received = 0; received < read_budget;) {
+        const auto count = read(output_, buffer, std::min(sizeof(buffer), read_budget - received));
+        if (count > 0) {
+            received += static_cast<std::size_t>(count);
+            decoder_.feed(std::string_view(buffer, count), messages);
+        } else if (count < 0 && errno == EINTR) continue;
+        else {
+            if (!count) {
+                close(output_);
+                output_ = -1;
+                messages.push_back({{"type", "error"}, {"text", "运行时已退出"}});
+            }
+            break;
+        }
     }
     return messages;
 }

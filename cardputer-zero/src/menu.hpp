@@ -19,10 +19,10 @@ inline const nlohmann::json SettingLabels{
     {"memory.enabled", "启用长期记忆"}, {"memory.root", "记忆目录"},
     {"mcp.servers", "MCP · 服务器 JSON"},
 };
-enum class MenuAction { Catalog, Settings, Compact, Clear, Shortcuts, Quit };
+enum class MenuAction { Task, Catalog, Settings, Compact, Clear, Shortcuts, Quit };
 struct MenuEntry { const char* label; MenuAction action; };
 inline constexpr MenuEntry MainMenu[]{
-    {"MCP 与技能", MenuAction::Catalog}, {"设置", MenuAction::Settings},
+    {"任务进度", MenuAction::Task}, {"MCP 与技能", MenuAction::Catalog}, {"设置", MenuAction::Settings},
     {"压缩上下文", MenuAction::Compact}, {"清理屏幕", MenuAction::Clear},
     {"快捷键", MenuAction::Shortcuts}, {"退出 Colibri", MenuAction::Quit},
 };
@@ -30,6 +30,7 @@ inline const std::vector<std::string> CategoryNames{"模型", "图片理解", "�
 inline const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "web_search.", "session.", "memory.", "mcp.", "display."};
 inline constexpr std::size_t MemoryCategory = 4;
 inline constexpr std::size_t DisplayCategory = 6;
-inline constexpr std::size_t SettingsMenuIndex = 1;
-inline constexpr std::size_t CatalogMenuIndex = 0;
+inline constexpr std::size_t ShortcutsMenuIndex = 5;
+inline constexpr std::size_t SettingsMenuIndex = 2;
+inline constexpr std::size_t CatalogMenuIndex = 1;
 } // namespace colibri_ui

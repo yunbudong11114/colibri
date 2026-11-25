@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 const VERSION: &str = "2025-06-18";
@@ -307,7 +307,7 @@ impl Connection {
             "initialize",
             json!({
                 "protocolVersion":VERSION,"capabilities":{},
-                "clientInfo":{"name":"colibri-cardputer","version":"0.1"}
+                "clientInfo":{"name":"colibri","version":env!("CARGO_PKG_VERSION")}
             }),
         )?;
         let version = result["protocolVersion"]
@@ -398,6 +398,7 @@ pub fn operation(
 #[derive(Default)]
 pub struct Extensions {
     tools: Vec<(Server, String, Value)>,
+    exposed: Mutex<Vec<usize>>,
 }
 
 impl Extensions {
@@ -426,10 +427,77 @@ impl Extensions {
 
 impl SessionToolExtension for Extensions {
     fn specs(&self) -> Vec<Value> {
-        self.tools.iter().map(|(_, _, spec)| spec.clone()).collect()
+        if self.tools.len() <= 20 {
+            return self.tools.iter().map(|(_, _, spec)| spec.clone()).collect();
+        }
+        let mut specs = vec![
+            json!({"type":"function","function":{"name":"mcp.search","description":"Find configured MCP tools by name or description. Matching schemas become callable in the next step. This is discovery, not an access restriction.","parameters":{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":5}},"required":["query"]}}}),
+        ];
+        if let Ok(indices) = self.exposed.lock() {
+            let mut stable = indices.clone();
+            stable.sort_unstable();
+            for index in stable {
+                specs.push(self.tools[index].2.clone());
+            }
+        }
+        specs
     }
 
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Option<ToolResult> {
+        if call.name == "mcp.search" {
+            let query = call
+                .arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if query.is_empty() {
+                return Some(ToolResult::error(
+                    "invalid_arguments",
+                    "Provide a search query",
+                ));
+            }
+            let limit = call
+                .arguments
+                .get("max_results")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .clamp(1, 5) as usize;
+            let mut matches = self
+                .tools
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (_, _, s))| {
+                    let name = s["function"]["name"].as_str().unwrap_or("").to_lowercase();
+                    let description = s["function"]["description"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let score = query
+                        .split_whitespace()
+                        .filter(|q| name.contains(q) || description.contains(q))
+                        .count();
+                    (score > 0).then_some((i, score))
+                })
+                .collect::<Vec<_>>();
+            matches.sort_by_key(|(index, score)| (std::cmp::Reverse(*score), *index));
+            matches.truncate(limit);
+            if let Ok(mut indices) = self.exposed.lock() {
+                for &(i, _) in &matches {
+                    indices.retain(|j| *j != i);
+                    indices.push(i);
+                }
+                while indices.len() > 12 {
+                    indices.remove(0);
+                }
+            }
+            let tools = matches
+                .into_iter()
+                .map(|(i, _)| self.tools[i].2["function"].clone())
+                .collect::<Vec<_>>();
+            return Some(ToolResult::ok(json!({"tools":tools,"note":"These exact names and schemas are available on the next request."}).to_string()));
+        }
         if !call.name.starts_with("mcp.") {
             return None;
         }
@@ -463,5 +531,36 @@ impl SessionToolExtension for Extensions {
         };
         output.truncated = text != raw;
         Some(output)
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    fn extension(count: usize) -> Extensions {
+        let server: Server =
+            serde_json::from_value(json!({"name":"test","command":"unused"})).unwrap();
+        Extensions {tools:(0..count).map(|i|(server.clone(),format!("tool{i}"),json!({"type":"function","function":{"name":format!("mcp.test.tool{i}"),"description":format!("unique_{i}_ operation"),"parameters":{"type":"object"}}}))).collect(),..Default::default()}
+    }
+    #[test]
+    fn small_catalog_direct_and_large_catalog_bounded_stable() {
+        assert_eq!(extension(20).specs().len(), 20);
+        let e = extension(30);
+        assert_eq!(e.specs().len(), 1);
+        let context = ToolContext::new(crate::config::AgentConfig::default(), std::env::temp_dir());
+        for i in 0..30 {
+            let call = ToolCall {
+                id: "search".into(),
+                name: "mcp.search".into(),
+                arguments: serde_json::from_value(json!({"query":format!("unique_{i}_")})).unwrap(),
+            };
+            let result = e.run(&call, &context).unwrap();
+            assert!(result.ok);
+            let v: Value = serde_json::from_str(&result.text).unwrap();
+            assert_eq!(v["tools"].as_array().unwrap().len(), 1);
+            assert!(e.specs().len() <= 13);
+        }
+        assert_eq!(e.specs(), e.specs());
+        assert_eq!(e.exposed.lock().unwrap()[0], 18);
     }
 }

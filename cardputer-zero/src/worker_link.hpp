@@ -1,5 +1,5 @@
 #pragma once
-#include <nlohmann/json.hpp>
+#include "json_line_decoder.hpp"
 #include <string>
 #include <sys/types.h>
 #include <vector>
@@ -15,5 +15,5 @@ private:
     pid_t child_ = -1;
     int input_ = -1;
     int output_ = -1;
-    std::string pending_;
+    JsonLineDecoder decoder_;
 };

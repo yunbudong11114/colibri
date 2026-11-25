@@ -122,6 +122,31 @@ fn run_cli_raw(args: &[String], stdin: &str) -> (i32, String, String) {
 }
 
 #[test]
+fn cli_information_commands_do_not_require_valid_config() {
+    let temp = temp_dir("cli-information");
+    let config = temp.join("invalid.toml");
+    fs::write(&config, "not = [valid TOML").unwrap();
+    for path in [config, temp.join("missing.toml")] {
+        for command in ["version", "--version", "help", "--help"] {
+            let args = vec![
+                "--config".to_string(),
+                path.display().to_string(),
+                command.to_string(),
+            ];
+            let (code, stdout, stderr) = run_cli_raw(&args, "");
+            assert_eq!(code, 0, "{command}: {stderr}");
+            assert!(stderr.is_empty());
+            if command.contains("version") {
+                assert_eq!(stdout, format!("Colibri {}\n", env!("CARGO_PKG_VERSION")));
+            } else {
+                assert!(stdout.contains("auth weixin"));
+                assert!(stdout.contains("--config"));
+            }
+        }
+    }
+}
+
+#[test]
 fn default_config_matches_python_runtime_defaults() {
     let config = AgentConfig::default();
 
@@ -1250,6 +1275,10 @@ fn session_uses_reported_usage_as_next_request_anchor_like_python() {
         }),
     );
 
+    let runtime = temp_dir("usage-anchor-runtime");
+    session = session
+        .with_working_directory(runtime.clone())
+        .with_runtime_home(runtime);
     session.submit(&"u".repeat(100)).unwrap();
     session.submit(&"v".repeat(100)).unwrap();
 
@@ -2945,7 +2974,9 @@ poll_timeout_seconds = 20
 
     assert_eq!(code, 0, "stderr={stderr}");
     assert!(stdout.contains("Weixin auth succeeded."));
-    assert!(stdout.contains("██"));
+    assert!(stdout.contains("▀"));
+    assert!(!stdout.contains("QR payload:"));
+    assert!(!stdout.contains("qr-payload"));
     assert!(!stdout.contains("secret-token"));
     let saved = fs::read_to_string(config_path).unwrap();
     assert!(saved.contains("[channels.weixin]"));
@@ -3019,7 +3050,7 @@ auth_timeout_seconds = 3
     let mut saw_qr_before_confirmation = false;
     while Instant::now() < deadline {
         let output = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
-        if output.contains("QR payload:") {
+        if output.contains("▀") {
             saw_qr_before_confirmation = true;
             qr_printed.store(true, Ordering::SeqCst);
             break;
@@ -3043,13 +3074,14 @@ fn terminal_qr_outputs_block_qr_for_weixin_payload() {
     )
     .unwrap();
 
-    assert!(rendered.contains("██"));
-    assert_eq!(rendered.lines().count(), 41);
+    assert!(rendered.contains("▀"));
+    assert_eq!(rendered.lines().count(), 20);
 }
 
 #[test]
 fn terminal_qr_returns_none_for_large_payload() {
-    assert!(render_terminal_qr(&"x".repeat(200)).is_none());
+    assert!(render_terminal_qr(&"x".repeat(200)).is_some());
+    assert!(render_terminal_qr(&"x".repeat(5000)).is_none());
 }
 
 #[test]
@@ -5134,7 +5166,7 @@ fn direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate() {
             system: &str,
             limits: &ModelLimits,
         ) -> Result<colibri_rust::messages::ModelResponse, String> {
-            assert!(system.contains("wait for their explicit approval"));
+            assert!(system.contains("wait for explicit approval"));
             PermissionRoundModel.complete(messages, tools, system, limits)
         }
     }
