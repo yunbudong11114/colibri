@@ -122,7 +122,6 @@ pub struct GatewaySessionCache {
     config: Arc<AgentConfig>,
     model: Arc<Mutex<Box<dyn ModelClient>>>,
     transcript: Option<Arc<Mutex<TranscriptWriter>>>,
-    history_loader: Option<Arc<dyn Fn() -> Vec<crate::messages::Message> + Send + Sync>>,
     max_sessions: usize,
     idle_seconds: u64,
     entries: BTreeMap<String, GatewaySessionEntry>,
@@ -167,22 +166,12 @@ impl GatewaySessionCache {
         } else {
             None
         };
-        let history_loader = if config.session.restore_transcript {
-            let session_config = config.session.clone();
-            Some(
-                Arc::new(move || TranscriptHistoryLoader::default(&session_config).load())
-                    as Arc<dyn Fn() -> Vec<crate::messages::Message> + Send + Sync>,
-            )
-        } else {
-            None
-        };
         Ok(Self {
             max_sessions: config.gateway.max_sessions.max(1),
             idle_seconds: config.gateway.session_idle_seconds,
             config,
             model,
             transcript,
-            history_loader,
             entries: BTreeMap::new(),
             steer_handles: BTreeMap::new(),
             runtime_reloader,
@@ -243,15 +232,22 @@ impl GatewaySessionCache {
         while self.entries.len() >= self.max_sessions {
             self.evict_oldest();
         }
+        let mut metadata = metadata;
+        metadata
+            .entry("session_key".to_string())
+            .or_insert_with(|| key.to_string());
         let mut session = AgentSession::from_shared(
             Arc::clone(&self.config),
             Arc::clone(&self.model),
             self.transcript.as_ref().map(Arc::clone),
             metadata,
         );
-        if let Some(loader) = &self.history_loader {
-            let loader = Arc::clone(loader);
-            session = session.with_history_loader(Box::new(move || loader()));
+        if self.config.session.restore_transcript {
+            let policy = self.config.session.clone();
+            let source = key.to_string();
+            session = session.with_model_history_loader(Box::new(move || {
+                TranscriptHistoryLoader::default(&policy).load_model(&source)
+            }));
         }
         self.steer_handles
             .insert(key.to_string(), session.steer_handle());
@@ -309,15 +305,22 @@ impl GatewaySessionCache {
         while self.entries.len() >= self.max_sessions {
             self.evict_oldest();
         }
+        let mut metadata = metadata;
+        metadata
+            .entry("session_key".to_string())
+            .or_insert_with(|| key.to_string());
         let mut session = AgentSession::from_shared(
             Arc::clone(&self.config),
             Arc::clone(&self.model),
             self.transcript.as_ref().map(Arc::clone),
             metadata,
         );
-        if let Some(loader) = &self.history_loader {
-            let loader = Arc::clone(loader);
-            session = session.with_history_loader(Box::new(move || loader()));
+        if self.config.session.restore_transcript {
+            let policy = self.config.session.clone();
+            let source = key.to_string();
+            session = session.with_model_history_loader(Box::new(move || {
+                TranscriptHistoryLoader::default(&policy).load_model(&source)
+            }));
         }
         session.set_media_sender(media_sender);
         self.steer_handles

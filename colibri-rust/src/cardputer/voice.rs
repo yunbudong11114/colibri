@@ -1,5 +1,5 @@
 use crate::process_output::{run_bounded_command, CommandRunError};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -7,11 +7,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use super::text;
 use crate::config_io::Scratch;
-use crate::http::http_endpoint as endpoint;
+#[cfg(feature = "api-speech")]
+mod api;
 
 const NCNN: [&str; 7] = [
     "tokens.txt",
@@ -29,6 +29,7 @@ const MAX_FRAMES: usize = 60 * SAMPLE_RATE as usize;
 enum Backend {
     Ncnn(PathBuf),
     Onnx(PathBuf),
+    #[cfg(feature = "api-speech")]
     Online {
         url: String,
         key: String,
@@ -37,54 +38,34 @@ enum Backend {
 }
 
 impl Backend {
-    fn select(values: &Map<String, Value>) -> Result<Self, String> {
-        let mode = text(values, "speech.backend");
-        let service = text(values, "speech.base_url");
-        if mode == "offline" || (mode == "auto" && service.is_empty()) {
-            let directory = env::var_os("COLIBRI_OFFLINE_SPEECH")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|p| p.join("offline-speech")))
-                })
-                .unwrap_or_default();
-            if directory.join("sherpa-ncnn").is_file()
-                && NCNN.iter().all(|f| directory.join(f).is_file())
-            {
-                return Ok(Self::Ncnn(directory));
-            }
-            if ONNX.iter().all(|f| directory.join(f).is_file()) {
-                return Ok(Self::Onnx(directory));
-            }
-            if mode == "offline" {
-                return Err("离线语音模型未安装，请安装包含语音模型的 colibri 包。".into());
-            }
+    fn select() -> Result<Self, String> {
+        // Shipping builds never inspect online credentials or fall back to a remote API.
+        let directory = env::var_os("COLIBRI_OFFLINE_SPEECH")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.join("offline-speech")))
+            })
+            .unwrap_or_default();
+        Self::offline(directory)
+    }
+
+    fn offline(directory: PathBuf) -> Result<Self, String> {
+        if directory.join("sherpa-ncnn").is_file()
+            && NCNN.iter().all(|f| directory.join(f).is_file())
+        {
+            return Ok(Self::Ncnn(directory));
         }
-        let url = if service.is_empty() {
-            text(values, "model.base_url")
-        } else {
-            service
-        };
-        let mut key = text(values, "speech.api_key").to_owned();
-        if key.is_empty() && service.is_empty() {
-            key = text(values, "model.api_key").to_owned();
-            if key.is_empty() {
-                key = env::var("COLIBRI_API_KEY").unwrap_or_default();
-            }
+        if ONNX.iter().all(|f| directory.join(f).is_file()) {
+            return Ok(Self::Onnx(directory));
         }
-        if endpoint(url)?.host_str() == Some("api.openai.com") && key.is_empty() {
-            return Err("缺少语音 API 密钥。请在设置中填写语音 API。".into());
-        }
-        Ok(Self::Online {
-            url: url.trim_end_matches('/').into(),
-            key,
-            model: text(values, "speech.model").into(),
-        })
+        Err("离线语音模型未安装，请安装包含语音模型的 Colibri 包。".into())
     }
 
     fn label(&self) -> &'static str {
         match self {
+            #[cfg(feature = "api-speech")]
             Self::Online { .. } => "online",
             _ => "offline",
         }
@@ -92,7 +73,8 @@ impl Backend {
 
     fn transcribe(&self, recording: &Path) -> Result<String, String> {
         let (root, mut command, ncnn) = match self {
-            Self::Online { url, key, model } => return online(url, key, model, recording),
+            #[cfg(feature = "api-speech")]
+            Self::Online { url, key, model } => return api::transcribe(url, key, model, recording),
             Self::Ncnn(root) => {
                 let mut command = Command::new(root.join("sherpa-ncnn"));
                 command
@@ -182,8 +164,8 @@ pub struct Recording {
 }
 
 impl Recording {
-    pub fn start(values: &Map<String, Value>) -> Result<Self, String> {
-        let backend = Backend::select(values)?;
+    pub fn start() -> Result<Self, String> {
+        let backend = Backend::select()?;
         let scratch = Scratch::new(&env::temp_dir())
             .or_else(|_| Scratch::new(Path::new("/tmp")))
             .map_err(|_| "无法创建录音临时目录")?;
@@ -386,49 +368,18 @@ fn normalize_wave(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(wave)
 }
 
-fn online(url: &str, key: &str, model: &str, path: &Path) -> Result<String, String> {
-    let boundary = format!(
-        "colibri-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let mut data = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\nContent-Type: audio/wav\r\n\r\n").into_bytes();
-    data.extend(fs::read(path).map_err(|e| e.to_string())?);
-    data.extend(format!("\r\n--{boundary}--\r\n").bytes());
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(5))
-        .build();
-    let address = format!("{url}/audio/transcriptions");
-    let mut request = agent.post(&address).timeout(Duration::from_secs(20)).set(
-        "Content-Type",
-        &format!("multipart/form-data; boundary={boundary}"),
-    );
-    if !key.is_empty() {
-        request = request.set("Authorization", &format!("Bearer {key}"));
-    }
-    let response = request.send_bytes(&data).map_err(|error| match error {
-        ureq::Error::Status(401 | 403, _) => "转写服务拒绝访问，请检查密钥和模型权限。".into(),
-        ureq::Error::Status(404 | 405, _) => "转写接口不可用，请检查 API 地址和模型。".into(),
-        ureq::Error::Status(status, _) => format!("转写服务返回 HTTP {status}。"),
-        _ => "连接转写服务失败或超时。".into(),
-    })?;
-    if !(200..300).contains(&response.status()) {
-        return Err("转写接口返回非成功状态。".into());
-    }
-    let value: Value = serde_json::from_reader(response.into_reader().take(256 * 1024))
-        .map_err(|_| "转写接口返回格式有误。")?;
-    value["text"]
-        .as_str()
-        .map(|text| text.trim().to_owned())
-        .ok_or_else(|| "转写接口返回格式有误。".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_local_engine_returns_an_offline_error() {
+        let missing =
+            env::temp_dir().join(format!("colibri-missing-speech-{}", std::process::id()));
+        let error = Backend::offline(missing).err().expect("no local engine");
+        assert!(error.contains("离线语音模型未安装"));
+        assert!(!error.contains("API"));
+    }
 
     #[test]
     fn nas_requires_a_storage_context() {

@@ -207,8 +207,8 @@ fn run_inner<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
                 }),
             );
             if restore {
-                session = session.with_history_loader(Box::new(move || {
-                    TranscriptHistoryLoader::default(&session_config).load()
+                session = session.with_model_history_loader(Box::new(move || {
+                    TranscriptHistoryLoader::default(&session_config).load_model("local")
                 }));
             }
             let result = (|| -> Result<i32, String> {
@@ -373,8 +373,8 @@ fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
     );
     if config.session.restore_transcript {
         let session_config = config.session.clone();
-        session = session.with_history_loader(Box::new(move || {
-            TranscriptHistoryLoader::default(&session_config).load()
+        session = session.with_model_history_loader(Box::new(move || {
+            TranscriptHistoryLoader::default(&session_config).load_model("local")
         }));
     }
     let result = repl_loop(
@@ -495,6 +495,16 @@ fn repl_loop<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
 }
 
 fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<String> {
+    let mut metadata_config = config.model.clone();
+    if metadata_config.api_key.is_empty() {
+        metadata_config.api_key = std::env::var("COLIBRI_API_KEY").unwrap_or_default();
+    }
+    #[cfg(unix)]
+    let capabilities =
+        crate::model_metadata::peek(&metadata_config, &crate::config::colibri_home());
+    #[cfg(not(unix))]
+    let capabilities = crate::model_capabilities::resolve(&metadata_config);
+
     vec![
         "colibri diagnostics".to_string(),
         format!("rust=unknown platform={}", std::env::consts::OS),
@@ -512,7 +522,11 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
         format!(
             "memory_root={} exists={}",
             config.memory.root.display(),
-            if config.memory.root.exists() { "true" } else { "false" }
+            if config.memory.root.exists() {
+                "true"
+            } else {
+                "false"
+            }
         ),
         format!(
             "skills_dir={} skills_found={}",
@@ -532,11 +546,8 @@ fn diagnostics(config: &AgentConfig, config_path: Option<&PathBuf>) -> Vec<Strin
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         format!(
-            "trigger_message_limit={} recent_message_limit={} input_context_tokens={} summary_max_chars={}",
-            config.session.trigger_message_limit,
-            config.session.recent_message_limit,
-            config.model.input_context_tokens,
-            config.session.summary_max_chars
+            "compaction=auto input_context_tokens={} max_output_tokens={} capacity_source={}",
+            capabilities.context_window, capabilities.max_output_tokens, capabilities.source
         ),
     ]
 }

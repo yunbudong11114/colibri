@@ -150,7 +150,7 @@ impl Settings {
         }
         if key.ends_with(".base_url") || key.ends_with(".endpoint") {
             let address = value.as_str().unwrap_or_default();
-            if !address.is_empty() || !matches!(key, "vision.base_url" | "speech.base_url") {
+            if !address.is_empty() || key != "vision.base_url" {
                 endpoint(address)?;
             }
         }
@@ -160,9 +160,6 @@ impl Settings {
             }
             "model.provider" if !matches!(value.as_str(), Some("fake" | "openai_compatible")) => {
                 return Err("模型提供方无效".into())
-            }
-            "speech.backend" if !matches!(value.as_str(), Some("auto" | "offline" | "online")) => {
-                return Err("语音转写方式无效".into())
             }
             "web_search.engine" if !matches!(value.as_str(), Some("baidu" | "aliyun_mcp")) => {
                 return Err("搜索引擎无效".into())
@@ -175,7 +172,33 @@ impl Settings {
             }
             _ => {}
         }
-        self.update(|stored| set_field(stored, key, &value))
+        self.update(|stored| {
+            if key == "session.max_context_memory_mib" && value.as_u64() == Some(0) {
+                if let Some(table) = stored
+                    .get_mut("session")
+                    .and_then(|item| item.as_table_mut())
+                {
+                    table.remove("max_context_memory_mib");
+                }
+                return Ok(());
+            }
+            if matches!(key, "model.provider" | "model.base_url" | "model.model") {
+                let current = parse_document(stored)?;
+                let previous = match key {
+                    "model.provider" => &current.model.provider,
+                    "model.base_url" => &current.model.base_url,
+                    _ => &current.model.model,
+                };
+                if value.as_str() != Some(previous.as_str()) {
+                    if let Some(model) =
+                        stored.get_mut("model").and_then(|item| item.as_table_mut())
+                    {
+                        model.remove("input_context_tokens");
+                    }
+                }
+            }
+            set_field(stored, key, &value)
+        })
     }
 
     pub fn save_model(&self, base: &str, model: &str, key: Option<&str>) -> Result<(), String> {
@@ -190,6 +213,11 @@ impl Settings {
         self.update(|stored| {
             let config = parse_document(stored)?;
             let same = config.model.base_url.trim_end_matches('/') == base;
+            if !same || config.model.model != model.trim() {
+                if let Some(table) = stored.get_mut("model").and_then(|item| item.as_table_mut()) {
+                    table.remove("input_context_tokens");
+                }
+            }
             let key = key
                 .map(str::trim)
                 .unwrap_or(if same { &config.model.api_key } else { "" });
@@ -261,10 +289,9 @@ fn menu_fields(config: &AgentConfig) -> Map<String, Value> {
         "vision.model":config.vision.model, "vision.base_url":config.vision.base_url,
         "vision.api_key":config.vision.api_key, "vision.timeout_seconds":config.vision.timeout_seconds,
         "vision.max_image_bytes":config.vision.max_image_bytes,
-        "speech.backend":config.speech.backend, "speech.base_url":config.speech.base_url,
-        "speech.model":config.speech.model, "speech.api_key":config.speech.api_key,
         "web_search.engine":config.web_search.engine, "web_search.endpoint":config.web_search.endpoint,
         "web_search.api_key":config.web_search.api_key, "session.transcript":config.session.transcript,
+        "session.max_context_memory_mib":config.session.max_context_memory_mib.unwrap_or(0),
         "session.restore_transcript":config.session.restore_transcript,
         "session.transcript_retention_days":config.session.transcript_retention_days,
         "session.transcript_max_total_bytes":config.session.transcript_max_total_bytes,

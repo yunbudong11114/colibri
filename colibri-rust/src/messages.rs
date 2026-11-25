@@ -27,11 +27,13 @@ impl MediaPart {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(default)]
     pub tool_call_id: Option<String>,
+    #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
 }
 
@@ -55,7 +57,7 @@ impl Message {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

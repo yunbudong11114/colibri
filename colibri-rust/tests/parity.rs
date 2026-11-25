@@ -221,7 +221,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "session_keeps_large_tool_result_text_for_model_context_like_python",
                 "context_pressure_warning_is_not_injected_for_large_model_input_like_python",
                 "session_falls_back_and_logs_compact_error_like_python",
-                "session_round_limit_text_matches_python",
+                "session_continues_past_32_tool_rounds_until_final_answer",
                 "session_uses_output_reserve_for_compaction_threshold_like_python",
                 "session_blocks_length_truncated_tool_call_and_asks_model_again_like_python",
                 "session_records_stop_reason_and_usage_in_transcript_like_python",
@@ -760,7 +760,10 @@ fn python_test_coverage_map_covers_all_unit_files() {
             entry.python_file
         );
         assert!(
-            matches!(entry.status, "covered" | "partial" | "intentional_difference"),
+            matches!(
+                entry.status,
+                "covered" | "partial" | "intentional_difference"
+            ),
             "uncovered parity status for {}",
             entry.python_file
         );
@@ -802,10 +805,16 @@ fn python_rust_cli_diagnostics_output_matches() {
     let mut python = run_python_cli(&fixture, &["diagnostics"]);
     let mut rust = run_rust_cli(&fixture, &["diagnostics"]);
     let rust_diagnostics = String::from_utf8(rust.stdout).unwrap();
-    assert!(rust_diagnostics.lines().any(|line| line == "execution=direct"));
-    rust.stdout = rust_diagnostics.replace("execution=direct\n", "").into_bytes();
-    python.stdout = String::from_utf8(python.stdout).unwrap()
-        .replace("user_permissions=missing\n", "").into_bytes();
+    assert!(rust_diagnostics
+        .lines()
+        .any(|line| line == "execution=direct"));
+    rust.stdout = rust_diagnostics
+        .replace("execution=direct\n", "")
+        .into_bytes();
+    python.stdout = String::from_utf8(python.stdout)
+        .unwrap()
+        .replace("user_permissions=missing\n", "")
+        .into_bytes();
 
     assert_same_output("diagnostics", &python, &rust);
 }
@@ -1029,6 +1038,11 @@ fn normalize_cross_runtime_output(text: &str) -> String {
         .map(|line| {
             if line.starts_with("python=") || line.starts_with("rust=") {
                 "runtime=<normalized> platform=<normalized>".to_string()
+            } else if line.starts_with("trigger_message_limit=")
+                || line.starts_with("compaction=auto ")
+            {
+                // Rust now manages compaction automatically; compare shared diagnostics above.
+                "compaction=<runtime policy>".to_string()
             } else if let Some((prefix, _rss)) = line.split_once(" rss_kb=") {
                 format!("{prefix} rss_kb=<normalized>")
             } else {

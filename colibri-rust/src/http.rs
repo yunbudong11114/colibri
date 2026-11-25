@@ -43,6 +43,36 @@ pub fn request_json(
     })
 }
 
+/// Bounded metadata lookup. Redirects are disabled to keep route credentials on their origin.
+pub fn get_json_limited(
+    url: &str,
+    headers: &[(&str, String)],
+    timeout_seconds: u64,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let mut request = agent.get(url).timeout(Duration::from_secs(timeout_seconds));
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    let response = request
+        .call()
+        .map_err(|_| "metadata request failed".to_string())?;
+    if response.status() != 200 {
+        return Err("metadata endpoint did not return HTTP 200".into());
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "metadata response read failed".to_string())?;
+    if bytes.len() > max_bytes {
+        return Err("metadata response is too large".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "metadata response is not UTF-8".into())
+}
+
 pub fn request_binary(
     method: &str,
     url: &str,

@@ -10,6 +10,15 @@ use crate::time_context::user_text_without_time_context;
 const API_TOOL_NAME_MAX_LENGTH: usize = 64;
 
 pub trait ModelClient: Send {
+    fn invalidate_capabilities(&mut self, _home: &std::path::Path) {}
+
+    fn capabilities(
+        &mut self,
+        _home: &std::path::Path,
+    ) -> Option<crate::model_capabilities::ModelCapabilities> {
+        None
+    }
+
     fn complete(
         &mut self,
         messages: &[Message],
@@ -45,18 +54,26 @@ impl ModelClient for FakeModel {
         _system: &str,
         _limits: &ModelLimits,
     ) -> Result<ModelResponse, String> {
-        if let Some(tool_message) = messages.iter().rev().find(|message| message.role == "tool") {
+        // Runtime snapshots are context, not a new task. Scripted responses only
+        // consume tool results belonging to the current actual user turn.
+        let user_index = messages.iter().rposition(|message| {
+            message.role == "user"
+                && !message
+                    .content
+                    .starts_with("<system-reminder>\nCurrent runtime context.")
+        });
+        let turn = user_index
+            .map(|index| &messages[index..])
+            .unwrap_or(messages);
+        if let Some(tool_message) = turn.iter().rev().find(|message| message.role == "tool") {
             return Ok(ModelResponse {
                 text: format!("final: {}", tool_message.content),
                 tool_calls: Vec::new(),
                 ..ModelResponse::default()
             });
         }
-        let user_text = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user")
-            .map(|message| message.content.as_str())
+        let user_text = user_index
+            .map(|index| messages[index].content.as_str())
             .unwrap_or("");
         let user_text = user_text_without_time_context(user_text);
         if let Some(call) = scripted_tool_call(user_text) {
@@ -146,6 +163,21 @@ fn retry_delay_ms(base_ms: u64, retry_index: usize) -> u64 {
 }
 
 impl ModelClient for OpenAiCompatibleModel {
+    fn invalidate_capabilities(&mut self, home: &std::path::Path) {
+        #[cfg(unix)]
+        crate::model_metadata::invalidate(&self.config, home);
+    }
+
+    fn capabilities(
+        &mut self,
+        home: &std::path::Path,
+    ) -> Option<crate::model_capabilities::ModelCapabilities> {
+        #[cfg(unix)]
+        return Some(crate::model_metadata::resolve_online(&self.config, home));
+        #[cfg(not(unix))]
+        Some(crate::model_capabilities::resolve(&self.config))
+    }
+
     fn complete(
         &mut self,
         messages: &[Message],
@@ -233,7 +265,10 @@ fn model_failure_for_transport(message: String) -> ModelFailure {
 }
 
 pub(crate) fn model_key_required(url: &url::Url) -> bool {
-    matches!(url.host_str(), Some("api.openai.com" | "api.deepseek.com" | "openrouter.ai"))
+    matches!(
+        url.host_str(),
+        Some("api.openai.com" | "api.deepseek.com" | "openrouter.ai")
+    )
 }
 
 pub fn build_model(config: &ModelConfig) -> Result<Box<dyn ModelClient>, String> {
@@ -394,6 +429,7 @@ fn parse_usage(value: Option<&serde_json::Value>) -> Option<ModelUsage> {
         .get("input_tokens_details")
         .and_then(|value| value.as_object());
     let cache_read = first_nonnegative_usize([
+        usage.get("prompt_cache_hit_tokens"),
         prompt_details.and_then(|details| details.get("cached_tokens")),
         input_details.and_then(|details| details.get("cached_tokens")),
         usage.get("cache_read_input_tokens"),

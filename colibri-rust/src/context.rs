@@ -7,9 +7,9 @@ pub const COMPACT_SYSTEM_PROMPT: &str =
 const COMPACT_PROMPT: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n\
 - Do NOT use shell, file, memory, network, or any other tool.\n\
 - You already have all the context you need below.\n\
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\n\
+- Your entire response must be plain text inside one <summary> block.\n\n\
 Your task is to create a detailed summary of the conversation portion below for continuing an agent session on a small Linux device.\n\n\
-Before providing your final summary, wrap your analysis in <analysis> tags. Then provide a <summary> block with these sections:\n\n\
+Provide a concise <summary> block with these sections:\n\n\
 1. Primary Request and Intent\n\
 2. Key Technical Concepts\n\
 3. Files and Code Sections\n\
@@ -22,7 +22,7 @@ Before providing your final summary, wrap your analysis in <analysis> tags. Then
 Preserve user goals, decisions, file paths, commands, tool names, memory changes, device constraints, unresolved errors, and the latest concrete next step. Keep tool outputs concise and summarize metadata rather than copying large outputs.\n\n\
 Previous compacted summary:\n{existing_summary}\n\n\
 Conversation portion to compact:\n{conversation}\n\n\
-REMINDER: Do NOT call any tools. Respond with plain text only: an <analysis> block followed by a <summary> block.";
+REMINDER: Do NOT call any tools. Respond with plain text only inside a <summary> block.";
 
 pub fn summarize_messages(messages: &[Message], max_line_chars: usize) -> String {
     let tool_names = tool_names_by_id(messages);
@@ -55,14 +55,23 @@ pub fn summarize_messages(messages: &[Message], max_line_chars: usize) -> String
                 .unwrap_or("unknown");
             let status = tool_status(&message.content);
             lines.push(format!(
-                "tool {} {}: {} chars",
+                "tool {} {}: {}",
                 tool_name,
                 status,
-                message.content.chars().count()
+                bound_line(&message.content, max_line_chars)
             ));
         }
     }
-    lines.join("\n")
+    let mut output = String::new();
+    for line in lines {
+        if output.len() + line.len() > 24 * 1024 {
+            output.push_str("\n[Earlier evidence truncated to fit summary budget]");
+            break;
+        }
+        output.push_str(&line);
+        output.push('\n');
+    }
+    output.trim_end().to_string()
 }
 
 pub fn compact_prompt_message(existing_summary: &str, messages: &[Message]) -> Message {
@@ -220,73 +229,6 @@ pub fn estimate_completion_input_tokens(
     (byte_count + 3) / 4
 }
 
-pub fn round_limit_text(messages: &[Message], max_tool_rounds: usize, max_chars: usize) -> String {
-    let round_word = if max_tool_rounds == 1 {
-        "round"
-    } else {
-        "rounds"
-    };
-    let mut lines = vec![
-        format!(
-            "Tool round limit reached after {} {}.",
-            max_tool_rounds, round_word
-        ),
-        "The task may still be incomplete.".to_string(),
-    ];
-    let recent = recent_tool_summaries(messages, 4);
-    if !recent.is_empty() {
-        lines.push("Recent tool results:".to_string());
-        lines.extend(recent.into_iter().map(|item| format!("- {}", item)));
-    }
-    lines.push(
-        "You can continue the task, or increase session.max_tool_rounds if this is expected."
-            .to_string(),
-    );
-    lines.push(
-        "If the user says \"continue\", continue from this stopped state with targeted reads and do not claim the previous task was fully completed."
-            .to_string(),
-    );
-    bound_text_block(&lines.join("\n"), max_chars)
-}
-
-fn recent_tool_summaries(messages: &[Message], limit: usize) -> Vec<String> {
-    let tool_names = tool_names_by_id(messages);
-    let mut summaries = Vec::new();
-    for message in messages.iter().rev() {
-        if message.role != "tool" {
-            continue;
-        }
-        let tool_name = message
-            .tool_call_id
-            .as_deref()
-            .and_then(|id| tool_names.get(id).map(String::as_str))
-            .unwrap_or("unknown");
-        let mut text = message
-            .content
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if text.chars().count() > 120 {
-            text = text.chars().take(116).collect::<String>() + " ...";
-        }
-        summaries.push(format!("{}: {}", tool_name, text));
-        if summaries.len() >= limit {
-            break;
-        }
-    }
-    summaries.reverse();
-    summaries
-}
-
-fn bound_text_block(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let suffix = "\n...[truncated]";
-    let keep = max_chars.saturating_sub(suffix.chars().count());
-    text.chars().take(keep).collect::<String>() + suffix
-}
-
 fn tool_names_by_id(messages: &[Message]) -> std::collections::BTreeMap<String, String> {
     let mut names = std::collections::BTreeMap::new();
     for message in messages {
@@ -310,7 +252,13 @@ fn tool_status(content: &str) -> &str {
 }
 
 fn bound_line(text: &str, max_chars: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = text
+        .chars()
+        .take(max_chars.saturating_mul(4))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if normalized.chars().count() <= max_chars {
         return normalized;
     }

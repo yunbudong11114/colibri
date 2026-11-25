@@ -345,7 +345,14 @@ fn menu_migrates_to_the_native_config_and_retains_comments_and_gateway_settings(
     let shared = colibri_rust::config::AgentConfig::load(Some(&path)).unwrap();
     assert_eq!(shared.model.model, "current-menu-model");
     assert_eq!(shared.model.timeout_seconds, 22);
-    assert_eq!(shared.speech.backend, "offline");
+    assert!(!rows[0]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["key"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("speech.")));
     assert_eq!(shared.session.transcript_retention_days, 14);
     assert!(shared.channels_weixin.enabled);
     assert_eq!(shared.channels_weixin.allow_from, ["owner"]);
@@ -386,9 +393,12 @@ fn config_secrets_are_redacted_before_limits_and_model_context() {
         "[model]\nprovider = \"fake\"\napi_key = \"{secret}\"\n[channels.weixin]\ntoken = \"fixture-weixin-token-94\"\n"
     );
     fs::write(&path, content).unwrap();
-    let rows = pipe(&fixture.0, &[
-        json!({"type":"submit","text":format!("tool:files.read {}",json!({"path":path,"start_line":3,"end_line":3,"max_chars":24}))})
-    ]);
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"submit","text":format!("tool:files.read {}",json!({"path":path,"start_line":3,"end_line":3,"max_chars":24}))}),
+        ],
+    );
     let replies = serde_json::to_string(&rows).unwrap();
     assert!(replies.contains("<redacted>"));
     assert!(!replies.contains(secret));
@@ -398,4 +408,159 @@ fn config_secrets_are_redacted_before_limits_and_model_context() {
         assert!(!text.contains(secret));
         assert!(!text.contains("fixture-weixin-token-94"));
     }
+}
+
+#[test]
+fn changing_model_clears_capacity_override_but_key_refresh_preserves_it() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("config.toml");
+    fs::write(&path, "[model]\nprovider='openai_compatible'\nbase_url='http://127.0.0.1:9999/v1'\nmodel='old'\ninput_context_tokens=8192\n").unwrap();
+    let same = pipe(
+        &fixture.0,
+        &[json!({
+            "type":"save_model","base_url":"http://127.0.0.1:9999/v1","model":"old","api_key":"fixture"
+        })],
+    );
+    assert_eq!(same[0]["type"], "model_saved");
+    let value: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["model"]["input_context_tokens"].as_integer(),
+        Some(8192)
+    );
+    let changed = pipe(
+        &fixture.0,
+        &[json!({
+            "type":"save_model","base_url":"http://127.0.0.1:9999/v1","model":"new","api_key":"fixture"
+        })],
+    );
+    assert_eq!(changed[0]["type"], "model_saved");
+    let value: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(value["model"].get("input_context_tokens").is_none());
+}
+
+#[test]
+fn menu_can_set_and_clear_optional_context_budget() {
+    let fixture = Fixture::new();
+    let response = pipe(
+        &fixture.0,
+        &[json!({"type":"save","key":"session.max_context_memory_mib","value":"10"})],
+    );
+    assert_eq!(response[0]["type"], "saved");
+    let text = fs::read_to_string(fixture.0.join("config.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(
+        config["session"]["max_context_memory_mib"].as_integer(),
+        Some(10)
+    );
+    let response = pipe(
+        &fixture.0,
+        &[json!({"type":"save","key":"session.max_context_memory_mib","value":"0"})],
+    );
+    assert_eq!(response[0]["type"], "saved");
+    let text = fs::read_to_string(fixture.0.join("config.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert!(config["session"].get("max_context_memory_mib").is_none());
+}
+
+#[test]
+fn context_memory_budget_can_be_set_and_cleared_from_settings() {
+    let fixture = Fixture::new();
+    let saved = pipe(
+        &fixture.0,
+        &[json!({
+            "type":"save","key":"session.max_context_memory_mib","value":"10"
+        })],
+    );
+    assert_eq!(saved[0]["type"], "saved");
+    let path = fixture.0.join("config.toml");
+    let value: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["session"]["max_context_memory_mib"].as_integer(),
+        Some(10)
+    );
+    let cleared = pipe(
+        &fixture.0,
+        &[json!({
+            "type":"save","key":"session.max_context_memory_mib","value":"0"
+        })],
+    );
+    assert_eq!(cleared[0]["type"], "saved");
+    let value: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(value["session"].get("max_context_memory_mib").is_none());
+}
+
+#[test]
+fn unreleased_speech_settings_are_hidden_and_cannot_be_saved() {
+    let fixture = Fixture::new();
+    let original = "[model]\nprovider='fake'\n[speech]\nbackend='online'\nbase_url='https://example.invalid/v1'\napi_key='private-test-token'\n";
+    fs::write(fixture.0.join("config.toml"), original).unwrap();
+    let mut requests = vec![json!({"type":"settings"})];
+    for key in [
+        "speech.backend",
+        "speech.base_url",
+        "speech.api_key",
+        "speech.model",
+    ] {
+        requests.push(json!({"type":"save","key":key,"value":"offline"}));
+    }
+    let rows = pipe(&fixture.0, &requests);
+    let fields = rows[0]["fields"].as_array().unwrap();
+    assert!(!fields
+        .iter()
+        .any(|field| field["key"].as_str().unwrap().starts_with("speech.")));
+    for response in &rows[1..] {
+        assert_eq!(response["type"], "error");
+    }
+    let stored = fs::read_to_string(fixture.0.join("config.toml")).unwrap();
+    assert!(stored.contains("backend='online'") || stored.contains("backend = 'online'"));
+    assert!(stored.contains("private-test-token"));
+}
+
+#[test]
+fn compact_menu_protocol_uses_shared_session_without_clearing_display_history() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("config.toml"),
+        "[model]\nprovider='fake'\n[session]\ntranscript=false\nrestore_transcript=false\n",
+    )
+    .unwrap();
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"submit","text":"hello"}),
+            json!({"type":"submit","text":"/compact"}),
+            json!({"type":"submit","text":"continue"}),
+        ],
+    );
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert_eq!(row["type"], "reply");
+    }
+    assert_eq!(rows[0]["text"], "fake: hello");
+    assert_eq!(rows[2]["text"], "fake: continue");
+}
+
+#[test]
+fn manual_compaction_emits_transient_activity_before_reply() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("config.toml"), "[model]\nprovider='fake'\n[memory]\nenabled=false\n[session]\ntranscript=false\nrestore_transcript=false\n").unwrap();
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"submit","text":"first"}),
+            json!({"type":"submit","text":"second"}),
+            json!({"type":"submit","text":"/compact"}),
+        ],
+    );
+    let start = rows
+        .iter()
+        .position(|row| row["type"] == "activity")
+        .unwrap();
+    assert_eq!(rows[start]["text"], "压缩上下文");
+    assert_eq!(rows.last().unwrap()["type"], "reply");
+    assert!(rows.last().unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .contains("已压缩"));
+    assert!(rows.iter().all(|row| row["type"] != "status"));
 }

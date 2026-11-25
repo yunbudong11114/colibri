@@ -7,7 +7,7 @@
 在 Cardputer Zero 的 Debian 13（ARM64）上安装 release 包：
 
 ```sh
-sudo apt install ./Colibri_0.1.60_m5stack1_arm64.deb
+sudo apt install ./Colibri_0.1.75_m5stack1_arm64.deb
 ```
 
 从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
@@ -24,9 +24,9 @@ sudo apt install ./Colibri_0.1.60_m5stack1_arm64.deb
 | F / X / Z / C | 菜单和设置列表可直接用 F/X 选择、Z 返回、C 打开 |
 | ← / →，1–6 | 翻页或选择拼音候选。Space、Enter 选当前页第一项 |
 
-**在聊天页按 Fn+空格**直接开始录音，按第二次结束并转写，Esc 取消。单段最多 60 秒，转写进入草稿后可编辑，再按 Enter 发送。设备默认通过系统 PipeWire 使用板载 ES8389 麦克风。用 `COLIBRI_CAPTURE_DEVICE` 可以切换 ALSA 输入。独立转写地址使用其自己的密钥，留空时共用模型服务地址与密钥。
+**在聊天页按 Fn+空格**直接开始录音，按第二次结束并转写，Esc 取消。单段最多 60 秒，转写进入草稿后可编辑，再按 Enter 发送。设备默认通过系统 PipeWire 使用板载 ES8389 麦克风。用 `COLIBRI_CAPTURE_DEVICE` 可以切换 ALSA 输入。录音和转写均在掌机本地完成。
 
-语音转写方式可设为 `offline`（设备本机中英双语）、`online`（在线 API）或 `auto`。包含离线模型的安装包在未单独配置语音 API 地址时，自动优先本机转写。离线模式使用 Sherpa-NCNN 小型中英双语 Zipformer，无需网络或密钥。中英混说与字母缩写可能需要在草稿里修正。
+当前发行仅提供离线语音，使用 Sherpa-NCNN 小型中英双语 Zipformer，无需网络或密钥。API 转写入口及配置暂不释出，旧的语音服务配置不会触发在线回退。模型缺失时会明确提示。转写时输入框显示三个依次跳动的圆点，中英混说与字母缩写可能需要在草稿里修正。
 
 **终端 REPL**使用 `colibri --repl`。支持 `/new`、`/voice`、`/set KEY VALUE`、`/mcp` 和 `/quit`。图形界面的聊天和记忆编辑支持离线连续全拼，例如输入 `nihao` 后选「你好」，终端由终端输入法提供中文输入。
 
@@ -37,6 +37,8 @@ sudo apt install ./Colibri_0.1.60_m5stack1_arm64.deb
 ## 长期记忆
 
 在 **Esc → 设置 → 记忆** 可以启用长期记忆或修改目录。它默认开启，从设备用户的 `~/.colibri/memory/` 加载 `SOUL.md`、`USER.md`、`MEMORY.md`。界面与设备 REPL 共用这些文件和设置。记忆菜单可阅读并编辑上述三个文件、`INDEX.md` 和 `topics/` 下已有的主题文件。阅读页按 C 或 Enter 编辑，Tab 切换中英文，Enter 换行，Esc 打开保存菜单。选「保存修改」后才写回设备文件。
+
+主菜单的 **压缩上下文** 调用 `/compact`，压缩时在输入框显示三点跳动动效，自动压缩结束后恢复思考状态。**清理屏幕** 对应 `/clear`，只隐藏旧消息，不删除历史，也不清除 Agent 上下文。可选上下文内存预算位于设置的“历史与上下文”，0 表示未设置。
 
 主菜单的 **MCP 与技能** 可查看名称和说明。MCP 服务的说明取配置中的 `description`；技能说明来自 `SKILL.md` 的 `description`。两类列表都可离线查看。
 
@@ -87,3 +89,11 @@ Debian 13 ARM64 构建使用 Rust/Cargo、CMake、Ninja、C++ 编译器和 FreeT
 参考 [Cardputer Zero 官方模板](https://github.com/CardputerZero/Template) 和 [AppBuilder](https://github.com/CardputerZero/AppBuilder)。
 
 首次上架前需确认发布许可证，填写唯一的分享码，并按 AppBuilder 要求在首次提交中附上真机运行视频。当前清单已填写显示名、分类、截图及应用使用的系统权限。
+
+### 上下文管理
+
+在聊天输入框或 REPL 输入 `/compact` 可主动压缩旧上下文，完整聊天日志仍保留。
+自动压缩按模型 token 预算触发。可在历史设置中填写可选的上下文 MiB 预算，默认不设置，0 表示清除额外限制。无需配置消息条数、近期保留数或摘要长度。
+上下文容量默认自动识别，`input_context_tokens` 仅供自定义部署可选覆盖，`max_output_tokens` 控制输出预算。旧 session 压缩选项需要从 config.toml 删除。
+
+模型容量在首次实际请求时联网获取，最多等待5秒。能力缓存有效期10分钟，过期后活动请求触发后台刷新；失败保留最近成功值。缓存位于 Colibri home 的 `cache/model-capabilities`，线上读取值不会写进 `config.toml` 或 App 配置页。启动界面和打开设置直接使用本地状态。

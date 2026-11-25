@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust port of the Colibri lightweight agent runtime"
 
+[features]
+default = []
+# Unreleased transport, never enabled by the Cardputer package build.
+api-speech = []
+
 [dependencies]
 aes = "0.8"
 libc = "0.2"
 md5 = "0.7"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
@@ -30,6 +36,7 @@ name = "colibri-cardputer-worker"
 path = "src/bin/cardputer-worker.rs"
 
 [profile.release]
+opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true

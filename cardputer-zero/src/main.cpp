@@ -1,7 +1,13 @@
 #include "input.hpp"
 #include "markdown.hpp"
 #include "worker_link.hpp"
+#include "menu.hpp"
+#include "composer_activity.hpp"
 #include <lvgl.h>
+#if !COLIBRI_DESKTOP && defined(__linux__)
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#endif
 #if COLIBRI_DESKTOP
 #include "src/drivers/sdl/lv_sdl_window.h"
 #include <SDL.h>
@@ -23,7 +29,21 @@
 #include <string_view>
 #include <unistd.h>
 
+#if !COLIBRI_DESKTOP && defined(__linux__)
+// LVGL opens TTC files at face zero. Debian's Noto Sans CJK collection stores SC at face two.
+extern "C" FT_Error __real_FT_New_Face(FT_Library, const char*, FT_Long, FT_Face*);
+extern "C" FT_Error __wrap_FT_New_Face(FT_Library library, const char* path,
+                                      FT_Long index, FT_Face* face) {
+    if (index == 0 && path &&
+        std::string_view(path) == "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc") {
+        if (__real_FT_New_Face(library, path, 2, face) == 0) return 0;
+    }
+    return __real_FT_New_Face(library, path, index, face);
+}
+#endif
+
 using nlohmann::json;
+using namespace colibri_ui;
 
 namespace {
 constexpr int Width = 320;
@@ -33,29 +53,8 @@ constexpr int ChatWidth = 290;
 constexpr int CodePadding = 2;
 constexpr int CodeBorder = 1;
 constexpr std::size_t MaxSpelling = 64;
-const json SettingLabels{
-    {"model.provider", "模型 · 提供方"}, {"model.base_url", "模型 · API 地址"},
-    {"model.model", "模型 · 名称"}, {"model.api_key", "模型 · API 密钥"},
-    {"vision.model", "视觉模型名称"}, {"vision.base_url", "视觉 API 地址"},
-    {"vision.api_key", "视觉 API 密钥"}, {"vision.timeout_seconds", "超时（秒）"},
-    {"vision.max_image_bytes", "图片上限（字节）"},
-    {"speech.backend", "语音 · 转写方式"}, {"speech.base_url", "语音 · API 地址"}, {"speech.model", "语音 · 模型"},
-    {"speech.api_key", "语音 · API 密钥"}, {"web_search.engine", "搜索 · 引擎"},
-    {"web_search.endpoint", "搜索 · API 地址"}, {"web_search.api_key", "搜索 · API 密钥"},
-    {"session.transcript", "历史 · 保存记录"}, {"session.restore_transcript", "历史 · 启动恢复"},
-    {"session.transcript_retention_days", "历史 · 保留天数"},
-    {"session.transcript_max_total_bytes", "历史 · 容量（字节）"},
-    {"memory.enabled", "启用长期记忆"}, {"memory.root", "记忆目录"},
-    {"mcp.servers", "MCP · 服务器 JSON"},
-};
-const std::vector<std::string> Menu{"MCP 与技能", "设置", "快捷键", "退出 Colibri"};
-
 enum class Screen { Chat, Menu, Shortcuts, Settings, Fields, ModelMode, Providers, ModelForm, Edit, MemoryTopics, MemoryView, MemoryEdit, MemoryActions, CatalogMenu, CatalogList, CatalogItem };
 
-const std::vector<std::string> CategoryNames{"模型", "图片理解", "语音", "搜索", "历史", "记忆", "MCP 配置", "显示"};
-const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "speech.", "web_search.", "session.", "memory.", "mcp.", "display."};
-constexpr std::size_t MemoryCategory = 5;
-constexpr std::size_t DisplayCategory = 7;
 const std::vector<std::string> CatalogKinds{"MCP 服务", "技能"};
 constexpr std::size_t MemoryEditMaxBytes = 64 * 1024;
 const std::vector<std::string> MemoryFiles{"SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"};
@@ -131,10 +130,11 @@ std::string display_chat_text(std::string_view text) {
 }
 
 const lv_font_t* load_font(lv_freetype_font_style_t style = LV_FREETYPE_FONT_STYLE_NORMAL,
-                           std::uint16_t size = 14) {
+                           std::uint16_t size = 14, bool medium = false) {
     const char* custom = std::getenv("COLIBRI_FONT");
     const std::vector<std::string> paths{
         custom ? custom : "",
+        medium ? "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc" : "",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
@@ -175,6 +175,8 @@ public:
         bold_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 13);
         italic_ = load_font(LV_FREETYPE_FONT_STYLE_ITALIC, 13);
         heading_ = bold_;
+        chat_font_ = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 13);
+        sender_font_ = load_font(LV_FREETYPE_FONT_STYLE_BOLD, 12);
         code_ = code_font(normal);
 
         const auto* chrome_font = load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 12);
@@ -239,7 +241,7 @@ public:
         lv_obj_remove_flag(panel_, LV_OBJ_FLAG_SCROLL_ELASTIC);
         lv_obj_set_scrollbar_mode(panel_, LV_SCROLLBAR_MODE_AUTO);
         body_ = label(panel_, 8, 4, ChatWidth, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_line_space(body_, 3, 0);
+        lv_obj_set_style_text_line_space(body_, 2, 0);
         chat_thread_ = column(panel_, 8, 4, 8);
         chat_hint_ = label(chat_thread_, 0, 0, ChatWidth, LV_LABEL_LONG_WRAP);
         lv_obj_add_flag(chat_hint_, LV_OBJ_FLAG_HIDDEN);
@@ -269,18 +271,18 @@ public:
             lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
             lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
         }
-        status_ = label(root, 263, composer_y + composer_padding, 37);
+        status_ = label(root, 268, composer_y + composer_padding, 37);
         lv_obj_set_style_text_align(status_, LV_TEXT_ALIGN_RIGHT, 0);
-        voice_time_ = label(root, 215, composer_y + composer_padding, 85);
+        voice_time_ = label(root, 220, composer_y + composer_padding, 85);
         lv_obj_set_style_text_align(voice_time_, LV_TEXT_ALIGN_RIGHT, 0);
-        candidates_ = label(root, 10, 152, 300);
+        candidates_ = label(root, 15, 152, 290);
         lv_obj_set_style_text_font(candidates_, chrome_font, 0);
         footer_ = lv_obj_create(root);
         lv_obj_remove_style_all(footer_);
         lv_obj_remove_flag(footer_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_pos(footer_, 10, 150);
-        lv_obj_set_size(footer_, 300, 20);
-        lv_obj_set_style_text_font(footer_, chrome_font, 0);
+        lv_obj_set_pos(footer_, 7, 150);
+        lv_obj_set_size(footer_, 306, 20);
+        lv_obj_set_style_text_font(footer_, load_font(LV_FREETYPE_FONT_STYLE_NORMAL, 11), 0);
         lv_obj_set_flex_flow(footer_, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(footer_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(footer_, 4, 0);
@@ -334,14 +336,38 @@ public:
     bool running = true;
     bool restoring_history() const { return starting_; }
 
-    void update_recording_clock() {
+    ComposerActivity activity() const {
+        return composer_activity(screen_ == Screen::Chat, busy_, recording_, status_text_);
+    }
+
+    void update_composer_animation() {
+        const auto state = activity();
+        if (has_activity_dots(state)) {
+            lv_point_t measured{};
+            const auto* font = lv_obj_get_style_text_font(composer_, LV_PART_MAIN);
+            const auto caption = status_text_ + "一";
+            lv_text_get_size(&measured, caption.c_str(), font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            const int start = lv_obj_get_x(composer_) +
+                lv_obj_get_style_pad_left(composer_, LV_PART_MAIN) + measured.x;
+            const int center = lv_obj_get_y(composer_) + lv_obj_get_height(composer_) / 2;
+            for (unsigned i = 0; i < 3; ++i) {
+                const auto dot = activity_dot(state, lv_tick_get(), i);
+                lv_obj_set_pos(voice_bars_[i], start + 5 * i, center - 1 + dot.offset_y);
+                lv_obj_set_size(voice_bars_[i], 3, 3);
+                lv_obj_set_style_bg_opa(voice_bars_[i], dot.opacity, 0);
+            }
+            voice_phase_ = 99;
+            return;
+        }
         if (!recording_ || screen_ != Screen::Chat) return;
         const unsigned phase = (lv_tick_elaps(recording_start_) / 110) % 8;
         if (phase != voice_phase_) {
             constexpr int heights[] = {4, 6, 10, 14, 12, 8, 6, 4};
             for (size_t i = 0; i < voice_bars_.size(); ++i) {
                 const int h = heights[(phase + 3 * i) % 8];
+                lv_obj_set_x(voice_bars_[i], 84 + 5 * i);
                 lv_obj_set_size(voice_bars_[i], 3, h);
+                lv_obj_set_style_bg_opa(voice_bars_[i], LV_OPA_COVER, 0);
                 lv_obj_set_y(voice_bars_[i], 137 - h / 2);
             }
             voice_phase_ = phase;
@@ -383,6 +409,12 @@ public:
             refresh();
             return;
         }
+        if (type == "activity") {
+            busy_ = true;
+            status_text_ = text;
+            refresh();
+            return;
+        }
         if (type == "status") {
             append("系统", text);
             refresh(true);
@@ -395,7 +427,7 @@ public:
             recording_seconds_ = 0;
         }
         recording_ = type == "recording";
-        if (recording_) offline_voice_ = event.value("backend", "") == "offline";
+
         if (type == "model_status") {
             starting_ = false;
             model_hint_ = text;
@@ -439,7 +471,8 @@ public:
             lv_obj_scroll_to_y(panel_, 0, LV_ANIM_OFF);
             return;
         } else if (type == "reply") {
-            append("Colibri", text);
+            receive_chat_reply(text);
+            return;
         } else if (type == "error") {
             starting_ = false;
             if (screen_ == Screen::Edit || screen_ == Screen::ModelForm || screen_ == Screen::MemoryActions ||
@@ -467,7 +500,7 @@ public:
             if (key == Key::Voice || key == Key::Enter || key == Key::Escape) {
                 recording_ = false;
                 send({{"type", key == Key::Escape ? "voice_cancel" : "voice_stop"}},
-                     key == Key::Escape ? "取消录音" : offline_voice_ ? "离线转写" : "在线转写");
+                     key == Key::Escape ? "取消录音" : "正在转写");
                 refresh();
             }
             return;
@@ -627,6 +660,7 @@ private:
     json catalog_items_ = json::array();
     std::size_t catalog_kind_ = 0;
     std::array<lv_obj_t*, 5> voice_bars_{};
+    const lv_font_t *chat_font_ = nullptr, *sender_font_ = nullptr;
     lv_obj_t* voice_time_ = nullptr;
     std::array<lv_obj_t*, 4> signal_bars_{};
     lv_obj_t* clock_label_ = nullptr;
@@ -643,7 +677,7 @@ private:
     std::time_t status_second_ = 0;
     lv_obj_t *bird_ = nullptr, *footer_ = nullptr;
     std::array<lv_obj_t*, 6> footer_parts_{};
-    unsigned voice_phase_ = 8;
+    unsigned voice_phase_ = 11;
     uint32_t recording_start_ = 0;
     unsigned recording_seconds_ = 0;
 
@@ -653,7 +687,7 @@ private:
         return time;
     }
 
-    bool busy_ = false, recording_ = false, offline_voice_ = false, chinese_ = true, dark_ = true;
+    bool busy_ = false, recording_ = false, chinese_ = true, dark_ = true;
     bool starting_ = false;
     std::string draft_, edited_, error_, status_text_, spelling_, model_hint_;
     std::size_t draft_cursor_ = 0, draft_view_start_ = 0;
@@ -769,7 +803,7 @@ private:
         const auto blocks = parse ? markdown::parse(content) : std::vector<markdown::Block>{};
         if (blocks.empty()) {
             auto* line = label(body, 0, 0, ChatWidth, LV_LABEL_LONG_WRAP);
-            lv_obj_set_style_text_line_space(line, 3, 0);
+            lv_obj_set_style_text_line_space(line, 2, 0);
             lv_label_set_text(line, content.c_str());
             return;
         }
@@ -797,7 +831,7 @@ private:
             lv_obj_set_style_margin_top(group, gap, 0);
             lv_obj_set_size(group, ChatWidth, LV_SIZE_CONTENT);
             lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_style_text_line_space(group, 3, 0);
+            lv_obj_set_style_text_line_space(group, 2, 0);
             if (block.kind == BlockKind::Heading) {
                 lv_obj_set_style_text_font(group, heading_, 0);
             } else if (block.kind == BlockKind::Code || block.kind == BlockKind::Quote || block.kind == BlockKind::Table) {
@@ -834,15 +868,16 @@ private:
     void append(const std::string& speaker, const std::string& text) {
         std::string content = display_chat_text(text);
         if (content.size() > 12000) content.resize(utf8_end(content, 11999));
-        auto* block = column(chat_thread_, 0, 0, 2);
+        auto* block = column(chat_thread_, 0, 0, 0);
         auto* tag = label(block, 0, 0, LV_SIZE_CONTENT);
-        lv_obj_set_style_text_font(tag, bold_, 0);
+        lv_obj_set_style_text_font(tag, sender_font_, 0);
         lv_label_set_text(tag, speaker.c_str());
         lv_obj_set_style_bg_opa(tag, LV_OPA_TRANSP, 0);
         lv_obj_set_style_radius(tag, 4, 0);
         lv_obj_set_style_pad_left(tag, 0, 0);
         lv_obj_set_style_pad_right(tag, 5, 0);
         auto* body = column(block, 0, 0, 0);
+        lv_obj_set_style_text_font(body, chat_font_, 0);
         render_markdown(body, content, speaker != "系统");
         const auto role = speaker == "我" ? Speaker::User :
                           speaker == "Colibri" ? Speaker::Agent : Speaker::System;
@@ -868,6 +903,25 @@ private:
             } while (removed_question && chat_.front().speaker != Speaker::User);
         }
         lv_obj_move_to_index(chat_hint_, -1);
+    }
+
+    void receive_chat_reply(const std::string& text) {
+        lv_obj_update_layout(panel_);
+        const bool follow = screen_ == Screen::Chat && lv_obj_get_scroll_bottom(panel_) <= 2;
+        append("Colibri", text);
+        refresh();
+        if (!follow) return;
+
+        lv_obj_update_layout(panel_);
+        auto* reply = chat_.back().block;
+        int delta = -lv_obj_get_scroll_bottom(panel_);
+        if (lv_obj_get_height(reply) > lv_obj_get_content_height(panel_)) {
+            lv_area_t viewport{}, message{};
+            lv_obj_get_content_coords(panel_, &viewport);
+            lv_obj_get_coords(reply, &message);
+            delta = viewport.y1 + 4 - message.y1;
+        }
+        lv_obj_scroll_by_bounded(panel_, 0, delta, LV_ANIM_OFF);
     }
 
     void query_pinyin() {
@@ -1043,7 +1097,11 @@ private:
 
     std::vector<std::string> list_rows() const {
         switch (screen_) {
-        case Screen::Menu: return Menu;
+        case Screen::Menu: {
+            std::vector<std::string> rows;
+            for (const auto& item : MainMenu) rows.emplace_back(item.label);
+            return rows;
+        }
         case Screen::Settings: return CategoryNames;
         case Screen::ModelMode: return ModelModes;
         case Screen::Providers: {
@@ -1060,6 +1118,10 @@ private:
                 const auto key = field.value("key", "");
                 auto label = SettingLabels.value(key, "");
                 if (key == "memory.enabled") label += field.value("value", "") == "true" ? " · 开" : " · 关";
+                if (key == "session.max_context_memory_mib") {
+                    const auto value = field.value("value", "0");
+                    label += value == "0" ? " · 未设置" : " · " + value;
+                }
                 rows.push_back(std::move(label));
             }
             if (category_ == MemoryCategory) {
@@ -1087,8 +1149,8 @@ private:
     void go_back() {
         switch (screen_) {
         case Screen::Menu: screen_ = Screen::Chat; break;
-        case Screen::Settings: screen_ = Screen::Menu; selection_ = 1; break;
-        case Screen::CatalogMenu: screen_ = Screen::Menu; selection_ = 0; break;
+        case Screen::Settings: screen_ = Screen::Menu; selection_ = SettingsMenuIndex; break;
+        case Screen::CatalogMenu: screen_ = Screen::Menu; selection_ = CatalogMenuIndex; break;
         case Screen::CatalogList: screen_ = Screen::CatalogMenu; selection_ = catalog_kind_; break;
         case Screen::Fields:
         case Screen::ModelMode: screen_ = Screen::Settings; selection_ = category_; break;
@@ -1108,18 +1170,26 @@ private:
     void open_item() {
         switch (screen_) {
         case Screen::Menu:
-            switch (selection_) {
-            case 0:
+            switch (MainMenu[selection_].action) {
+            case MenuAction::Catalog:
                 screen_ = Screen::CatalogMenu;
                 selection_ = 0;
                 break;
-            case 1:
+            case MenuAction::Settings:
                 screen_ = Screen::Settings;
                 selection_ = 0;
                 send({{"type", "settings"}}, "读取设置");
                 break;
-            case 2: screen_ = Screen::Shortcuts; break;
-            case 3: running = false; break;
+            case MenuAction::Compact:
+                screen_ = Screen::Chat;
+                send({{"type", "submit"}, {"text", "/compact"}}, "压缩上下文");
+                break;
+            case MenuAction::Clear:
+                screen_ = Screen::Chat;
+                send({{"type", "clear_chat"}}, "清理屏幕");
+                break;
+            case MenuAction::Shortcuts: screen_ = Screen::Shortcuts; break;
+            case MenuAction::Quit: running = false; break;
             }
             break;
         case Screen::CatalogMenu:
@@ -1347,6 +1417,8 @@ private:
             content = field.value("label", SettingLabels.value(field.value("key", ""), "")) + "\n";
             if (secret) content += field.value("value", "").empty() ? "输入新值" : "已保存值 · 输入以替换";
             else content += field.value("value", "");
+            if (field.value("key", "") == "session.max_context_memory_mib")
+                content += "\n单位 MiB，0 表示未设置";
             if (!error_.empty()) content += "\n" + error_;
             composer = "› " + (secret ? std::string(std::min<std::size_t>(edited_.size(), 30), '*') : tail(edited_));
             hint = "Enter 保存   Tab 清空   Esc 返回";
@@ -1431,16 +1503,18 @@ private:
         if (composer.empty()) lv_obj_add_flag(composer_, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(composer_, LV_OBJ_FLAG_HIDDEN);
         const bool voice_visible = recording_ && screen_ == Screen::Chat;
-        for (auto* bar : voice_bars_) {
-            lv_obj_set_flag(bar, LV_OBJ_FLAG_HIDDEN, !voice_visible);
+        for (size_t i = 0; i < voice_bars_.size(); ++i) {
+            auto* bar = voice_bars_[i];
+            lv_obj_set_flag(bar, LV_OBJ_FLAG_HIDDEN, !(voice_visible || (has_activity_dots(activity()) && i < 3)));
             lv_obj_set_style_bg_color(bar, accent, 0);
         }
         lv_obj_set_flag(voice_time_, LV_OBJ_FLAG_HIDDEN, !voice_visible);
         if (voice_visible) {
             lv_label_set_text(voice_time_, recording_caption().c_str());
-            update_recording_clock();
         }
         lv_label_set_text(composer_, composer.c_str());
+        lv_obj_update_layout(composer_);
+        update_composer_animation();
         lv_obj_set_style_image_recolor(bird_, accent, 0);
         lv_obj_set_style_image_recolor_opa(bird_, LV_OPA_COVER, 0);
         const bool keycaps = spelling_.empty() && !(busy_ && screen_ != Screen::Chat);
@@ -1515,7 +1589,7 @@ int main(int argc, char** argv) {
             if (!view.running) break;
             for (const auto& event : worker.receive()) view.receive(event);
             view.update_device_status();
-            view.update_recording_clock();
+            view.update_composer_animation();
             if (!view.restoring_history() || std::chrono::steady_clock::now() >= first_frame_deadline)
                 lv_timer_handler();
             std::this_thread::sleep_for(std::chrono::milliseconds(12));

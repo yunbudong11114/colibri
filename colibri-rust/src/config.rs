@@ -26,11 +26,7 @@ pub struct VisionConfig {
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
-    pub max_tool_rounds: usize,
-    pub trigger_message_limit: usize,
-    pub recent_message_limit: usize,
-    pub summary_max_chars: usize,
-    pub model_compact: bool,
+    pub max_context_memory_mib: Option<usize>,
     pub idle_exit_enabled: bool,
     pub idle_exit_seconds: u64,
     pub transcript: bool,
@@ -152,7 +148,7 @@ impl Default for AgentConfig {
                 api_key: String::new(),
                 timeout_seconds: 60,
                 max_output_tokens: 16384,
-                input_context_tokens: 48000,
+                input_context_tokens: 0,
                 max_retries: 2,
                 retry_backoff_ms: 500,
             },
@@ -164,11 +160,7 @@ impl Default for AgentConfig {
                 max_image_bytes: 4 * 1024 * 1024,
             },
             session: SessionConfig {
-                max_tool_rounds: 32,
-                trigger_message_limit: 96,
-                recent_message_limit: 12,
-                summary_max_chars: 12000,
-                model_compact: true,
+                max_context_memory_mib: None,
                 idle_exit_enabled: false,
                 idle_exit_seconds: 300,
                 transcript: true,
@@ -385,20 +377,15 @@ pub(crate) fn apply_toml_value(
         }
     }
     if let Some(table) = value.get("session") {
-        if let Some(value) = get_usize(table, "max_tool_rounds") {
-            config.session.max_tool_rounds = value;
-        }
-        if let Some(value) = get_usize(table, "trigger_message_limit") {
-            config.session.trigger_message_limit = value;
-        }
-        if let Some(value) = get_usize(table, "recent_message_limit") {
-            config.session.recent_message_limit = value;
-        }
-        if let Some(value) = get_usize(table, "summary_max_chars") {
-            config.session.summary_max_chars = value;
-        }
-        if let Some(value) = get_bool(table, "model_compact") {
-            config.session.model_compact = value;
+        if let Some(raw) = table.get("max_context_memory_mib") {
+            let mib = raw
+                .as_integer()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("session.max_context_memory_mib must be a nonnegative integer")?;
+            if mib.checked_mul(1024 * 1024).is_none() {
+                return Err("session.max_context_memory_mib is too large".into());
+            }
+            config.session.max_context_memory_mib = (mib > 0).then_some(mib);
         }
         if let Some(value) = get_bool(table, "idle_exit_enabled") {
             config.session.idle_exit_enabled = value;
@@ -712,11 +699,7 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
         value,
         "session",
         &[
-            "max_tool_rounds",
-            "trigger_message_limit",
-            "recent_message_limit",
-            "summary_max_chars",
-            "model_compact",
+            "max_context_memory_mib",
             "idle_exit_enabled",
             "idle_exit_seconds",
             "transcript",

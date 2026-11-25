@@ -4,7 +4,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::config::{colibri_home, SessionConfig};
-use crate::messages::Message;
+use crate::messages::{Message, ToolCall};
+use crate::model_history::{ContextUpdate, ModelHistory};
 
 const ATTACHMENT_MARKER: &str = "Attachments saved locally:";
 
@@ -47,7 +48,11 @@ impl TranscriptHistoryLoader {
         if self.message_limit < 2 || self.char_limit == 0 || self.scan_bytes == 0 {
             return Vec::new();
         }
-        let turns = completed_turns(&self.recent_lines(offsets));
+        self.text_messages(&self.recent_lines(offsets), false)
+    }
+
+    fn text_messages(&self, lines: &[String], model_text: bool) -> Vec<Message> {
+        let turns = completed_turns(lines, model_text);
         let mut selected = Vec::new();
         let mut selected_chars = 0usize;
         for (user, assistant) in turns.into_iter().rev() {
@@ -67,6 +72,29 @@ impl TranscriptHistoryLoader {
             messages.push(Message::new("assistant", assistant));
         }
         messages
+    }
+
+    /// Model recovery is separate from the display-only conversation loader.
+    pub fn load_model(&self, source: &str) -> ModelHistory {
+        if self.message_limit == 0 || self.char_limit == 0 || self.scan_bytes == 0 {
+            return ModelHistory::default();
+        }
+        let lines = self.recent_lines(&BTreeMap::new());
+        if let Some(history) = replay_model_history(&lines, source).and_then(|history| {
+            history.bounded(self.message_limit, self.char_limit, self.scan_bytes)
+        }) {
+            return history;
+        }
+        let filtered = lines
+            .into_iter()
+            .filter(|line| {
+                parse_event(line).is_some_and(|(_, payload)| source_key(&payload) == source)
+            })
+            .collect::<Vec<_>>();
+        ModelHistory {
+            messages: self.text_messages(&filtered, true),
+            ..Default::default()
+        }
     }
 
     fn recent_lines(&self, offsets: &BTreeMap<String, u64>) -> Vec<String> {
@@ -130,19 +158,28 @@ impl TranscriptHistoryLoader {
     }
 }
 
-fn completed_turns(lines: &[String]) -> Vec<(String, String)> {
+fn completed_turns(lines: &[String], model_text: bool) -> Vec<(String, String)> {
     let mut pending: BTreeMap<String, VecDeque<String>> = BTreeMap::new();
     let mut completed = Vec::new();
     for line in lines {
         let Some((event_type, payload)) = parse_event(line) else {
             continue;
         };
-        let Some(text) = payload.get("text").filter(|value| !value.trim().is_empty()) else {
+        let text = if model_text && event_type == "user_message" {
+            payload.get("model_text").or_else(|| payload.get("text"))
+        } else {
+            payload.get("text")
+        };
+        let Some(text) = text.filter(|value| !value.trim().is_empty()) else {
             continue;
         };
         let source = source_key(&payload);
         if event_type == "user_message" {
-            let cleaned = strip_attachment_paths(text);
+            let cleaned = if model_text {
+                text.clone()
+            } else {
+                strip_attachment_paths(text)
+            };
             if !cleaned.is_empty() {
                 pending.entry(source).or_default().push_back(cleaned);
             }
@@ -192,4 +229,171 @@ fn strip_attachment_paths(text: &str) -> String {
     text.split_once(ATTACHMENT_MARKER)
         .map(|(head, _)| head.trim_end().to_string())
         .unwrap_or_else(|| text.to_string())
+}
+
+fn event_source(payload: &serde_json::Value) -> String {
+    if let Some(key) = payload["session_key"]
+        .as_str()
+        .filter(|key| !key.is_empty())
+    {
+        return key.to_string();
+    }
+    match (payload["channel"].as_str(), payload["sender_id"].as_str()) {
+        (Some(channel), Some(sender)) if !channel.is_empty() && !sender.is_empty() => {
+            format!("{channel}:{sender}")
+        }
+        _ => "local".into(),
+    }
+}
+
+struct ReplayedHistory {
+    timestamp: String,
+    started: u128,
+    order: usize,
+    history: ModelHistory,
+}
+
+fn replay_model_history(lines: &[String], source: &str) -> Option<ModelHistory> {
+    let mut streams: BTreeMap<String, ReplayedHistory> = BTreeMap::new();
+    for (order, line) in lines.iter().enumerate() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let payload = &event["payload"];
+        if event_source(payload) != source {
+            continue;
+        }
+        let Some(stream) = payload["model_stream"].as_str() else {
+            continue;
+        };
+        let kind = event["type"].as_str().unwrap_or_default();
+        if !matches!(
+            kind,
+            "model_seed"
+                | "user_message"
+                | "assistant_message"
+                | "tool_result"
+                | "runtime_context"
+                | "runtime_context_rebased"
+                | "context_compact"
+        ) {
+            continue;
+        }
+        let state = streams
+            .entry(stream.to_string())
+            .or_insert_with(|| ReplayedHistory {
+                timestamp: String::new(),
+                started: stream
+                    .split('-')
+                    .nth(1)
+                    .and_then(|part| part.parse().ok())
+                    .unwrap_or(0),
+                order: 0,
+                history: ModelHistory::default(),
+            });
+        state.timestamp = event["ts"].as_str().unwrap_or_default().to_string();
+        state.order = order;
+        let history = &mut state.history;
+        match kind {
+            "model_seed" | "context_compact" => {
+                if let Ok(checkpoint) =
+                    serde_json::from_value::<ModelHistory>(payload["history"].clone())
+                {
+                    *history = checkpoint;
+                } else if kind == "context_compact" {
+                    let kept = payload["kept_messages"].as_u64().unwrap_or(0) as usize;
+                    let start = history.messages.len().saturating_sub(kept);
+                    history.retain_from(start);
+                    history.summary = payload["summary"].as_str().unwrap_or_default().to_string();
+                }
+            }
+            "user_message" => {
+                if let Some(text) = payload["model_text"]
+                    .as_str()
+                    .or_else(|| payload["text"].as_str())
+                {
+                    history.messages.push(Message::new("user", text));
+                }
+            }
+            "assistant_message" => {
+                if history
+                    .messages
+                    .iter()
+                    .any(|message| message.role == "user")
+                {
+                    let mut message =
+                        Message::new("assistant", payload["text"].as_str().unwrap_or_default());
+                    message.tool_calls =
+                        serde_json::from_value::<Vec<ToolCall>>(payload["tool_calls"].clone())
+                            .unwrap_or_default();
+                    history.messages.push(message);
+                }
+            }
+            "tool_result" => {
+                if let Some(id) = payload["id"].as_str() {
+                    let text = payload["text"].as_str().unwrap_or_default();
+                    let content = if payload["model_history_truncated"].as_bool() == Some(true) {
+                        format!("recovery_output_truncated: This tool finished, but its full output exceeded the recovery budget. Do not repeat the operation just to recover its output; use a targeted read if needed. Recorded output:\n{text}")
+                    } else {
+                        payload["model_text"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if payload["ok"].as_bool() == Some(false) {
+                                    format!(
+                                        "{}: {text}",
+                                        payload["error_type"].as_str().unwrap_or("tool_error")
+                                    )
+                                } else {
+                                    text.to_string()
+                                }
+                            })
+                    };
+                    let mut message = Message::new("tool", content);
+                    message.tool_call_id = Some(id.to_string());
+                    history.messages.push(message);
+                }
+            }
+            "runtime_context" => {
+                if let Ok(mut update) =
+                    serde_json::from_value::<ContextUpdate>(payload["update"].clone())
+                {
+                    update.before_message = update.before_message.min(history.messages.len());
+                    history.context_updates.push(update);
+                }
+            }
+            "runtime_context_rebased" => {
+                if let Ok(updates) = serde_json::from_value(payload["updates"].clone()) {
+                    history.context_updates = updates;
+                }
+            }
+            _ => {}
+        }
+    }
+    streams
+        .into_values()
+        .filter(|state| {
+            state
+                .history
+                .messages
+                .iter()
+                .any(|message| message.role == "user")
+        })
+        .max_by(|left, right| {
+            (&left.timestamp, left.started, left.order).cmp(&(
+                &right.timestamp,
+                right.started,
+                right.order,
+            ))
+        })
+        .map(|state| {
+            let mut history = state.history;
+            history
+                .context_updates
+                .retain(|update| update.before_message <= history.messages.len());
+            history
+                .context_updates
+                .sort_by_key(|update| update.before_message);
+            history
+        })
 }

@@ -47,6 +47,12 @@ impl TranscriptWriter {
             .append(true)
             .open(&path)
             .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
         let mut writer = Self {
             path,
             file: Some(file),
@@ -62,6 +68,9 @@ impl TranscriptWriter {
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
+        // Separate writers in App, CLI and gateway must append complete JSON records.
+        #[cfg(unix)]
+        let _append_lock = crate::config_io::lock(&self.path).map_err(|error| error.to_string())?;
         let mut payload = payload.as_object().cloned().unwrap_or_default();
         for (key, value) in &self.metadata {
             payload.insert(key.clone(), serde_json::Value::String(value.clone()));

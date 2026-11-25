@@ -11,7 +11,7 @@ use colibri_rust::channel::{
     InboundEnvelope, OutboundSink,
 };
 use colibri_rust::channel_registry::build_enabled_channels;
-use colibri_rust::cli::{run_with_io};
+use colibri_rust::cli::run_with_io;
 use colibri_rust::config::{expand_user_path, AgentConfig, HardwareDeviceConfig};
 use colibri_rust::gateway::{
     format_gateway_log, format_gateway_status, GatewayAgentHealth, GatewaySessionCache,
@@ -128,7 +128,7 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.model.provider, "fake");
     assert_eq!(config.model.model, "fake-colibri-model");
     assert_eq!(config.model.max_output_tokens, 16384);
-    assert_eq!(config.model.input_context_tokens, 48000);
+    assert_eq!(config.model.input_context_tokens, 0);
     assert_eq!(config.model.max_retries, 2);
     assert_eq!(config.model.retry_backoff_ms, 500);
     assert_eq!(config.vision.model, "");
@@ -136,10 +136,6 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.vision.api_key, "");
     assert_eq!(config.vision.timeout_seconds, 60);
     assert_eq!(config.vision.max_image_bytes, 4 * 1024 * 1024);
-    assert_eq!(config.session.max_tool_rounds, 32);
-    assert_eq!(config.session.trigger_message_limit, 96);
-    assert_eq!(config.session.recent_message_limit, 12);
-    assert_eq!(config.session.summary_max_chars, 12000);
     assert!(config.session.restore_transcript);
     assert_eq!(config.session.restore_message_limit, 24);
     assert_eq!(config.session.restore_char_limit, 24000);
@@ -191,7 +187,6 @@ max_image_bytes = 1234
 [session]
 idle_exit_enabled = true
 idle_exit_seconds = 12
-model_compact = false
 restore_transcript = false
 restore_message_limit = 10
 restore_char_limit = 9000
@@ -232,7 +227,6 @@ max_active_servers = 3
     assert_eq!(config.vision.max_image_bytes, 1234);
     assert!(config.session.idle_exit_enabled);
     assert_eq!(config.session.idle_exit_seconds, 12);
-    assert!(!config.session.model_compact);
     assert!(!config.session.restore_transcript);
     assert_eq!(config.session.restore_message_limit, 10);
     assert_eq!(config.session.restore_char_limit, 9000);
@@ -446,10 +440,9 @@ fn steer_skips_remaining_tools_and_injects_user_message() {
             && message.tool_call_id.as_deref() == Some("call_b")
             && message.content.contains(SKIPPED_TOOL_RESULT)
     }));
-    assert!(session
-        .messages
-        .iter()
-        .any(|message| message.role == "user" && message.content == "change plan"));
+    assert!(session.messages.iter().any(|message| message.role == "user"
+        && colibri_rust::time_context::user_text_without_time_context(&message.content)
+            == "change plan"));
     assert_eq!(
         *acks.lock().unwrap(),
         vec![format_steering_ack(1, "change plan")]
@@ -479,10 +472,9 @@ fn steer_during_text_only_complete_is_applied() {
     let response = session.submit("do work").unwrap();
 
     assert_eq!(response.text, "steered-ok");
-    assert!(session
-        .messages
-        .iter()
-        .any(|message| message.role == "user" && message.content == "change plan"));
+    assert!(session.messages.iter().any(|message| message.role == "user"
+        && colibri_rust::time_context::user_text_without_time_context(&message.content)
+            == "change plan"));
     assert_eq!(
         *acks.lock().unwrap(),
         vec![format_steering_ack(0, "change plan")]
@@ -566,22 +558,18 @@ fn steering_pump_forwards_line_to_steer() {
     let stop = AtomicBool::new(false);
     let lines = Mutex::new(vec![Some("change plan".to_string()), None]);
 
-    colibri_rust::cli::run_steering_pump(
-        &handle,
-        &stop,
-        |_| {
-            let mut lines = lines.lock().unwrap();
-            if lines.is_empty() {
-                stop.store(true, Ordering::SeqCst);
-                return None;
-            }
-            let next = lines.remove(0);
-            if next.is_none() {
-                stop.store(true, Ordering::SeqCst);
-            }
-            next
-        },
-    );
+    colibri_rust::cli::run_steering_pump(&handle, &stop, |_| {
+        let mut lines = lines.lock().unwrap();
+        if lines.is_empty() {
+            stop.store(true, Ordering::SeqCst);
+            return None;
+        }
+        let next = lines.remove(0);
+        if next.is_none() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        next
+    });
 
     assert_eq!(handle.drain_one_for_test().as_deref(), Some("change plan"));
 }
@@ -879,10 +867,11 @@ fn session_injects_transient_current_time_context() {
     assert_eq!(&time_line[13..14], ":");
     assert_eq!(&time_line[16..18], " (");
     assert_eq!(&time_line[21..22], ":");
-    assert!(session
-        .messages
-        .iter()
-        .all(|message| !message.content.contains("## Current Time")));
+    assert_eq!(session.messages[0], *user_message);
+    drop(captured);
+    session.submit("next").unwrap();
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured[1][0], captured[0][0]);
 }
 
 #[test]
@@ -991,31 +980,18 @@ fn session_returns_failed_turn_and_recovers_like_python() {
 #[test]
 fn session_compacts_at_model_boundary_not_after_assistant_like_python() {
     let mut config = AgentConfig::default();
-    config.session.trigger_message_limit = 6;
-    config.session.recent_message_limit = 4;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(FakeModel::new()));
-
-    session.submit("one").unwrap();
-    session.submit("two").unwrap();
-    session.submit("three").unwrap();
-
-    assert_eq!(session.messages.len(), 6);
+    for _ in 0..60 {
+        session.submit("short").unwrap();
+    }
+    assert_eq!(session.messages.len(), 120);
     assert!(session.summary.is_empty());
-
-    session.submit("four").unwrap();
-
-    assert_eq!(
-        session
-            .messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        vec!["fake: two", "three", "fake: three", "four", "fake: four",]
-    );
-    assert!(session.summary.contains("user: one"));
+    let response = session.submit("/compact").unwrap();
+    assert!(response.text.contains("已压缩"));
+    assert_eq!(session.messages.len(), 2);
+    assert!(!session.summary.is_empty());
 }
 
 #[test]
@@ -1148,10 +1124,8 @@ fn submit_appends_media_paths_to_user_message_like_python() {
 #[test]
 fn session_uses_model_assisted_compact_and_retains_latest_user_like_python() {
     let mut config = AgentConfig::default();
+    config.model.input_context_tokens = 100;
     config.model.provider = "openai_compatible".to_string();
-    config.session.trigger_message_limit = 3;
-    config.session.recent_message_limit = 1;
-    config.session.model_compact = true;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(CompactScriptModel::new()));
@@ -1164,10 +1138,8 @@ fn session_uses_model_assisted_compact_and_retains_latest_user_like_python() {
 
     assert_eq!(response.text, "done");
     assert_eq!(session.summary, "Summary:\nimportant compacted context");
-    assert!(session
-        .messages
-        .iter()
-        .any(|message| message.role == "user" && message.content == "latest request"));
+    assert!(session.messages.iter().any(|message| message.role == "user"
+        && user_text_without_time_context(&message.content) == "latest request"));
     assert!(!session.summary.contains("<analysis>"));
 }
 
@@ -1175,9 +1147,6 @@ fn session_uses_model_assisted_compact_and_retains_latest_user_like_python() {
 fn session_compacts_when_model_input_tokens_reach_threshold_like_python() {
     let mut config = AgentConfig::default();
     config.model.input_context_tokens = 30;
-    config.session.trigger_message_limit = 99;
-    config.session.recent_message_limit = 2;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(BudgetInspectModel));
@@ -1199,9 +1168,6 @@ fn session_compacts_when_model_input_tokens_reach_threshold_like_python() {
 #[test]
 fn session_uses_output_reserve_for_compaction_threshold_like_python() {
     let mut config = AgentConfig::default();
-    config.session.trigger_message_limit = 99;
-    config.session.recent_message_limit = 2;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let old_message = Message::new("user", &"x".repeat(1000));
@@ -1273,8 +1239,6 @@ fn session_uses_reported_usage_as_next_request_anchor_like_python() {
     let mut config = AgentConfig::default();
     config.model.input_context_tokens = 240;
     config.model.max_output_tokens = 80;
-    config.session.trigger_message_limit = 99;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     config.skills.max_catalog = 0;
@@ -1297,8 +1261,6 @@ fn session_uses_reported_usage_as_next_request_anchor_like_python() {
 fn session_compacts_and_retries_context_overflow_once_like_python() {
     let calls = Arc::new(Mutex::new(0usize));
     let mut config = AgentConfig::default();
-    config.session.trigger_message_limit = 99;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(
@@ -1321,8 +1283,6 @@ fn session_compacts_and_retries_context_overflow_once_like_python() {
 fn session_stops_after_second_context_overflow_like_python() {
     let calls = Arc::new(Mutex::new(0usize));
     let mut config = AgentConfig::default();
-    config.session.trigger_message_limit = 99;
-    config.session.model_compact = false;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(
@@ -1433,9 +1393,6 @@ fn session_does_not_log_context_budget_for_token_triggered_compaction_like_pytho
     let transcript_path = temp.join("transcripts/events.jsonl");
     let mut config = AgentConfig::default();
     config.model.input_context_tokens = 30;
-    config.session.trigger_message_limit = 99;
-    config.session.recent_message_limit = 2;
-    config.session.model_compact = false;
     config.session.transcript = true;
     config.memory.enabled = false;
     let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
@@ -1503,7 +1460,6 @@ fn session_keeps_large_tool_result_text_for_model_context_like_python() {
 fn context_pressure_warning_is_not_injected_for_large_model_input_like_python() {
     let mut config = AgentConfig::default();
     config.model.input_context_tokens = 30;
-    config.session.max_tool_rounds = 4;
     config.session.transcript = false;
     config.memory.enabled = false;
     let mut session = AgentSession::new(config, Box::new(RepeatedBudgetPressureModel::new()));
@@ -1517,9 +1473,7 @@ fn context_pressure_warning_is_not_injected_for_large_model_input_like_python() 
 
     let response = session.submit("start").unwrap();
 
-    assert!(response
-        .text
-        .contains("Tool round limit reached after 4 rounds."));
+    assert_eq!(response.text, "budget completed");
     assert!(!session
         .messages
         .iter()
@@ -1531,10 +1485,8 @@ fn session_falls_back_and_logs_compact_error_like_python() {
     let temp = temp_dir("session-compact-error");
     let transcript_path = temp.join("transcripts/events.jsonl");
     let mut config = AgentConfig::default();
+    config.model.input_context_tokens = 100;
     config.model.provider = "openai_compatible".to_string();
-    config.session.trigger_message_limit = 3;
-    config.session.recent_message_limit = 2;
-    config.session.model_compact = true;
     config.session.transcript = true;
     config.memory.enabled = false;
     let writer = TranscriptWriter::new(transcript_path.clone(), BTreeMap::new(), 0, 0).unwrap();
@@ -1558,24 +1510,21 @@ fn session_falls_back_and_logs_compact_error_like_python() {
 }
 
 #[test]
-fn session_round_limit_text_matches_python() {
+fn session_continues_past_32_tool_rounds_until_final_answer() {
     let mut config = AgentConfig::default();
-    config.session.max_tool_rounds = 1;
     config.session.transcript = false;
     config.memory.enabled = false;
-    let mut session = AgentSession::new(config, Box::new(AlwaysToolModel::new()));
-
+    let mut session = AgentSession::new(config, Box::new(FiniteLongToolModel::new()));
     let response = session.submit("loop").unwrap();
-
-    assert!(response
-        .text
-        .contains("Tool round limit reached after 1 round."));
-    assert!(response.text.contains("The task may still be incomplete."));
-    assert!(response.text.contains("Recent tool results:"));
-    assert!(response.text.contains("You can continue the task"));
-    assert!(response
-        .text
-        .contains("do not claim the previous task was fully completed"));
+    assert_eq!(response.text, "completed 40 tool rounds");
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .count(),
+        40
+    );
 }
 
 #[test]
@@ -1913,7 +1862,6 @@ fn shell_tool_executes_compound_command_with_real_shell() {
     assert!(result.ok);
     assert_eq!(result.text.trim(), "2");
 }
-
 
 #[test]
 fn memory_context_bootstraps_and_loads_always_on_files() {
@@ -2309,6 +2257,47 @@ fn openai_compatible_parses_finish_reason_and_usage() {
             output_tokens: 20,
             cache_read_tokens: 30,
             cache_write_tokens: 10,
+            total_tokens: 140,
+        })
+    );
+}
+
+#[test]
+fn deepseek_reports_cache_hit_and_miss_tokens() {
+    let _guard = env_lock().lock().unwrap();
+    let server = start_http_server(|_base_url, _requests| {
+        |_request| {
+            TestHttpResponse::json(
+                r#"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}],"usage":{"prompt_tokens":120,"completion_tokens":20,"total_tokens":140,"prompt_cache_hit_tokens":30,"prompt_cache_miss_tokens":90}}"#,
+            )
+        }
+    });
+    let mut config = AgentConfig::default().model;
+    config.provider = "openai_compatible".to_string();
+    config.api_key = "test-key".to_string();
+    config.base_url = server.base_url;
+    let mut model = OpenAiCompatibleModel::from_config(&config).unwrap();
+
+    let response = model
+        .complete(
+            &[Message::new("user", "hello")],
+            &[],
+            "",
+            &ModelLimits {
+                timeout_seconds: 5,
+                max_output_tokens: 20,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(response.stop_reason.as_deref(), Some("length"));
+    assert_eq!(
+        response.usage,
+        Some(ModelUsage {
+            input_tokens: 90,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 0,
             total_tokens: 140,
         })
     );
@@ -3150,14 +3139,14 @@ fn gateway_hot_reload_uses_the_shared_direct_config() {
     let path = temp.join("config.toml");
     fs::write(
         &path,
-        "[model]\nprovider = \"fake\"\nmodel = \"before\"\n[session]\nmax_tool_rounds = 7\n",
+        "[model]\nprovider = \"fake\"\nmodel = \"before\"\n[session]\nmax_context_memory_mib = 7\n",
     )
     .unwrap();
     let config = AgentConfig::load(Some(&path)).unwrap();
     let mut cache = GatewaySessionCache::new_with_config_path(config, Some(path.clone())).unwrap();
     fs::write(
         &path,
-        "[model]\nprovider = \"fake\"\nmodel = \"after-longer\"\n[vision]\nmodel = \"vision-after\"\n[web_search]\napi_key = \"search-after\"\n[session]\nmax_tool_rounds = 99\n",
+        "[model]\nprovider = \"fake\"\nmodel = \"after-longer\"\n[vision]\nmodel = \"vision-after\"\n[web_search]\napi_key = \"search-after\"\n[session]\nmax_context_memory_mib = 10\n",
     )
     .unwrap();
 
@@ -3167,7 +3156,7 @@ fn gateway_hot_reload_uses_the_shared_direct_config() {
     assert_eq!(session.config.model.model, "after-longer");
     assert_eq!(session.config.vision.model, "vision-after");
     assert_eq!(session.config.web_search.api_key, "search-after");
-    assert_eq!(session.config.session.max_tool_rounds, 99);
+    assert_eq!(session.config.session.max_context_memory_mib, Some(10));
 }
 
 #[test]
@@ -4066,7 +4055,11 @@ fn gateway_cli_reports_failed_stop_restart_and_start() {
         .arg("10")
         .spawn()
         .unwrap();
-    fs::write(&state, serde_json::json!({"pid": unrelated.id()}).to_string()).unwrap();
+    fs::write(
+        &state,
+        serde_json::json!({"pid": unrelated.id()}).to_string(),
+    )
+    .unwrap();
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_colibri"))
             .env("COLIBRI_HOME", &temp)
@@ -4109,7 +4102,10 @@ fn gateway_cli_reports_failed_stop_restart_and_start() {
     let read_pid = |output: &std::process::Output| {
         String::from_utf8_lossy(&output.stdout)
             .lines()
-            .find_map(|line| line.strip_prefix("pid=").and_then(|pid| pid.parse::<u32>().ok()))
+            .find_map(|line| {
+                line.strip_prefix("pid=")
+                    .and_then(|pid| pid.parse::<u32>().ok())
+            })
     };
     assert!(started.status.success(), "{started:?}");
     assert!(restarted.status.success(), "{restarted:?}");
@@ -4199,8 +4195,12 @@ fn weixin_media_cleanup_removes_oldest_files_to_fit_budget_like_python() {
 struct FixtureOutbound;
 
 impl OutboundSink for FixtureOutbound {
-    fn send_text(&self, _text: &str) -> Result<(), String> { Ok(()) }
-    fn send_media(&self, _media: &MediaPart) -> Result<(), String> { Ok(()) }
+    fn send_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn send_media(&self, _media: &MediaPart) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 struct FakeGatewayChannel;
@@ -4521,7 +4521,7 @@ impl ModelClient for CompactScriptModel {
         self.calls += 1;
         if system.contains("summarizing conversations") {
             assert_eq!(messages.len(), 1);
-            assert!(messages[0].content.contains("latest request"));
+            assert!(!messages[0].content.contains("latest request"));
             return Ok(colibri_rust::messages::ModelResponse {
                 text: "<analysis>private reasoning</analysis><summary>important compacted context</summary>"
                     .to_string(),
@@ -4567,15 +4567,17 @@ impl ModelClient for FailingCompactModel {
     }
 }
 
-struct AlwaysToolModel;
+struct FiniteLongToolModel {
+    calls: usize,
+}
 
-impl AlwaysToolModel {
+impl FiniteLongToolModel {
     fn new() -> Self {
-        Self
+        Self { calls: 0 }
     }
 }
 
-impl ModelClient for AlwaysToolModel {
+impl ModelClient for FiniteLongToolModel {
     fn complete(
         &mut self,
         _messages: &[Message],
@@ -4583,6 +4585,13 @@ impl ModelClient for AlwaysToolModel {
         _system: &str,
         _limits: &ModelLimits,
     ) -> Result<colibri_rust::messages::ModelResponse, String> {
+        self.calls += 1;
+        if self.calls > 40 {
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "completed 40 tool rounds".into(),
+                ..Default::default()
+            });
+        }
         Ok(colibri_rust::messages::ModelResponse {
             text: String::new(),
             tool_calls: vec![ToolCall {
@@ -4872,6 +4881,12 @@ impl ModelClient for RepeatedBudgetPressureModel {
         _limits: &ModelLimits,
     ) -> Result<colibri_rust::messages::ModelResponse, String> {
         self.calls += 1;
+        if self.calls > 4 {
+            return Ok(colibri_rust::messages::ModelResponse {
+                text: "budget completed".into(),
+                ..Default::default()
+            });
+        }
         if messages.iter().any(|message| {
             message.role == "system" && message.content.contains("Context budget is tight")
         }) {
@@ -4962,6 +4977,10 @@ where
             let Ok(request) = read_http_request(stream.try_clone().unwrap()) else {
                 continue;
             };
+            if request.method == "GET" && request.path.ends_with("/models") {
+                let _ = write_http_response(stream, TestHttpResponse::json("{\"data\":[]}"));
+                continue;
+            }
             let response = handler(request.clone());
             requests_for_thread.lock().unwrap().push(request);
             let _ = write_http_response(stream, response);
@@ -5125,5 +5144,8 @@ fn direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate() {
     let mut session = AgentSession::new(config, Box::new(DirectPromptModel));
     let response = session.submit("inspect").unwrap();
     assert_eq!(response.text, "done");
-    assert!(session.messages.iter().any(|message| message.role == "tool" && !message.content.contains("permission_denied")));
+    assert!(session
+        .messages
+        .iter()
+        .any(|message| message.role == "tool" && !message.content.contains("permission_denied")));
 }

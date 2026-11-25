@@ -16,6 +16,10 @@ mod mcp;
 pub mod memory;
 pub mod messages;
 pub mod model;
+pub mod model_capabilities;
+pub mod model_history;
+#[cfg(unix)]
+pub mod model_metadata;
 pub mod process_output;
 pub mod repl_input;
 pub mod runtime_reload;

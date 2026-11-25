@@ -11,7 +11,7 @@ use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::skills::SkillIndex;
 use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
@@ -27,15 +27,12 @@ use crate::config_io::{atomic_write, lock};
 const MAX_MEMORY_BYTES: usize = 64 * 1024;
 type Notice = Arc<dyn Fn(&str) + Send + Sync>;
 
-fn text<'a>(values: &'a Map<String, Value>, name: &str) -> &'a str {
-    values.get(name).and_then(Value::as_str).unwrap_or_default()
-}
-
 struct App {
     settings: Settings,
     session: Option<AgentSession>,
     recording: Option<Recording>,
     notice: Notice,
+    activity: Option<Notice>,
     restore: bool,
     settings_changed: bool,
     loaded_config: Option<ConfigFingerprint>,
@@ -49,6 +46,7 @@ impl App {
             session: None,
             recording: None,
             notice,
+            activity: None,
             restore: true,
             settings_changed: false,
             loaded_config: None,
@@ -155,15 +153,18 @@ impl App {
             )
             .with_working_directory(self.settings.home.clone())
             .with_status_callback(false, Arc::clone(&self.notice));
+            if let Some(activity) = &self.activity {
+                session = session.with_activity_callback(Arc::clone(activity));
+            }
             if let Some(old) = self.session.take() {
-                session.messages = old.messages;
-                session.summary = old.summary;
+                session.inherit_history(old);
             } else if self.restore
                 && session.config.session.transcript
                 && session.config.session.restore_transcript
             {
                 let loader = self.history_loader(&session.config);
-                session = session.with_history_loader(Box::new(move || loader.load()));
+                session =
+                    session.with_model_history_loader(Box::new(move || loader.load_model("local")));
             }
             self.restore = false;
             self.settings_changed = false;
@@ -242,7 +243,7 @@ impl App {
 
     fn start_voice(&mut self) -> Result<&'static str, String> {
         if self.recording.is_none() {
-            self.recording = Some(Recording::start(&self.settings.values()?)?);
+            self.recording = Some(Recording::start()?);
         }
         Ok(self.recording.as_ref().unwrap().backend())
     }
@@ -455,6 +456,9 @@ fn pipe(home: PathBuf) -> Result<(), String> {
             let _ = send(&event("status", json!({"text":message})));
         }),
     );
+    app.activity = Some(Arc::new(|stage| {
+        let _ = send(&event("activity", json!({"text":stage})));
+    }));
     for line in io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         let result = serde_json::from_str(&line)
@@ -478,7 +482,9 @@ fn pipe(home: PathBuf) -> Result<(), String> {
 fn repl(home: PathBuf) -> Result<(), String> {
     let mut app = App::new(home, Arc::new(|message| println!("{message}")));
     let terminal = io::stdin().is_terminal();
-    println!("Colibri REPL  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit");
+    println!(
+        "Colibri REPL  /compact  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit"
+    );
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut line = String::new();

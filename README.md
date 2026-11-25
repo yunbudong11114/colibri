@@ -253,7 +253,7 @@ When the model returns tool calls, Colibri can execute:
 - `skill.read`: read full `SKILL.md` instructions for a catalog skill by name.
 - `skill.run`: run a configured local skill command.
 
-Tool calls are bounded by `session.max_tool_rounds` and tool output is capped by `tools.max_result_chars`.
+Tool output is capped by `tools.max_result_chars`. Agent turns continue until a final response, an error, or an existing user interruption.
 
 ## Permissions
 
@@ -366,16 +366,11 @@ Important defaults:
 [model]
 max_output_tokens = 16384
 timeout_seconds = 60
-input_context_tokens = 48000
+input_context_tokens = 0 # automatic capacity resolution
 max_retries = 2
 retry_backoff_ms = 500
 
 [session]
-max_tool_rounds = 32
-trigger_message_limit = 96
-recent_message_limit = 12
-summary_max_chars = 12000
-model_compact = true
 transcript = true
 
 [tools]
@@ -388,7 +383,7 @@ max_pending_inbound = 8
 max_concurrent_turns = 1
 ```
 
-When the session reaches `trigger_message_limit` messages, or when the estimated model input tokens reach 80% of `model.input_context_tokens`, Colibri compacts the current message buffer into a bounded rolling summary and keeps the latest `recent_message_limit` messages. If no tokenizer is available, Colibri estimates input tokens as UTF-8 bytes divided by 4. It does not drop old messages with a separate pruning pass.
+The shared Rust runtime manages compaction using the resolved model window, effective output reservation, and safety headroom. Older complete turns become a bounded summary while recent turns remain verbatim. Enter `/compact` in chat or REPL to compact manually. Original transcript records remain on disk. Optionally set `session.max_context_memory_mib = 10` to add a 10 MiB context-content budget. Omitted or zero leaves this additional budget disabled. If compaction cannot bring content below an explicitly configured budget, the current request returns a capacity error before constructing the model message copy. This content estimate includes history, tool arguments, summary, Memory, skill catalog, and tool definitions. Process RSS, UI, voice models, and tool subprocess memory incur additional costs.
 
 ## Transcripts
 
@@ -429,3 +424,11 @@ deploy/systemd/colibri-gateway.service
 
 For gateway boot autostart, use `colibri-gateway.service` with foreground `gateway run` (not `gateway start`).  
 The Weixin channel does not listen on a local port; outbound HTTPS plus a configured `channels.weixin.token` is enough under systemd.
+
+Model capacity is resolved from the configured service’s model metadata on first use, with a five-second wait limit. A credential-scoped cache lasts ten minutes and refreshes in the background on later use; successful values persist across restarts. Discovered limits stay in the capability cache and request snapshots, separate from user configuration and App settings. Missing metadata falls back to the bundled catalog or a conservative 48,000-token window. Custom deployments can optionally set `model.input_context_tokens` as an override. Diagnostics reads cached capacity without a network request.
+
+### Runtime context and model-history recovery
+
+Memory and skill-catalog changes append bounded runtime-context snapshots at model-request boundaries. Unchanged context reuses the existing snapshot. Snapshot positions are retained alongside chat messages so later requests preserve the previous prefix. Snapshot bytes participate in context accounting.
+
+Agent recovery restores recorded tool calls, results, original user-message timestamps, summaries, and runtime-context positions. It reads a bounded transcript tail and keeps complete recent turns. Missing tool results after interruption are marked as execution unknown for verification before retrying. Earlier logs retain the information they recorded. App display history continues to show conversation text.
