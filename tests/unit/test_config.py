@@ -34,7 +34,7 @@ def test_default_config_uses_small_device_limits():
     assert config.session.transcript_retention_days == 30
     assert config.session.transcript_max_total_bytes == 134217728
     assert config.tools.max_result_chars == 32000
-    assert "web" in config.tools.enabled
+    assert "web" not in config.tools.enabled
     assert "mcp" not in config.tools.enabled
     assert config.skills.max_catalog == 32
     assert config.skills.max_catalog_chars == 4000
@@ -45,11 +45,6 @@ def test_default_config_uses_small_device_limits():
     assert not hasattr(config.memory, "max_recall_topics")
     assert config.console.status
     assert config.console.plain_answer
-    assert config.web_search.engine == "baidu"
-    assert config.web_search.api_key == ""
-    assert config.web_search.endpoint == "https://qianfan.baidubce.com/v2/ai_search/web_search"
-    assert config.web_search.max_results == 10
-    assert config.web_search.timeout_seconds == 10
     assert not config.hardware.enabled
     assert config.hardware.discovery == "on_demand"
     assert config.hardware.operation_timeout_seconds == 2.0
@@ -114,12 +109,6 @@ max_instruction_chars = 1234
 [console]
 status = false
 
-[web_search]
-engine = "baidu"
-api_key = "search-key"
-max_results = 5
-timeout_seconds = 7
-
 [gateway]
 enabled_channels = ["weixin"]
 max_sessions = 2
@@ -165,9 +154,6 @@ auth_timeout_seconds = 22
     assert config.skills.max_catalog_chars == 1500
     assert config.skills.max_instruction_chars == 1234
     assert not config.console.status
-    assert config.web_search.api_key == "search-key"
-    assert config.web_search.max_results == 5
-    assert config.web_search.timeout_seconds == 7
     assert config.gateway.max_sessions == 2
     assert config.gateway.session_idle_seconds == 30
     assert config.channels.weixin.enabled

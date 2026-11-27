@@ -169,6 +169,11 @@ pub(crate) fn start(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult
 }
 
 pub(crate) fn poll(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult {
+    for key in ["offset", "wait_ms"] {
+        if a.get(key).is_some_and(|v| v.parse::<u64>().is_err()) {
+            return ToolResult::error("invalid_arguments", format!("Invalid {key}"));
+        }
+    }
     let result = (|| -> Result<String, String> {
         let id = a.get("job_id").ok_or("Missing job_id")?;
         let dir = directory(&c.runtime_home, id)?;
@@ -183,6 +188,9 @@ pub(crate) fn poll(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult 
             if j.status != "running" || Instant::now() >= deadline {
                 break j;
             }
+            if crate::cancellation::cancelled() {
+                return Err("cancelled: poll interrupted; the job may still be running".into());
+            }
             std::thread::sleep(Duration::from_millis(30))
         };
         let tail = a.get("tail").is_some_and(|v| v == "true");
@@ -192,9 +200,13 @@ pub(crate) fn poll(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult 
             a.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0u64)
         };
         let mut bytes = Vec::new();
+        let mut saved_bytes = 0;
+        let mut read_error = None;
+
         let output = dir.join(if tail { "tail.log" } else { "output.log" });
-        if let Ok(mut file) = fs::File::open(output) {
-            let limit = c.config.tools.max_result_chars.max(4).min(65536) as u64;
+        if let Ok(mut file) = fs::File::open(&output) {
+            saved_bytes = file.metadata().map_err(|e| e.to_string())?.len();
+            let limit = c.config.tools.max_result_chars.clamp(4, 4096) as u64;
             if tail {
                 offset = file
                     .metadata()
@@ -204,14 +216,32 @@ pub(crate) fn poll(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult 
             }
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| e.to_string())?;
-            file.take(c.config.tools.max_result_chars.max(4).min(65536) as u64)
+            file.take(c.config.tools.max_result_chars.clamp(4, 4096) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|e| e.to_string())?;
+        } else if j.status != "running" || output.exists() {
+            read_error =
+                Some("Output log unavailable; do not rerun the original command automatically");
         }
+        if tail {
+            let skip = bytes.iter().take_while(|b| (**b & 0xc0) == 0x80).count();
+            bytes.drain(..skip);
+            offset += skip as u64;
+        } else if bytes.first().is_some_and(|b| (*b & 0xc0) == 0x80) {
+            return Err("offset is inside a UTF-8 character; continue from next_offset returned by shell.poll".into());
+        }
+        let mut waiting_for_utf8 = false;
         if let Err(e) = std::str::from_utf8(&bytes) {
-            if e.error_len().is_none() {
-                bytes.truncate(e.valid_up_to());
+            if e.error_len().is_some() {
+                return Err("Output contains invalid UTF-8; inspect output_path with byte-aware shell tools, do not rerun the original command".into());
             }
+            if e.valid_up_to() == 0 {
+                if j.status != "running" {
+                    return Err("Output ends with incomplete UTF-8; inspect the saved log with byte-aware shell tools".into());
+                }
+                waiting_for_utf8 = true;
+            }
+            bytes.truncate(e.valid_up_to());
         }
         let decoded = String::from_utf8_lossy(&bytes);
         let used = decoded
@@ -222,11 +252,18 @@ pub(crate) fn poll(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult 
         let next = offset + used.min(bytes.len()) as u64;
         let mut text = decoded[..used].to_string();
         crate::secrets::redact_tool_output(&c.config, &mut text);
-        Ok(serde_json::json!({"job_id":j.job_id,"status":j.status,"exit_code":j.exit_code,"output":text,"next_offset":next,"truncated":j.truncated,"tail_available":j.truncated,"supervisor_pid":j.pid,"error":j.error}).to_string())
+        Ok(serde_json::json!({"job_id":j.job_id,"status":j.status,"exit_code":j.exit_code,"output":text,"next_offset":next,"page_has_more":next<saved_bytes && !waiting_for_utf8,"waiting_for_utf8":waiting_for_utf8,"log_bytes":saved_bytes,"output_path":output,"read_error":read_error,"capture_complete":!j.truncated && !tail && j.status!="running" && read_error.is_none(),"log_view":if tail{"tail"}else{"head"},"truncated":j.truncated,"tail_available":j.truncated && dir.join("tail.log").is_file(),"supervisor_pid":j.pid,"error":j.error}).to_string())
     })();
     match result {
         Ok(s) => ToolResult::ok(s),
-        Err(e) => ToolResult::error("job_poll_failed", e),
+        Err(e) => ToolResult::error(
+            if crate::cancellation::cancelled() {
+                "cancelled"
+            } else {
+                "job_poll_failed"
+            },
+            e,
+        ),
     }
 }
 pub(crate) fn cancel(a: &BTreeMap<String, String>, c: &ToolContext) -> ToolResult {

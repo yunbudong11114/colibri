@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 mod context;
 
 use crate::config::AgentConfig;
@@ -16,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const SYSTEM_PROMPT: &str = "Your name is Colibri, a practical personal agent. Use the actual runtime facts and available tool schemas; do not assume the host device or operating system. Tools have full application access as the current OS user. For a multi-step execution task, use task.start/update to preserve the objective, acceptance checks, progress and next action. On recovery, inspect the task and verify uncertain side effects before repeating commands. Use background shell jobs for long commands, poll their final exit status, and check the requested outcome before marking steps completed. Starting a job is not completing it. Prefer bounded file reads, search and unique-context patches. Do not dump credentials. Report only tests and checks that actually ran; distinguish completed work, pending work and concrete blockers. Keep simple questions direct. Before any dangerous, destructive, or irreversible operation, ask the user and wait for explicit approval.";
+pub const SYSTEM_PROMPT: &str = "Your name is Colibri, a practical personal agent. Use the actual runtime facts and available tool schemas; do not assume the host device or operating system. Tools have full application access as the current OS user. For a multi-step execution task, use task.start/update to preserve the objective, acceptance checks, progress and next action. On recovery, inspect the task and verify uncertain side effects before repeating commands. Use background shell jobs for long commands, poll their final exit status, and check the requested outcome before marking steps completed. Starting a job is not completing it. Prefer bounded file reads, search and unique-context patches. Do not dump credentials. Report only tests and checks that actually ran; distinguish completed work, pending work and concrete blockers. Keep simple questions direct. A cancelled task must not resume unless the user explicitly requests it. Before any dangerous, destructive, or irreversible operation, ask the user and wait for explicit approval.";
 pub const MODEL_UNAVAILABLE_TEXT: &str = "模型暂时不可用，请检查网络后重试。";
 pub const TRUNCATED_TOOL_CALL_TEXT: &str = "Tool call was truncated because the model reached its output limit; retry the call with complete arguments.";
 
@@ -39,6 +40,7 @@ pub struct AgentSession {
     transcript: Option<Arc<Mutex<TranscriptWriter>>>,
     transcript_metadata: BTreeMap<String, String>,
     activity_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    last_activity: Mutex<String>,
     status_enabled: bool,
     status_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     media_sender: Option<Arc<dyn Fn(MediaPart) -> Result<(), String> + Send + Sync>>,
@@ -49,6 +51,7 @@ pub struct AgentSession {
     working_directory: Option<PathBuf>,
     runtime_home: PathBuf,
     last_failure: Option<(u64, usize)>,
+    owned_jobs: std::collections::BTreeSet<String>,
     steering: Arc<SteeringState>,
     steer_notifier: Option<Arc<dyn Fn(String) + Send + Sync>>,
     usage_anchor: Option<UsageAnchor>,
@@ -103,6 +106,7 @@ impl AgentSession {
             transcript,
             transcript_metadata,
             activity_callback: None,
+            last_activity: Mutex::new(String::new()),
             status_enabled: false,
             status_callback: None,
             media_sender: None,
@@ -113,6 +117,7 @@ impl AgentSession {
             working_directory: None,
             runtime_home: crate::config::colibri_home(),
             last_failure: None,
+            owned_jobs: Default::default(),
             steering: Arc::new(SteeringState::new()),
             steer_notifier: None,
             usage_anchor: None,
@@ -139,11 +144,6 @@ impl AgentSession {
         Ok(())
     }
 
-    pub(crate) fn replace_transcript(&mut self, transcript: Option<Arc<Mutex<TranscriptWriter>>>) {
-        self.close();
-        self.transcript = transcript;
-    }
-
     pub fn with_runtime_home(mut self, home: PathBuf) -> Self {
         self.runtime_home = home;
         self
@@ -164,7 +164,8 @@ impl AgentSession {
         self
     }
 
-    pub(crate) fn inherit_history(&mut self, previous: Self) {
+    pub(crate) fn inherit_history(&mut self, mut previous: Self) {
+        self.owned_jobs = std::mem::take(&mut previous.owned_jobs);
         self.messages = previous.messages;
         self.summary = previous.summary;
         self.context_updates = previous.context_updates;
@@ -178,6 +179,9 @@ impl AgentSession {
     }
 
     fn notify_activity(&self, stage: &str) {
+        if let Ok(mut last) = self.last_activity.lock() {
+            *last = stage.to_string();
+        }
         if let Some(callback) = &self.activity_callback {
             callback(stage);
         }
@@ -208,6 +212,29 @@ impl AgentSession {
 
     pub fn steer(&self, text: &str) -> bool {
         self.steering.steer(text)
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        if !self.owned_jobs.is_empty() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let c = ToolContext::new(Arc::clone(&self.config), self.runtime_home.clone())
+                .with_runtime_home(self.runtime_home.clone())
+                .with_scope(
+                    self.transcript_metadata
+                        .get("session_key")
+                        .cloned()
+                        .unwrap_or_else(|| "local".into()),
+                );
+            return crate::tasks::read(&c)
+                .ok()
+                .flatten()
+                .is_some_and(|t| t.status == "running" || t.status == "blocked");
+        }
+        #[cfg(not(unix))]
+        false
     }
 
     pub fn is_turn_active(&self) -> bool {
@@ -266,6 +293,122 @@ impl AgentSession {
     }
 
     fn submit_inner(&mut self, text: &str, media: Vec<MediaPart>) -> Result<AgentResponse, String> {
+        let token = self.steering.begin_turn();
+        let _scope = crate::cancellation::Scope::enter(token.clone());
+        let _turn_guard = TurnGuard {
+            steering: Arc::clone(&self.steering),
+        };
+        if text.trim() == "/stop" && media.is_empty() {
+            self.restore_history_once();
+            self.messages.push(Message::new("user", text));
+            self.write_transcript("user_message", serde_json::json!({"text":text}));
+            return Ok(self.finish_stop());
+        }
+        let result = self.execute_inner(text, media);
+        if token.is_cancelled() {
+            Ok(self.finish_stop())
+        } else {
+            result
+        }
+    }
+
+    fn finish_stop(&mut self) -> AgentResponse {
+        let context = ToolContext::new(
+            Arc::clone(&self.config),
+            self.working_directory
+                .clone()
+                .unwrap_or_else(|| self.runtime_home.clone()),
+        )
+        .with_runtime_home(self.runtime_home.clone())
+        .with_scope(
+            self.transcript_metadata
+                .get("session_key")
+                .cloned()
+                .unwrap_or_else(|| "local".into()),
+        );
+        #[cfg(unix)]
+        for id in &self.owned_jobs {
+            let _ = crate::jobs::cancel(&BTreeMap::from([("job_id".into(), id.clone())]), &context);
+        }
+        self.owned_jobs.clear();
+        let missing = self
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .filter(|c| {
+                !self
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_call_id.as_deref() == Some(c.id.as_str()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for call in missing {
+            self.messages
+                .push(Message::tool("cancelled: not executed", call.id.clone()));
+            self.write_transcript("tool_result",serde_json::json!({"id":call.id,"name":call.name,"ok":false,"error_type":"cancelled","text":"未执行：用户停止"}));
+        }
+        while let Some(text) = self.steering.drain_one() {
+            self.write_transcript(
+                "steering_discarded",
+                serde_json::json!({"text":text,"reason":"cancelled"}),
+            );
+        }
+        let stage = self
+            .last_activity
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let stage = if stage.is_empty() {
+            "处理请求"
+        } else {
+            activity::label(&stage)
+        };
+        let mut text = format!("已停止。阶段性结论：\n停止位置：{stage}\n");
+        #[cfg(unix)]
+        {
+            text += &crate::tasks::cancel(&context)
+                .unwrap_or_else(|e| format!("任务状态保存失败：{e}"));
+            if let Ok(state) = crate::tasks::snapshot(&context) {
+                self.write_transcript("task_state", serde_json::json!({"state":state}));
+            }
+        }
+        let recent = self
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| m.role != "user")
+            .filter(|m| m.role == "tool")
+            .take(4)
+            .map(|m| {
+                if m.content.starts_with("cancelled:") {
+                    "当前操作已中断，部分修改可能已经发生。".into()
+                } else {
+                    crate::memory::truncate(m.content.clone(), 180).0
+                }
+            })
+            .collect::<Vec<_>>();
+        for item in recent.into_iter().rev() {
+            text += &format!("\n执行记录：{item}");
+        }
+        text += "\n后续步骤未继续。已发生的修改未撤销；中断中的操作和远端请求结果需核验。";
+        crate::secrets::redact_tool_output(&self.config, &mut text);
+        self.messages.push(Message::new("assistant", &text));
+        self.write_transcript(
+            "assistant_message",
+            serde_json::json!({"text":text,"tool_call_count":0,"stop_reason":"cancelled"}),
+        );
+        AgentResponse {
+            text,
+            error_type: Some("cancelled".into()),
+        }
+    }
+
+    fn execute_inner(
+        &mut self,
+        text: &str,
+        media: Vec<MediaPart>,
+    ) -> Result<AgentResponse, String> {
         #[cfg(unix)]
         self.prepare_tools()?;
         self.restore_history_once();
@@ -343,9 +486,6 @@ impl AgentSession {
             self.messages.len().saturating_sub(1),
         );
         let tools = tool_specs_for_config(&self.config);
-        let steering = Arc::clone(&self.steering);
-        steering.set_turn_active(true);
-        let _turn_guard = TurnGuard { steering };
         self.run_tool_rounds(&tools, &context)
     }
 
@@ -375,6 +515,9 @@ impl AgentSession {
     ) -> Result<AgentResponse, String> {
         let mut completion_reminded = false;
         loop {
+            if crate::cancellation::cancelled() {
+                return Err("cancelled".into());
+            }
             let mut active_tools = tools.to_vec();
             if let Some(extension) = &self.direct_tools {
                 active_tools.extend(extension.specs());
@@ -385,6 +528,9 @@ impl AgentSession {
             let (latest_skills, _, _) = skill_catalog(context);
             self.sync_runtime_context(&latest_memory.text, &latest_skills, self.messages.len());
             self.refresh_request_capabilities()?;
+            if crate::cancellation::cancelled() {
+                return Err("cancelled".into());
+            }
             self.compact_for_completion_if_needed(tools);
             if self.context_memory_exceeded(tools) {
                 return Ok(AgentResponse {
@@ -413,6 +559,9 @@ impl AgentSession {
                         },
                     )
                 };
+                if crate::cancellation::cancelled() {
+                    return Err("cancelled".into());
+                }
                 match response_result {
                     Ok(response) => break response,
                     Err(error)
@@ -434,6 +583,9 @@ impl AgentSession {
                     Err(error) => return Ok(self.finish_model_error(&error)),
                 }
             };
+            if crate::cancellation::cancelled() {
+                return Err("cancelled".into());
+            }
             let assistant_text = bound_text(&response.text, self.config.tools.max_result_chars);
             let mut assistant = Message::new("assistant", &assistant_text);
             assistant.tool_calls = response.tool_calls.clone();
@@ -487,7 +639,13 @@ impl AgentSession {
 
             let calls = response.tool_calls;
             for index in 0..calls.len() {
+                if crate::cancellation::cancelled() {
+                    return Err("cancelled".into());
+                }
                 self.execute_tool_call(&calls[index], context)?;
+                if crate::cancellation::cancelled() {
+                    return Err("cancelled".into());
+                }
                 if let Some(steered) = self.steering.drain_one() {
                     let skipped = calls.len() - index - 1;
                     for skipped_call in &calls[index + 1..] {
@@ -528,13 +686,7 @@ impl AgentSession {
         let execution_arguments = string_arguments(&call.arguments);
         #[cfg(unix)]
         let task_id = crate::tasks::active_id(context);
-        self.notify_activity(match call.name.as_str() {
-            "shell.run" => "running_command",
-            "shell.poll" => "waiting_command",
-            name if name.starts_with("task.") => "planning_task",
-            name if name.starts_with("files.") => "working_files",
-            _ => "calling_tool",
-        });
+        self.notify_activity(activity::for_tool(&call.name));
         self.write_transcript(
             "tool_call",
             serde_json::json!({"id":call.id,"name":call.name,"arguments":call.arguments}),
@@ -590,6 +742,19 @@ impl AgentSession {
         } else {
             self.last_failure = None;
         }
+        if call.name == "shell.run" && result.ok {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(
+                result
+                    .text
+                    .split_once('\n')
+                    .filter(|(head, _)| head.starts_with("evidence_id="))
+                    .map_or(result.text.as_str(), |(_, body)| body),
+            ) {
+                if let Some(id) = value["job_id"].as_str() {
+                    self.owned_jobs.insert(id.to_string());
+                }
+            }
+        }
         let result = self.send_media_result_if_needed(result);
         let content = if result.ok {
             result.text
@@ -607,8 +772,6 @@ impl AgentSession {
                 .split_once(": ")
                 .map_or(content.as_str(), |(_, text)| text)
         };
-        let recoverable =
-            content.len() <= self.config.session.restore_scan_bytes.saturating_sub(4096) / 16;
         self.write_transcript(
             "tool_result",
             serde_json::json!({
@@ -617,8 +780,8 @@ impl AgentSession {
                 "ok":result.ok,
                 "error_type":result.error_type,
                 "text":bound_text(text, self.config.tools.max_result_chars),
-                "model_text": recoverable.then_some(&content),
-                "model_history_truncated": !recoverable,
+                "model_text": &content,
+                "model_history_truncated": false,
                 "truncated":result.truncated,
                 "media":result.media.as_ref().map(media_payload)
             }),
@@ -754,16 +917,10 @@ fn usage_payload(response: &crate::messages::ModelResponse) -> serde_json::Value
 }
 
 fn owned_transcript(config: &AgentConfig) -> Option<Arc<Mutex<TranscriptWriter>>> {
-    if !config.session.transcript {
-        return None;
-    }
-    TranscriptWriter::default_with_metadata_and_limits(
-        BTreeMap::new(),
-        config.session.transcript_retention_days,
-        config.session.transcript_max_total_bytes,
-    )
-    .ok()
-    .map(|writer| Arc::new(Mutex::new(writer)))
+    TranscriptWriter::for_session(&crate::config::colibri_home(), &config.session)
+        .ok()
+        .flatten()
+        .map(|writer| Arc::new(Mutex::new(writer)))
 }
 
 fn user_text_with_media(text: &str, media: &[MediaPart]) -> String {
@@ -833,8 +990,7 @@ struct TurnGuard {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        self.steering.set_turn_active(false);
-        self.steering.clear();
+        self.steering.end_turn();
     }
 }
 

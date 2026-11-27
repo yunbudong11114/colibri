@@ -27,6 +27,7 @@ pub struct PartialRuntimeReloader {
     path: PathBuf,
     fingerprint: Option<ConfigFingerprint>,
     snapshot: RuntimeSnapshot,
+    mcp_fingerprint: Option<ConfigFingerprint>,
 }
 
 impl PartialRuntimeReloader {
@@ -35,6 +36,7 @@ impl PartialRuntimeReloader {
         Self {
             path,
             fingerprint,
+            mcp_fingerprint: config_fingerprint(&snapshot.config.mcp_config_path),
             snapshot,
         }
     }
@@ -45,10 +47,12 @@ impl PartialRuntimeReloader {
 
     pub fn reload_if_changed(&mut self) -> RuntimeReloadResult {
         let fingerprint = config_fingerprint(&self.path);
-        if fingerprint == self.fingerprint {
+        let mcp_fingerprint = config_fingerprint(&self.snapshot.config.mcp_config_path);
+        if fingerprint == self.fingerprint && mcp_fingerprint == self.mcp_fingerprint {
             return RuntimeReloadResult::Unchanged;
         }
         self.fingerprint = fingerprint;
+        self.mcp_fingerprint = mcp_fingerprint;
         let candidate = match AgentConfig::load(Some(&self.path)) {
             Ok(config) => config,
             Err(error) => return RuntimeReloadResult::Rejected(error),
@@ -64,6 +68,8 @@ impl PartialRuntimeReloader {
             config: Arc::new(candidate),
             model,
         };
+        self.fingerprint = config_fingerprint(&self.path);
+        self.mcp_fingerprint = config_fingerprint(&snapshot.config.mcp_config_path);
         self.snapshot = snapshot.clone();
         RuntimeReloadResult::Reloaded(snapshot)
     }

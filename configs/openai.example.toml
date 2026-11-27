@@ -39,12 +39,6 @@ idle_exit_enabled = false
 idle_exit_seconds = 300
 # 新建 session 首次对话前是否从共享 transcript 恢复近期完整问答。
 restore_transcript = true
-# 从 transcript 恢复的最大消息条数；按完整问答轮次截取。
-restore_message_limit = 24
-# 从 transcript 恢复内容的最大字符数；按完整问答轮次截取。
-restore_char_limit = 24000
-# 启动恢复最多扫描的 transcript 尾部字节数。
-restore_scan_bytes = 2097152
 # transcript 文件保留天数；设为 0 时不按时间清理。
 transcript_retention_days = 30
 # transcript 目录允许占用的总字节数；设为 0 时不按容量清理。
@@ -53,18 +47,6 @@ transcript_max_total_bytes = 134217728
 [tools]
 # 单次工具结果写入上下文前的最大字符数。
 max_result_chars = 32000
-
-[web_search]
-# Web 搜索引擎名称。
-engine = "baidu"
-# Web 搜索 API Key。
-api_key = ""
-# Web 搜索 API endpoint。
-endpoint = "https://qianfan.baidubce.com/v2/ai_search/web_search"
-# 单次搜索默认返回结果数。
-max_results = 10
-# Web 搜索请求超时时间，单位秒。
-timeout_seconds = 10
 
 [hardware]
 # 是否允许向模型暴露硬件工具；默认关闭。

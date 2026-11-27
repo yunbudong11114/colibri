@@ -58,7 +58,6 @@ pub(crate) fn values(config: &AgentConfig) -> Vec<String> {
     let mut secrets: Vec<String> = [
         &config.model.api_key,
         &config.vision.api_key,
-        &config.web_search.api_key,
         &config.speech.api_key,
         &config.channels_weixin.token,
     ]
@@ -91,4 +90,47 @@ pub(crate) fn redact_config_content(text: &mut String) {
     let mut secrets = Vec::new();
     collect(&value, &mut secrets, false);
     replace(text, secrets);
+}
+
+/// Shared pipe/file redactor. Matches span arbitrary read boundaries.
+pub(crate) struct StreamRedactor {
+    secrets: Vec<Vec<u8>>,
+    pending: Vec<u8>,
+}
+impl StreamRedactor {
+    pub(crate) fn new(mut values: Vec<String>) -> Self {
+        for v in values.clone() {
+            if let Ok(s) = serde_json::to_string(&v) {
+                values.push(s[1..s.len() - 1].to_string());
+            }
+        }
+        values.retain(|v| !v.is_empty() && v != MASK);
+        values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        values.dedup();
+        Self {
+            secrets: values.into_iter().map(String::into_bytes).collect(),
+            pending: Vec::new(),
+        }
+    }
+    pub(crate) fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<u8> {
+        self.pending.extend_from_slice(bytes);
+        let guard = self.secrets.iter().map(Vec::len).max().unwrap_or(1);
+        let mut safe = Vec::new();
+        let mut pos = 0;
+        while pos < self.pending.len() && (eof || self.pending.len() - pos >= guard) {
+            if let Some(secret) = self
+                .secrets
+                .iter()
+                .find(|s| self.pending[pos..].starts_with(s))
+            {
+                safe.extend_from_slice(MASK.as_bytes());
+                pos += secret.len();
+            } else {
+                safe.push(self.pending[pos]);
+                pos += 1;
+            }
+        }
+        self.pending.drain(..pos);
+        safe
+    }
 }

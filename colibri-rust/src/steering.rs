@@ -6,6 +6,14 @@ pub const SKIPPED_TOOL_RESULT: &str = "Skipped due to queued user message.";
 pub const STEERING_QUEUE_MAX: usize = 4;
 pub const STEERING_PREVIEW_CHARS: usize = 20;
 
+pub fn format_received(text: &str) -> &'static str {
+    if text.trim() == "/stop" {
+        "正在停止，整理阶段性结论…"
+    } else {
+        "已收到补充，等待处理"
+    }
+}
+
 pub fn format_steering_ack(skipped: usize, steering_text: &str) -> String {
     let line1 = format!("已改方向，跳过剩余 {skipped} 个工具");
     let stripped = steering_text.trim();
@@ -24,6 +32,7 @@ pub fn format_steering_ack(skipped: usize, steering_text: &str) -> String {
 pub struct SteeringState {
     queue: Mutex<VecDeque<String>>,
     turn_active: AtomicBool,
+    cancellation: Mutex<crate::cancellation::Cancellation>,
 }
 
 impl SteeringState {
@@ -31,11 +40,15 @@ impl SteeringState {
         Self {
             queue: Mutex::new(VecDeque::new()),
             turn_active: AtomicBool::new(false),
+            cancellation: Default::default(),
         }
     }
 
     pub fn steer(&self, text: &str) -> bool {
         let cleaned = text.trim();
+        if cleaned == "/stop" {
+            return self.stop();
+        }
         if cleaned.is_empty() || !self.is_turn_active() {
             return false;
         }
@@ -49,6 +62,24 @@ impl SteeringState {
         true
     }
 
+    pub fn stop(&self) -> bool {
+        let token = self.cancellation.lock().unwrap_or_else(|e| e.into_inner());
+        let active = self.is_turn_active();
+        token.cancel();
+        active
+    }
+
+    pub(crate) fn begin_turn(&self) -> crate::cancellation::Cancellation {
+        let token = self.cancellation.lock().unwrap_or_else(|e| e.into_inner());
+        self.set_turn_active(true);
+        token.clone()
+    }
+    pub(crate) fn end_turn(&self) {
+        let mut token = self.cancellation.lock().unwrap_or_else(|e| e.into_inner());
+        self.set_turn_active(false);
+        *token = Default::default();
+        self.clear();
+    }
     pub fn is_turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
     }
@@ -86,6 +117,10 @@ impl SteerHandle {
 
     pub fn steer(&self, text: &str) -> bool {
         self.inner.steer(text)
+    }
+
+    pub fn stop(&self) -> bool {
+        self.inner.stop()
     }
 
     pub fn is_turn_active(&self) -> bool {

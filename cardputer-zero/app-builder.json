@@ -1,29 +1,31 @@
 {
   "app_name": "Colibri",
   "package_name": "colibri",
-  "version": "0.3.4",
+  "version": "1.0.2",
   "bin_name": "colibri",
   "description": "Keyboard-first Colibri chat for Cardputer Zero",
   "store": {
     "summary": "Keyboard-first AI chat with pinyin, voice, MCP, and a terminal REPL.",
-    "description": "A lightweight Colibri client for the Cardputer Zero, with configurable model, search and history, local offline voice input, MCP and skills.",
+    "description": "Colibri brings AI chat, pinyin input, offline voice transcription, MCP and skills to Cardputer Zero. The bundled offline speech recognition model accounts for most of the package storage. To connect Weixin, configure a chat model in Settings → Configuration → Model. Open the handheld CLI, run colibri auth weixin, then scan the code in Weixin and confirm. Run colibri gateway start and check colibri gateway status. If it is already running, use colibri gateway restart after signing in. Send a message to the connected Weixin bot to start chatting.",
     "categories": [
       "AI",
       "Development"
     ],
     "screenshots": [
       "assets/screenshot.png",
-      "assets/screenshot-confirm.png"
+      "assets/screenshot-menu.png",
+      "assets/screenshot-recording.png"
     ],
     "icon": "assets/store-icon.png",
     "source_repo": "https://github.com/yunbudong11114/colibri",
     "author": {
-      "display_name": "卧东"
+      "display_name": "云不冻"
     },
     "locales": {
       "zh-CN": {
         "title": "Colibri",
-        "summary": "支持拼音、语音、MCP 和终端 REPL 的口袋 AI 助手。"
+        "summary": "支持拼音、语音、MCP 和终端 REPL 的口袋 AI 助手。",
+        "description": "Colibri 是适用于 Cardputer Zero 的 AI 助手，支持拼音输入、离线语音转写、MCP 和技能。安装包的存储占用主要来自内置离线语音识别模型。使用微信通道：先在 Colibri 的「设置 → 配置 → 模型」完成模型配置；打开掌机自带的 CLI，运行 colibri auth weixin，用微信扫码并确认；运行 colibri gateway start，再用 colibri gateway status 查看状态。如果网关已在运行，扫码后执行 colibri gateway restart。随后在微信中给已连接的机器人发消息即可。"
       }
     },
     "permissions": {
@@ -32,7 +34,7 @@
       "imu": false,
       "network": true,
       "additional_hardware": false,
-      "background_service": false,
+      "background_service": true,
       "external_display": false
     }
   }

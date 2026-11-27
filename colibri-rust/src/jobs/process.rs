@@ -44,6 +44,7 @@ pub(crate) fn run_worker(dir: &Path) -> Result<(), String> {
             bytes: 0,
             total: 0,
             last_flush: Instant::now(),
+            error: None,
         }));
         let stdout = reader(
             child.stdout.take().unwrap(),
@@ -75,7 +76,8 @@ pub(crate) fn run_worker(dir: &Path) -> Result<(), String> {
             }
             if let Ok(s) = state.lock() {
                 job.bytes = s.bytes;
-                job.truncated = s.total > LOG_CAP;
+                job.truncated = s.total > LOG_CAP || s.error.is_some();
+                job.error = s.error.clone();
             }
             if last_saved.elapsed() >= Duration::from_secs(1)
                 && (job.bytes, job.truncated) != last_progress
@@ -93,12 +95,15 @@ pub(crate) fn run_worker(dir: &Path) -> Result<(), String> {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
         }
         let status = child.wait().map_err(|e| e.to_string())?;
-        let _ = stdout.join();
-        let _ = stderr.join();
+        let readers_ok = stdout.join().is_ok() & stderr.join().is_ok();
         let s = state.lock().map_err(|_| "output lock poisoned")?;
         job.bytes = s.bytes;
-        job.truncated = s.total > LOG_CAP;
-        let _ = crate::config_io::atomic_write(&dir.join("tail.log"), &s.tail);
+        let tail_ok = crate::config_io::atomic_write(&dir.join("tail.log"), &s.tail).is_ok();
+        job.truncated = s.total > LOG_CAP || s.error.is_some() || !readers_ok || !tail_ok;
+        job.error = s.error.clone().or_else(|| {
+            (!readers_ok || !tail_ok)
+                .then(|| "output_capture_failed: saved log is incomplete".into())
+        });
         job.exit_code = status.code();
         job.status = reason
             .unwrap_or(if status.success() {

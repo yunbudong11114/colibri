@@ -28,7 +28,6 @@ use colibri_rust::repl_input::{
     write_raw_tty_newline, ReplLineEditor,
 };
 use colibri_rust::session::{AgentSession, SYSTEM_PROMPT};
-use colibri_rust::session_history::TranscriptHistoryLoader;
 use colibri_rust::skills::{skill_catalog, SkillIndex};
 use colibri_rust::steering::{
     format_steering_ack, SteerHandle, SteeringState, SKIPPED_TOOL_RESULT,
@@ -162,16 +161,12 @@ fn default_config_matches_python_runtime_defaults() {
     assert_eq!(config.vision.timeout_seconds, 60);
     assert_eq!(config.vision.max_image_bytes, 4 * 1024 * 1024);
     assert!(config.session.restore_transcript);
-    assert_eq!(config.session.restore_message_limit, 24);
-    assert_eq!(config.session.restore_char_limit, 24000);
-    assert_eq!(config.session.restore_scan_bytes, 2 * 1024 * 1024);
     assert_eq!(config.session.transcript_retention_days, 30);
     assert_eq!(config.session.transcript_max_total_bytes, 128 * 1024 * 1024);
     assert_eq!(config.tools.max_result_chars, 32000);
-    assert!(config.tools.enabled.contains(&"web".to_string()));
+    assert!(!config.tools.enabled.contains(&"web".to_string()));
     assert!(config.tools.enabled.contains(&"image".to_string()));
     assert!(!config.tools.enabled.contains(&"mcp".to_string()));
-    assert_eq!(config.web_search.engine, "baidu");
     assert!(!config.hardware.enabled);
     assert_eq!(config.hardware.discovery, "on_demand");
     assert_eq!(config.hardware.operation_timeout_seconds, 2.0);
@@ -213,9 +208,6 @@ max_image_bytes = 1234
 idle_exit_enabled = true
 idle_exit_seconds = 12
 restore_transcript = false
-restore_message_limit = 10
-restore_char_limit = 9000
-restore_scan_bytes = 123456
 transcript_retention_days = 7
 transcript_max_total_bytes = 7654321
 
@@ -253,9 +245,6 @@ max_active_servers = 3
     assert!(config.session.idle_exit_enabled);
     assert_eq!(config.session.idle_exit_seconds, 12);
     assert!(!config.session.restore_transcript);
-    assert_eq!(config.session.restore_message_limit, 10);
-    assert_eq!(config.session.restore_char_limit, 9000);
-    assert_eq!(config.session.restore_scan_bytes, 123456);
     assert_eq!(config.session.transcript_retention_days, 7);
     assert_eq!(config.session.transcript_max_total_bytes, 7654321);
     assert!(!config.console.status);
@@ -1749,8 +1738,8 @@ fn files_tool_lists_reads_and_writes_inside_allowed_root() {
 
     let listed = run_tool("files.list", r#"{"path":"."}"#, &context).unwrap();
     assert_eq!(
-        listed.text.lines().collect::<Vec<_>>(),
-        vec!["alpha.txt", "nested/"]
+        serde_json::from_str::<serde_json::Value>(&listed.text).unwrap()["entries"],
+        serde_json::json!(["alpha.txt"])
     );
 
     let read = run_tool("files.read", r#"{"path":"alpha.txt"}"#, &context).unwrap();
@@ -1786,7 +1775,9 @@ fn files_read_range_and_max_chars_match_python() {
 
     assert!(read.ok);
     assert!(read.truncated);
-    assert_eq!(read.text, "two\nt\n...[truncated]");
+    let page: serde_json::Value = serde_json::from_str(&read.text).unwrap();
+    assert_eq!(page["text"], "two\nthreeeeeeeeee\nfo");
+    assert!(page["has_more"].as_bool().unwrap());
 
     let invalid = run_tool(
         "files.read",
@@ -1894,7 +1885,11 @@ fn shell_tool_executes_compound_command_with_real_shell() {
     .unwrap();
 
     assert!(result.ok);
-    assert_eq!(result.text.trim(), "2");
+    assert_eq!(
+        result.text.split("\nexit_code=").next().unwrap().trim(),
+        "2"
+    );
+    assert!(result.text.contains("exit_code=0"));
 }
 
 #[test]
@@ -1963,7 +1958,10 @@ commands:
     .unwrap();
 
     assert!(result.ok);
-    assert_eq!(result.text.trim(), "rendered");
+    assert_eq!(
+        result.text.split("\nexit_code=").next().unwrap().trim(),
+        "rendered"
+    );
 }
 
 #[test]
@@ -2004,9 +2002,11 @@ commands:
 
     assert!(result.ok);
     assert!(result.truncated);
-    assert!(result.text.chars().count() <= 120);
-    assert!(result.text.starts_with("HEAD"));
-    assert!(result.text.ends_with("TAIL"));
+    let preview = result.text.split("\nexit_code=").next().unwrap();
+    assert!(preview.chars().count() <= 120);
+    assert!(preview.starts_with("HEAD"));
+    assert!(preview.ends_with("TAIL"));
+    assert!(result.text.contains("archive="));
     assert!(result.text.contains("...[truncated]..."));
 }
 
@@ -2598,200 +2598,6 @@ fn rust_http_runtime_does_not_spawn_curl() {
 }
 
 #[test]
-fn web_search_posts_baidu_request_and_formats_references() {
-    let _guard = env_lock().lock().unwrap();
-    let temp = temp_dir("web-search");
-    let server = start_http_server(|_base_url, _requests| {
-        |_request| {
-            TestHttpResponse::json(
-                r#"{"references":[{"title":"杭州天气","url":"https://example.test/weather","snippet":"drop","summary":"晴"}]}"#,
-            )
-        }
-    });
-
-    let mut config = AgentConfig::default();
-    config.web_search.api_key = "search-key".to_string();
-    config.web_search.endpoint = format!("{}/search", server.base_url);
-    config.web_search.timeout_seconds = 3;
-    config.web_search.max_results = 7;
-    let context = ToolContext::new(config, temp.clone());
-
-    let result = run_tool(
-        "web.search",
-        r#"{"query":"杭州天气","count":"2","freshness":"pd"}"#,
-        &context,
-    )
-    .unwrap();
-
-    assert!(result.ok);
-    assert!(result.text.contains("杭州天气"));
-    let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/search");
-    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["resource_type_filter"][0]["top_k"], 2);
-    assert_eq!(body["messages"][0]["content"], "杭州天气");
-    assert!(body.get("search_filter").is_some());
-    assert!(result.text.contains("summary"));
-    assert!(!result.text.contains("snippet"));
-}
-
-#[test]
-fn web_search_requires_configured_baidu_api_key() {
-    let temp = temp_dir("web-search-missing-key");
-    let mut config = AgentConfig::default();
-    config.web_search.api_key.clear();
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool("web.search", r#"{"query":"hello"}"#, &context).unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("invalid_config"));
-    assert!(result.text.contains("Missing Baidu web search API key"));
-}
-
-#[test]
-fn web_search_calls_aliyun_streamable_http_mcp() {
-    let _guard = env_lock().lock().unwrap();
-    let old_key = std::env::var_os("DASHSCOPE_API_KEY");
-    std::env::set_var("DASHSCOPE_API_KEY", "dashscope-key");
-    let temp = temp_dir("web-search-aliyun-mcp");
-    let server = start_http_server(|_base_url, _requests| {
-        |request| {
-            if request.method == "DELETE" {
-                return TestHttpResponse {
-                    status: 204,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                };
-            }
-            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
-            match body.get("method").and_then(|value| value.as_str()) {
-                Some("initialize") => TestHttpResponse {
-                    status: 200,
-                    headers: vec![
-                        ("Content-Type".to_string(), "application/json".to_string()),
-                        ("Mcp-Session-Id".to_string(), "session-1".to_string()),
-                    ],
-                    body: br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"WebSearch","version":"1"}}}"#.to_vec(),
-                },
-                Some("notifications/initialized") => TestHttpResponse {
-                    status: 202,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                },
-                Some("tools/list") => TestHttpResponse {
-                    status: 200,
-                    headers: vec![(
-                        "Content-Type".to_string(),
-                        "text/event-stream".to_string(),
-                    )],
-                    body: br#"event: message
-data: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"bailian_web_search","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer"}}}}]}}
-
-"#
-                    .to_vec(),
-                },
-                Some("tools/call") => TestHttpResponse::json(
-                    r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[{\"title\":\"杭州天气\",\"url\":\"https://example.test/weather\"}]"}]}}"#,
-                ),
-                other => panic!("unexpected MCP method: {other:?}"),
-            }
-        }
-    });
-
-    let mut config = AgentConfig::default();
-    config.web_search.engine = "aliyun_mcp".to_string();
-    config.web_search.api_key.clear();
-    config.web_search.endpoint = format!("{}/mcp", server.base_url);
-    config.web_search.timeout_seconds = 3;
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool(
-        "web.search",
-        r#"{"query":"杭州天气","count":"30","freshness":"pd"}"#,
-        &context,
-    )
-    .unwrap();
-
-    restore_env_var("DASHSCOPE_API_KEY", old_key);
-    assert!(result.ok);
-    assert!(result.text.contains("杭州天气"));
-    let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.method.as_str())
-            .collect::<Vec<_>>(),
-        vec!["POST", "POST", "POST", "POST", "DELETE"]
-    );
-    let initialized_header = requests[1]
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Mcp-Session-Id"))
-        .map(|(_, value)| value.as_str());
-    assert_eq!(initialized_header, Some("session-1"));
-    let authorization = requests[3]
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
-        .map(|(_, value)| value.as_str());
-    assert_eq!(authorization, Some("Bearer dashscope-key"));
-    let call: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
-    assert_eq!(call["method"], "tools/call");
-    assert_eq!(call["params"]["name"], "bailian_web_search");
-    assert_eq!(call["params"]["arguments"]["query"], "杭州天气");
-    assert_eq!(call["params"]["arguments"]["count"], 20);
-    assert!(call["params"]["arguments"].get("freshness").is_none());
-}
-
-#[test]
-fn web_search_aliyun_mcp_requires_key() {
-    let _guard = env_lock().lock().unwrap();
-    let old_key = std::env::var_os("DASHSCOPE_API_KEY");
-    std::env::remove_var("DASHSCOPE_API_KEY");
-    let temp = temp_dir("web-search-aliyun-mcp-missing-key");
-    let mut config = AgentConfig::default();
-    config.web_search.engine = "aliyun_mcp".to_string();
-    config.web_search.api_key.clear();
-    config.web_search.endpoint =
-        "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp".to_string();
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool("web.search", r#"{"query":"hello"}"#, &context).unwrap();
-
-    restore_env_var("DASHSCOPE_API_KEY", old_key);
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("invalid_config"));
-    assert!(result.text.contains("DASHSCOPE_API_KEY"));
-}
-
-#[test]
-fn web_search_aliyun_mcp_maps_jsonrpc_error() {
-    let temp = temp_dir("web-search-aliyun-mcp-jsonrpc-error");
-    let server = start_http_server(|_base_url, _requests| {
-        |_request| {
-            TestHttpResponse::json(
-                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"invalid api key"}}"#,
-            )
-        }
-    });
-    let mut config = AgentConfig::default();
-    config.web_search.engine = "aliyun_mcp".to_string();
-    config.web_search.api_key = "bad-key".to_string();
-    config.web_search.endpoint = format!("{}/mcp", server.base_url);
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool("web.search", r#"{"query":"hello"}"#, &context).unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("api_error"));
-    assert_eq!(result.text, "invalid api key");
-}
-
-#[test]
 fn session_writes_transcript_events() {
     let _guard = env_lock().lock().unwrap();
     let temp = temp_dir("session-transcript");
@@ -2861,7 +2667,7 @@ fn gateway_session_transcript_injects_channel_metadata_like_python() {
 }
 
 #[test]
-fn transcript_history_loader_restores_complete_turns_and_strips_attachment_paths_like_python() {
+fn display_history_preserves_pending_question_and_strips_attachment_paths() {
     let temp = temp_dir("history-loader");
     let transcript = temp.join("transcripts/2026-07-10.jsonl");
     fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -2883,19 +2689,31 @@ fn transcript_history_loader_restores_complete_turns_and_strips_attachment_paths
     )
     .unwrap();
 
-    let messages = TranscriptHistoryLoader::new(temp, 24, 24000, 2 * 1024 * 1024).load();
+    let page = colibri_rust::display_history::DisplayHistory::new(temp, "local")
+        .page("last", 0)
+        .unwrap();
+    let messages = page["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| Message::new(m["role"].as_str().unwrap(), m["text"].as_str().unwrap()))
+        .collect::<Vec<_>>();
 
     assert_eq!(
         messages
             .iter()
             .map(|message| (message.role.as_str(), message.content.as_str()))
             .collect::<Vec<_>>(),
-        vec![("user", "请分析图片"), ("assistant", "图片内容")]
+        vec![
+            ("user", "请分析图片"),
+            ("assistant", "图片内容"),
+            ("user", "尚未回答")
+        ]
     );
 }
 
 #[test]
-fn transcript_history_loader_pairs_each_source_by_completion_order_like_python() {
+fn display_history_filters_local_source() {
     let temp = temp_dir("history-loader-source");
     let transcript = temp.join("transcripts/2026-07-10.jsonl");
     fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -2924,14 +2742,22 @@ fn transcript_history_loader_pairs_each_source_by_completion_order_like_python()
     )
     .unwrap();
 
-    let messages = TranscriptHistoryLoader::new(temp, 24, 24000, 2 * 1024 * 1024).load();
+    let page = colibri_rust::display_history::DisplayHistory::new(temp, "local")
+        .page("last", 0)
+        .unwrap();
+    let messages = page["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| Message::new(m["role"].as_str().unwrap(), m["text"].as_str().unwrap()))
+        .collect::<Vec<_>>();
 
     assert_eq!(
         messages
             .chunks(2)
             .map(|pair| (pair[0].content.as_str(), pair[1].content.as_str()))
             .collect::<Vec<_>>(),
-        vec![("REPL 问题", "REPL 回答"), ("微信问题", "微信回答")]
+        vec![("REPL 问题", "REPL 回答")]
     );
 }
 
@@ -3183,7 +3009,7 @@ fn gateway_hot_reload_uses_the_shared_direct_config() {
     let mut cache = GatewaySessionCache::new_with_config_path(config, Some(path.clone())).unwrap();
     fs::write(
         &path,
-        "[model]\nprovider = \"fake\"\nmodel = \"after-longer\"\n[vision]\nmodel = \"vision-after\"\n[web_search]\napi_key = \"search-after\"\n[session]\nmax_context_memory_mib = 10\n",
+        "[model]\nprovider = \"fake\"\nmodel = \"after-longer\"\n[vision]\nmodel = \"vision-after\"\n[session]\nmax_context_memory_mib = 10\n",
     )
     .unwrap();
 
@@ -3192,7 +3018,6 @@ fn gateway_hot_reload_uses_the_shared_direct_config() {
 
     assert_eq!(session.config.model.model, "after-longer");
     assert_eq!(session.config.vision.model, "vision-after");
-    assert_eq!(session.config.web_search.api_key, "search-after");
     assert_eq!(session.config.session.max_context_memory_mib, Some(10));
 }
 
@@ -3236,9 +3061,12 @@ fn memory_write_supports_topic_and_python_result_text() {
         "details\n"
     );
     assert_eq!(
-        result.text,
-        "Updated memory file: topics/project_alpha.md\nRemember to update INDEX.md so this topic can be found by memory.search."
+        serde_json::from_str::<serde_json::Value>(&result.text).unwrap()["file"],
+        "topics/project_alpha.md"
     );
+    let v: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+    assert_eq!(v["applied"], true);
+    assert_eq!(v["index_requested"], false);
 }
 
 #[test]
@@ -3276,7 +3104,7 @@ fn shell_timeout_terminates_without_waiting_for_natural_exit_like_python() {
 
     assert!(!result.ok);
     assert_eq!(result.error_type.as_deref(), Some("timeout"));
-    assert_eq!(result.text, "Command timed out");
+    assert!(result.text.contains("termination=timeout"));
     assert!(
         started.elapsed() < Duration::from_millis(500),
         "timeout returned too late: {:?}",
@@ -3300,9 +3128,11 @@ fn shell_run_bounds_large_output_and_preserves_tail_like_python() {
 
     assert!(result.ok);
     assert!(result.truncated);
-    assert!(result.text.chars().count() <= 120);
-    assert!(result.text.starts_with("HEAD"));
-    assert!(result.text.ends_with("TAIL"));
+    let preview = result.text.split("\nexit_code=").next().unwrap();
+    assert!(preview.chars().count() <= 120);
+    assert!(preview.starts_with("HEAD"));
+    assert!(preview.ends_with("TAIL"));
+    assert!(result.text.contains("archive="));
     assert!(result.text.contains("...[truncated]..."));
 }
 
@@ -3830,12 +3660,6 @@ fn tool_schemas_match_python_property_types_and_required_fields() {
         files_list["function"]["parameters"]["required"],
         serde_json::json!(["path"])
     );
-    let web = by_name("web.search");
-    assert_eq!(
-        web["function"]["parameters"]["properties"]["count"]["type"],
-        "integer"
-    );
-    assert_eq!(web["function"]["parameters"]["additionalProperties"], false);
     let memory_write = by_name("memory.write");
     assert!(memory_write["function"]["parameters"]["properties"]["topic"].is_object());
     assert_eq!(
@@ -3851,30 +3675,6 @@ fn tool_schemas_match_python_property_types_and_required_fields() {
     assert!(description.contains("type: soul|user|feedback|project|reference|system"));
     assert!(!description.contains("Choose SOUL.md"));
     assert!(!description.contains("Consolidate or replace"));
-}
-
-#[test]
-fn web_search_rejects_invalid_freshness_before_network_like_python() {
-    let temp = temp_dir("web-invalid-freshness");
-    let mut config = AgentConfig::default();
-    config.web_search.api_key = "test-key".to_string();
-    config.web_search.endpoint = "http://127.0.0.1:9/unreachable".to_string();
-    config.web_search.timeout_seconds = 1;
-    let context = ToolContext::new(config, temp);
-
-    let result = run_tool(
-        "web.search",
-        r#"{"query":"hello","freshness":"yesterday"}"#,
-        &context,
-    )
-    .unwrap();
-
-    assert!(!result.ok);
-    assert_eq!(result.error_type.as_deref(), Some("invalid_arguments"));
-    assert_eq!(
-        result.text,
-        "web.search freshness must be pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD"
-    );
 }
 
 #[test]
@@ -4017,7 +3817,7 @@ fn openai_tool_arguments_preserve_json_value_types_like_python() {
     let server = start_http_server(|_base_url, _requests| {
         |_request| {
             TestHttpResponse::json(
-                r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call","function":{"name":"web.search","arguments":"{\"count\":2,\"filters\":{\"fresh\":true}}"}}]}}]}"#,
+                r#"{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call","function":{"name":"files.list","arguments":"{\"count\":2,\"filters\":{\"fresh\":true}}"}}]}}]}"#,
             )
         }
     });
@@ -5185,4 +4985,47 @@ fn direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate() {
         .messages
         .iter()
         .any(|message| message.role == "tool" && !message.content.contains("permission_denied")));
+}
+
+#[test]
+fn mcp_configuration_migrates_and_reloads_without_touching_main_config() {
+    use colibri_rust::runtime_reload::{
+        PartialRuntimeReloader, RuntimeReloadResult, RuntimeSnapshot,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir("mcp-file-reload");
+    let main = root.join("config.toml");
+    let mcp = root.join("services.json");
+    fs::write(
+        &main,
+        "[model]\nprovider = 'fake'\n[mcp]\nconfig_path = 'services.json'\n\
+         [[mcp.servers]]\nname = 'original'\nurl = 'https://example.com/mcp'\n",
+    )
+    .unwrap();
+    let config = AgentConfig::load(Some(&main)).unwrap();
+    assert_eq!(config.mcp_config_path, mcp);
+    assert_eq!(config.mcp_servers[0]["name"], "original");
+    assert_eq!(fs::metadata(&mcp).unwrap().permissions().mode() & 0o777, 0o600);
+    let migrated = fs::read_to_string(&main).unwrap();
+    assert!(!migrated.contains("mcp.servers"));
+    assert!(migrated.contains("config_path"));
+    assert!(migrated.contains("provider = 'fake'"));
+
+    let mut reloader = PartialRuntimeReloader::new(
+        main.clone(),
+        RuntimeSnapshot {
+            model: Arc::new(Mutex::new(colibri_rust::model::build_model(&config.model).unwrap())),
+            config: Arc::new(config),
+        },
+    );
+    fs::write(&mcp, r#"[{"name":"new","url":"https://example.org/mcp"}]"#).unwrap();
+    let RuntimeReloadResult::Reloaded(snapshot) = reloader.reload_if_changed() else {
+        panic!("MCP file edits should reload without a main config edit");
+    };
+    assert_eq!(snapshot.config.mcp_servers[0]["name"], "new");
+    fs::write(&mcp, b"{").unwrap();
+    assert!(matches!(reloader.reload_if_changed(), RuntimeReloadResult::Rejected(_)));
+    assert_eq!(reloader.snapshot().config.mcp_servers[0]["name"], "new");
+    assert_eq!(fs::read_to_string(&main).unwrap(), migrated);
 }

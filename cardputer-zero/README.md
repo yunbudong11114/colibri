@@ -16,7 +16,7 @@ App、REPL、gateway 启动时共用 Rust memory 初始化：开启记忆后，�
 在 Cardputer Zero 的 Debian 13（ARM64）上安装 release 包：
 
 ```sh
-sudo apt install ./Colibri_0.3.4_m5stack1_arm64.deb
+sudo apt install ./Colibri_1.0.2_m5stack1_arm64.deb
 ```
 
 从 APPLaunch 打开 **Colibri**。首次使用进入 **Esc → 设置 → 配置 → 模型**，选择「服务商预设」或「自定义连接」。预设包含 OpenAI、DeepSeek、OpenRouter 和 Ollama。表单集中填写 Base URL、API Key 和模型 ID，选「保存连接」才生效。自定义支持兼容 Chat Completions 的服务，无鉴权的本地服务可以留空 API Key。Ollama 跑在另一台机器时，把 Base URL 换成设备可达的地址。REPL 可用 `/set model.provider fake` 做离线输入检查。
@@ -51,7 +51,7 @@ sudo apt install ./Colibri_0.3.4_m5stack1_arm64.deb
 
 在 **Esc → 设置 → 配置 → 长期记忆** 可以启用长期记忆或修改目录。一级 **设置 → 记忆** 用于查看文件。它默认开启，从设备用户的 `~/.colibri/memory/` 加载 `SOUL.md`、`USER.md`、`MEMORY.md`。界面与设备 REPL 共用这些文件和设置。记忆菜单只读展示上述三个文件、`INDEX.md` 和 `topics/` 下已有的主题文件。F/X 滚动，C 或 Enter 刷新，Esc 返回。文件内容更新交给 Agent 的 `memory.write` 或通用文件工具，菜单没有编辑或保存入口。记忆开关和目录配置仍可修改。
 
-在聊天输入 `/compact` 可压缩上下文，压缩时在输入框显示三点跳动动效，自动压缩结束后恢复思考状态。`/clear` 用于清理屏幕，只隐藏旧消息，不删除历史，也不清除 Agent 上下文。可选上下文内存预算位于设置的“历史与上下文”，0 表示未设置。
+在聊天输入 `/compact` 可压缩上下文，执行和压缩状态在消息区的同一条临时 Colibri 消息中更新，输入框保持可用；录音/转写保留输入区动效。执行时可以继续发送文字或语音补充（steering）、查看设置。发送 `/stop` 会停止后续执行并保存阶段性结论；退出 App 使用相同停止流程，不影响独立 gateway。`/clear` 用于清理屏幕，只隐藏旧消息，不删除历史，也不清除 Agent 上下文。可选上下文内存预算位于设置的“历史与上下文”，0 表示未设置。
 
 “设置 → 插件”中的 **MCP / 技能** 可查看名称和说明。MCP 服务的说明取配置中的 `description`；技能说明来自 `SKILL.md` 的 `description`。两类列表都可离线查看。
 
@@ -59,22 +59,20 @@ sudo apt install ./Colibri_0.3.4_m5stack1_arm64.deb
 
 ## 配置和 MCP
 
-默认数据目录为 `~/.colibri/`，与原版共用 `COLIBRI_HOME`。设备设置存放在仅当前用户可读写的 `config.toml`，历史放在 `transcripts/`。首次启动会复制旧设备目录中的设置和历史，保留原文件与目标目录内已有文件。设备专用覆盖项 `COLIBRI_CARDPUTER_HOME` 仍可用。技能目录为数据根目录下的 `skills/`，技能声明的命令直接执行。历史策略支持保存开关、启动恢复、保留天数和目录容量，天数或容量设为 `0` 表示关闭该项限制。
+默认数据目录为 `~/.colibri/`，与原版共用 `COLIBRI_HOME`。设备设置存放在仅当前用户可读写的 `config.toml`，历史与 CLI、REPL、gateway 共用 `transcripts/YYYY-MM-DD.jsonl`，按北京时间跨天轮转，不再生成 App 专属时间戳文件。旧日志仍可恢复；`/clear` 仅隐藏此前消息。首次启动会复制旧设备目录中的设置和历史，保留原文件与目标目录内已有文件。设备专用覆盖项 `COLIBRI_CARDPUTER_HOME` 仍可用。技能目录为数据根目录下的 `skills/`，技能声明的命令直接执行。历史策略支持保存开关、启动恢复、保留天数和目录容量，天数或容量设为 `0` 表示关闭该项限制。
 
-搜索支持现有 Colibri 的 `baidu` 和 `aliyun_mcp` 适配器。填写对应的 API 地址和密钥后，可在对话中要求模型搜索。
+网络搜索通过独立安装的本地技能提供。
 
-在图形设置的 **MCP · 服务器 JSON** 输入服务器数组，也可在 REPL 使用如下示例：
+MCP 服务器列表默认写在 `~/.colibri/mcp.json`。可在 `config.toml` 用 `[mcp]` 下的 `config_path` 指定其他文件，相对路径以主配置所在目录为基准。旧的 `[[mcp.servers]]` 首次读取时自动迁移。独立文件包含鉴权信息时应使用 `chmod 600`。
 
-```text
-/set mcp.servers [{"name":"catalog","url":"https://mcp.example.org/mcp","token":"TOKEN","read_only":["lookup"]}]
-/mcp catalog list_tools
-/mcp catalog list_resources
-/mcp catalog read_resource fixture://sample
-/mcp catalog list_prompts
-/mcp catalog get_prompt greet {"name":"Mina"}
+```json
+[
+  {"name":"catalog","url":"https://mcp.example.org/mcp","token":"TOKEN"},
+  {"name":"local","command":"/absolute/path/server","args":[],"env":{}}
+]
 ```
 
-本地服务器使用 `{"name":"local","command":"/absolute/path/server","args":[],"env":{}}`。MCP 和内置工具调用直接执行。文件和 Shell 按 Linux 应用账号权限运行。可用数据目录的 `config.toml` 补充 Shell、视觉和硬件设置。
+App 的 **设置 → 插件 → MCP** 可查看服务，REPL 可用 `/mcp catalog list_tools` 验证连接。MCP 配置修改后，在下一轮对话加载。
 
 ## 构建
 

@@ -1,4 +1,5 @@
 mod auth_qr_view;
+pub mod cancellation;
 #[cfg(unix)]
 pub mod cardputer;
 pub mod channel;
@@ -44,3 +45,12 @@ mod file_ops;
 mod jobs;
 #[cfg(unix)]
 mod tasks;
+
+pub mod display_history;
+
+mod tool_archive;
+mod tool_verification;
+
+mod memory_tools;
+
+mod hardware_tools;

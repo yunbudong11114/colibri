@@ -88,7 +88,7 @@ def test_repl_exits_on_quit(capsys):
     assert "fake: hello" in captured.out
 
 
-def test_repl_hot_reloads_model_vision_and_web_search_only(monkeypatch, tmp_path):
+def test_repl_hot_reloads_model_and_vision_only(monkeypatch, tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[model]\nprovider = "fake"\nmodel = "before"\n[session]\nmax_tool_rounds = 7\n',
@@ -110,7 +110,6 @@ def test_repl_hot_reloads_model_vision_and_web_search_only(monkeypatch, tmp_path
             config_path.write_text(
                 '[model]\nprovider = "fake"\nmodel = "after-longer"\n'
                 '[vision]\nmodel = "vision-after"\n'
-                '[web_search]\napi_key = "search-after"\n'
                 '[session]\nmax_tool_rounds = 99\n',
                 encoding="utf-8",
             )

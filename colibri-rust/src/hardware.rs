@@ -4,10 +4,7 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-static HARDWARE_IO_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn probe_hardware() -> serde_json::Value {
     probe_hardware_with_roots(Path::new("/proc"), Path::new("/dev"), std::env::consts::OS)
@@ -76,6 +73,9 @@ pub fn probe_hardware_with_roots(
 pub struct HardwareError {
     pub error_type: String,
     pub message: String,
+    pub partial_read: Vec<u8>,
+    pub bytes_written: Option<usize>,
+    pub outcome_unknown: bool,
 }
 
 impl HardwareError {
@@ -83,6 +83,9 @@ impl HardwareError {
         Self {
             error_type: error_type.to_string(),
             message: message.into(),
+            partial_read: Vec::new(),
+            bytes_written: None,
+            outcome_unknown: false,
         }
     }
 }
@@ -149,10 +152,10 @@ pub fn serial_read(
             "max_bytes exceeds the configured transfer limit",
         ));
     }
-    let _guard = HARDWARE_IO_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut file = open_serial(device)?;
+    let mut file = open_serial(
+        device,
+        Duration::from_secs_f64(config.operation_timeout_seconds),
+    )?;
     read_available(
         &mut file,
         max_bytes,
@@ -177,10 +180,10 @@ pub fn serial_write(
             "data exceeds the configured transfer limit",
         ));
     }
-    let _guard = HARDWARE_IO_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut file = open_serial(device)?;
+    let mut file = open_serial(
+        device,
+        Duration::from_secs_f64(config.operation_timeout_seconds),
+    )?;
     write_all_until(
         &mut file,
         data,
@@ -214,42 +217,59 @@ pub fn serial_json_request(
         ));
     }
 
-    let _guard = HARDWARE_IO_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut file = open_serial(device)?;
+    let mut file = open_serial(
+        device,
+        Duration::from_secs_f64(config.operation_timeout_seconds),
+    )?;
     flush_serial_input(&file)?;
     let deadline = Instant::now() + Duration::from_secs_f64(config.operation_timeout_seconds);
     write_all_until(&mut file, &payload, deadline)?;
-    let response_bytes = read_line_until(&mut file, config.max_transfer_bytes, deadline)?;
-    let response: serde_json::Value = serde_json::from_slice(&response_bytes)
-        .map_err(|_| HardwareError::new("protocol_error", "Invalid controller response"))?;
-    let object = response.as_object().ok_or_else(|| {
-        HardwareError::new(
-            "protocol_error",
-            "Controller response did not match the request",
-        )
-    })?;
-    if object.get("id").and_then(serde_json::Value::as_str) != Some(request_id.as_str())
-        || object
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .is_none()
-    {
-        return Err(HardwareError::new(
-            "protocol_error",
-            "Controller response did not match the request",
-        ));
-    }
-    if object.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
-        let message = object
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Controller operation failed");
-        return Err(HardwareError::new("device_error", message));
-    }
-    object.get("result").cloned().ok_or_else(|| {
-        HardwareError::new("protocol_error", "Controller response is missing result")
+    let result = (|| -> Result<serde_json::Value, HardwareError> {
+        let response_bytes = read_line_until(&mut file, config.max_transfer_bytes, deadline)?;
+        let parsed = (|| -> Result<serde_json::Value, HardwareError> {
+            let response: serde_json::Value =
+                serde_json::from_slice(&response_bytes).map_err(|_| {
+                    let mut e = HardwareError::new("protocol_error", "Invalid controller response");
+                    e.partial_read = response_bytes.clone();
+                    e
+                })?;
+            let object = response.as_object().ok_or_else(|| {
+                HardwareError::new(
+                    "protocol_error",
+                    "Controller response did not match the request",
+                )
+            })?;
+            if object.get("id").and_then(serde_json::Value::as_str) != Some(request_id.as_str())
+                || object
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_none()
+            {
+                return Err(HardwareError::new(
+                    "protocol_error",
+                    "Controller response did not match the request",
+                ));
+            }
+            if object.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+                let message = object
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Controller operation failed");
+                return Err(HardwareError::new("device_error", message));
+            }
+            object.get("result").cloned().ok_or_else(|| {
+                HardwareError::new("protocol_error", "Controller response is missing result")
+            })
+        })();
+        parsed.map_err(|mut e| {
+            e.partial_read = response_bytes;
+            e
+        })
+    })();
+    result.map_err(|mut e| {
+        e.bytes_written = Some(payload.len());
+        e.outcome_unknown = e.error_type != "device_error";
+        e
     })
 }
 
@@ -408,7 +428,10 @@ fn read_board_model(proc_root: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn open_serial(device: &HardwareDeviceConfig) -> Result<std::fs::File, HardwareError> {
+fn open_serial(
+    device: &HardwareDeviceConfig,
+    timeout: Duration,
+) -> Result<std::fs::File, HardwareError> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let file = std::fs::OpenOptions::new()
@@ -426,12 +449,45 @@ fn open_serial(device: &HardwareDeviceConfig) -> Result<std::fs::File, HardwareE
                 HardwareError::new("io_error", error.to_string())
             }
         })?;
+    use std::os::fd::AsRawFd;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if crate::cancellation::cancelled() {
+            return Err(HardwareError::new(
+                "cancelled",
+                "Cancelled before acquiring serial device lock",
+            ));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let e = std::io::Error::last_os_error();
+        if !matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) {
+            return Err(HardwareError::new(
+                "io_error",
+                format!("Cannot lock serial device: {e}"),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(HardwareError::new(
+                "device_busy",
+                "Serial device is busy; no command was sent",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     configure_serial(&file, device.baud_rate)?;
     Ok(file)
 }
 
 #[cfg(not(unix))]
-fn open_serial(_device: &HardwareDeviceConfig) -> Result<std::fs::File, HardwareError> {
+fn open_serial(
+    _device: &HardwareDeviceConfig,
+    _timeout: Duration,
+) -> Result<std::fs::File, HardwareError> {
     Err(HardwareError::new(
         "io_error",
         "Serial hardware is only supported on Unix in this phase",
@@ -514,15 +570,29 @@ fn read_available(
     let deadline = Instant::now() + timeout;
     let mut output = Vec::new();
     while output.len() < max_bytes {
-        wait_file(file, true, deadline)?;
+        if let Err(mut e) = wait_file(file, true, deadline) {
+            e.partial_read = output;
+            return Err(e);
+        }
         let mut buffer = vec![0; (max_bytes - output.len()).min(1024)];
         match file.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => output.extend_from_slice(&buffer[..count]),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(error) => return Err(HardwareError::new("io_error", error.to_string())),
+            Err(error) => {
+                let mut e = HardwareError::new("io_error", error.to_string());
+                e.partial_read = output;
+                return Err(e);
+            }
         }
-        if !file_ready(file, true, Duration::ZERO)? {
+        let ready = match file_ready(file, true, Duration::ZERO) {
+            Ok(v) => v,
+            Err(mut e) => {
+                e.partial_read = output;
+                return Err(e);
+            }
+        };
+        if !ready {
             break;
         }
     }
@@ -536,17 +606,26 @@ fn write_all_until(
 ) -> Result<(), HardwareError> {
     let mut offset = 0;
     while offset < data.len() {
-        wait_file(file, false, deadline)?;
+        if let Err(mut e) = wait_file(file, false, deadline) {
+            e.bytes_written = Some(offset);
+            e.outcome_unknown = offset > 0;
+            return Err(e);
+        }
         match file.write(&data[offset..]) {
             Ok(0) => {
-                return Err(HardwareError::new(
-                    "io_error",
-                    "Serial device accepted zero bytes",
-                ))
+                let mut e = HardwareError::new("io_error", "Serial device accepted zero bytes");
+                e.bytes_written = Some(offset);
+                e.outcome_unknown = offset > 0;
+                return Err(e);
             }
             Ok(count) => offset += count,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(error) => return Err(HardwareError::new("io_error", error.to_string())),
+            Err(error) => {
+                let mut e = HardwareError::new("io_error", error.to_string());
+                e.bytes_written = Some(offset);
+                e.outcome_unknown = offset > 0;
+                return Err(e);
+            }
         }
     }
     Ok(())
@@ -559,54 +638,70 @@ fn read_line_until(
 ) -> Result<Vec<u8>, HardwareError> {
     let mut output = Vec::new();
     loop {
-        wait_file(file, true, deadline)?;
+        if let Err(mut e) = wait_file(file, true, deadline) {
+            e.partial_read = output;
+            return Err(e);
+        }
         let remaining = max_bytes.saturating_add(1).saturating_sub(output.len());
         let mut buffer = vec![0; remaining.min(1024).max(1)];
         match file.read(&mut buffer) {
             Ok(0) => {
-                return Err(HardwareError::new(
+                let mut e = HardwareError::new(
                     "protocol_error",
                     "Controller closed before sending a response",
-                ))
+                );
+                e.partial_read = output;
+                return Err(e);
             }
             Ok(count) => output.extend_from_slice(&buffer[..count]),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(error) => return Err(HardwareError::new("io_error", error.to_string())),
+            Err(error) => {
+                let mut e = HardwareError::new("io_error", error.to_string());
+                e.partial_read = output;
+                return Err(e);
+            }
         }
         if let Some(newline) = output.iter().position(|byte| *byte == b'\n') {
             if newline > max_bytes {
-                return Err(HardwareError::new(
+                let mut e = HardwareError::new(
                     "result_too_large",
                     "Controller response exceeds the configured transfer limit",
-                ));
+                );
+                e.partial_read = output;
+                return Err(e);
             }
             output.truncate(newline);
             return Ok(output);
         }
         if output.len() > max_bytes {
-            return Err(HardwareError::new(
+            let mut e = HardwareError::new(
                 "result_too_large",
                 "Controller response exceeds the configured transfer limit",
-            ));
+            );
+            e.partial_read = output;
+            return Err(e);
         }
     }
 }
 
 fn wait_file(file: &std::fs::File, reading: bool, deadline: Instant) -> Result<(), HardwareError> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(HardwareError::new(
-            "timeout",
-            "Hardware operation timed out",
-        ));
-    }
-    if file_ready(file, reading, remaining)? {
-        Ok(())
-    } else {
-        Err(HardwareError::new(
-            "timeout",
-            "Hardware operation timed out",
-        ))
+    loop {
+        if crate::cancellation::cancelled() {
+            return Err(HardwareError::new(
+                "cancelled",
+                "Hardware wait cancelled; verify any previous write before retrying",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HardwareError::new(
+                "timeout",
+                "Hardware operation timed out",
+            ));
+        }
+        if file_ready(file, reading, remaining.min(Duration::from_millis(25)))? {
+            return Ok(());
+        }
     }
 }
 
@@ -618,16 +713,32 @@ fn file_ready(
 ) -> Result<bool, HardwareError> {
     use std::os::fd::AsRawFd;
 
-    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let deadline = Instant::now() + timeout;
     let mut descriptor = libc::pollfd {
         fd: file.as_raw_fd(),
         events: if reading { libc::POLLIN } else { libc::POLLOUT },
         revents: 0,
     };
     loop {
+        if crate::cancellation::cancelled() {
+            return Err(HardwareError::new("cancelled", "Hardware I/O cancelled"));
+        }
+        let timeout_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(i32::MAX as u128) as i32;
         let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
         if result > 0 {
-            return Ok(true);
+            if descriptor.revents & descriptor.events != 0 {
+                return Ok(true);
+            }
+            if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err(HardwareError::new(
+                    "io_error",
+                    "Serial device disconnected or became unavailable",
+                ));
+            }
+            return Ok(false);
         }
         if result == 0 {
             return Ok(false);
@@ -706,4 +817,58 @@ fn hex_encode(data: &[u8]) -> String {
         let _ = write!(&mut output, "{:02x}", byte);
     }
     output
+}
+
+#[cfg(all(test, unix))]
+mod io_tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    #[test]
+    fn partial_write_timeout_reports_accepted_prefix_and_unknown_effect() {
+        let (sender, _receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        sender.set_nonblocking(true).unwrap();
+        let mut file = unsafe { fs::File::from_raw_fd(sender.into_raw_fd()) };
+        let error = write_all_until(
+            &mut file,
+            &vec![b'x'; 4 * 1024 * 1024],
+            Instant::now() + Duration::from_millis(30),
+        )
+        .unwrap_err();
+        assert_eq!(error.error_type, "timeout");
+        assert!(error.bytes_written.unwrap() > 0);
+        assert!(error.outcome_unknown);
+    }
+    #[test]
+    fn stop_interrupts_a_pending_io_wait() {
+        let (reader, _writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut file = unsafe { fs::File::from_raw_fd(reader.into_raw_fd()) };
+        let token = crate::cancellation::Cancellation::default();
+        let _scope = crate::cancellation::Scope::enter(token.clone());
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            token.cancel();
+        });
+        let start = Instant::now();
+        let error = read_available(&mut file, 32, Duration::from_secs(2)).unwrap_err();
+        cancel.join().unwrap();
+        assert_eq!(error.error_type, "cancelled");
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+    #[test]
+    fn controller_partial_response_and_cancel_are_preserved() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.write_all(b"partial-response").unwrap();
+        let mut file = unsafe { fs::File::from_raw_fd(reader.into_raw_fd()) };
+        let error = read_line_until(&mut file, 4096, Instant::now() + Duration::from_millis(30))
+            .unwrap_err();
+        assert_eq!(error.error_type, "timeout");
+        assert_eq!(error.partial_read, b"partial-response");
+        let token = crate::cancellation::Cancellation::default();
+        let _scope = crate::cancellation::Scope::enter(token.clone());
+        token.cancel();
+        let error = read_available(&mut file, 10, Duration::from_secs(30)).unwrap_err();
+        assert_eq!(error.error_type, "cancelled");
+    }
 }

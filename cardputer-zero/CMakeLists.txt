@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.31)
-project(colibri VERSION 0.3.4 LANGUAGES C CXX)
+project(colibri VERSION 1.0.2 LANGUAGES C CXX)
 
 set(COLIBRI_OFFLINE_SPEECH_PAYLOAD "" CACHE PATH "Optional ARM64 offline speech runtime and model")
 

@@ -69,7 +69,10 @@ impl Settings {
                 }
             }
             for (key, value) in &stored {
-                if let Some(expected) = defaults.get(key) {
+                if key == "mcp.servers" {
+                    crate::mcp::servers(value)?;
+                    set_field(&mut document, key, value)?;
+                } else if let Some(expected) = defaults.get(key) {
                     validate_type(expected, value)?;
                     set_field(&mut document, key, value)?;
                 }
@@ -113,7 +116,7 @@ impl Settings {
             .values()?
             .into_iter()
             .map(|(key, value)| {
-                let secret = key.ends_with("api_key") || key == "mcp.servers";
+                let secret = key.ends_with("api_key");
                 let display = if secret {
                     if value.as_str() == Some("") || value.as_array().is_some_and(Vec::is_empty) {
                         ""
@@ -155,14 +158,8 @@ impl Settings {
             }
         }
         match key {
-            "mcp.servers" => {
-                crate::mcp::servers(&value)?;
-            }
             "model.provider" if !matches!(value.as_str(), Some("fake" | "openai_compatible")) => {
                 return Err("模型提供方无效".into())
-            }
-            "web_search.engine" if !matches!(value.as_str(), Some("baidu" | "aliyun_mcp")) => {
-                return Err("搜索引擎无效".into())
             }
             "memory.root"
                 if !crate::config::expand_user_path(value.as_str().unwrap_or_default())
@@ -247,7 +244,14 @@ impl Settings {
     }
 
     pub fn config(&self) -> Result<AgentConfig, String> {
-        parse_document(&self.document()?, &self.home)
+        let document = self.document()?;
+        let mut config = parse_document(&document, &self.home)?;
+        let value = document
+            .to_string()
+            .parse()
+            .map_err(|_| "config.toml 格式无效")?;
+        config.load_mcp(&self.path(), &value)?;
+        Ok(config)
     }
 }
 
@@ -259,7 +263,6 @@ fn parse_document(document: &DocumentMut, home: &Path) -> Result<AgentConfig, St
         .parse()
         .map_err(|_| "config.toml 格式无效")?;
     apply_toml_value(&mut config, &value)?;
-    crate::mcp::servers(&config.mcp_servers)?;
     Ok(config)
 }
 
@@ -290,14 +293,12 @@ fn menu_fields(config: &AgentConfig) -> Map<String, Value> {
         "vision.model":config.vision.model, "vision.base_url":config.vision.base_url,
         "vision.api_key":config.vision.api_key, "vision.timeout_seconds":config.vision.timeout_seconds,
         "vision.max_image_bytes":config.vision.max_image_bytes,
-        "web_search.engine":config.web_search.engine, "web_search.endpoint":config.web_search.endpoint,
-        "web_search.api_key":config.web_search.api_key, "session.transcript":config.session.transcript,
+        "session.transcript":config.session.transcript,
         "session.max_context_memory_mib":config.session.max_context_memory_mib.unwrap_or(0),
         "session.restore_transcript":config.session.restore_transcript,
         "session.transcript_retention_days":config.session.transcript_retention_days,
         "session.transcript_max_total_bytes":config.session.transcript_max_total_bytes,
-        "memory.enabled":config.memory.enabled, "memory.root":config.memory.root,
-        "mcp.servers":config.mcp_servers
+        "memory.enabled":config.memory.enabled, "memory.root":config.memory.root
     }).as_object().unwrap().clone()
 }
 

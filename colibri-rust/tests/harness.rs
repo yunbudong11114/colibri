@@ -143,7 +143,9 @@ fn streaming_range_search_and_stale_patch() {
     assert_eq!(r.text, "needle\n");
     let r = call(&c, "files.read", json!({"path":"log","max_chars":20}));
     assert!(r.truncated);
-    assert_eq!(r.text.chars().count(), 20);
+    let page: Value = serde_json::from_str(&r.text).unwrap();
+    assert_eq!(page["text"].as_str().unwrap().chars().count(), 20);
+    assert_eq!(page["next_offset_chars"], 20);
     fs::write(f.0.join("data"), "one\nneedle\nneedle\n").unwrap();
     let r = call(
         &c,

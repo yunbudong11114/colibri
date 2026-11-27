@@ -19,7 +19,6 @@ from colibri.tools.builtin import (
     ShellRunTool,
     SkillReadTool,
     SkillRunTool,
-    WebSearchTool,
 )
 
 
@@ -39,8 +38,6 @@ class ToolRegistry:
             tools.extend([MemoryListTool(), MemoryReadTool(), MemorySearchTool(), MemoryWriteTool()])
         if "shell" in enabled:
             tools.append(ShellRunTool())
-        if "web" in enabled:
-            tools.append(WebSearchTool())
         if "hardware" in enabled and config.hardware.enabled:
             tools.extend(tool() for tool in HARDWARE_TOOLS)
         if "image" in enabled:

@@ -17,7 +17,7 @@ Colibri 是一个面向 CardputerZero 这类小内存 Linux 设备的轻量级 P
 - Markdown 文件记忆系统，支持自动 recall。
 - 本地 skill，使用渐进式披露加载。
 - 上下文压缩，支持模型摘要和本地 fallback。
-- CLI 和 gateway 都支持 JSONL transcript。
+- CLI、REPL、gateway 和掌机 App 共用 JSONL transcript。
 - 微信 channel，基于腾讯 iLink。
 - gateway 支持 `run/start/stop/restart/status`。
 
@@ -38,7 +38,7 @@ flowchart TD
     Model --> Fake["Fake model"]
     Model --> OpenAI["OpenAI-compatible API"]
     Session --> Registry["ToolRegistry"]
-    Registry --> Tools["files / shell / web / memory / skill"]
+    Registry --> Tools["files / shell / memory / skill"]
     Session --> Permissions["PermissionPolicy"]
     Permissions --> UserPerms["~/.colibri/permissions.toml"]
     Session --> Memory["MemoryContext"]
@@ -116,18 +116,7 @@ api_key = ""
 
 ## 网页搜索
 
-`web.search` 默认仍使用百度后端。切换到阿里云百炼托管的 WebSearch MCP：
-
-```toml
-[web_search]
-engine = "aliyun_mcp"
-endpoint = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
-api_key = ""
-max_results = 10
-timeout_seconds = 10
-```
-
-`web_search.api_key` 优先；为空时读取 `DASHSCOPE_API_KEY`。这是托管的 Streamable HTTP MCP 地址：Colibri 每次搜索通过 HTTPS 完成 MCP 生命周期，不会在本机启动 MCP 服务进程。现有 `[web_search]` 热加载逻辑同样适用。
+网络搜索可通过单独安装的本地技能使用。
 
 ## CLI 命令
 
@@ -141,7 +130,7 @@ uv run python -m colibri.cli auth weixin
 ```
 
 - `ask`：执行一次请求后退出。
-- `repl`：本地多轮对话。长任务执行中，TTY 下可直接输入一行新指令**改方向**（跳过剩余工具并注入文本），无需等 `colibri>` 提示符；权限确认期间不可用。
+- `repl`：本地多轮对话。长任务执行中，TTY 下可直接输入一行新指令**改方向**（跳过剩余工具并注入文本），无需等 `colibri>` 提示符；
 - `diagnostics`：查看环境、路径、RSS、上下文限制等诊断信息。
 - `hardware probe`：列出主机标准硬件设备节点，不打开设备，也不启动后台监听。
 - `hardware simulate`：以前台 stdin/stdout NDJSON 方式运行 GPIO/I2C/SPI 协议模拟器，供无真机开发和测试使用。
@@ -151,7 +140,7 @@ uv run python -m colibri.cli auth weixin
 
 ```toml
 [tools]
-enabled = ["shell", "files", "web", "image", "memory", "skills", "hardware"]
+enabled = ["shell", "files", "image", "memory", "skills", "hardware"]
 
 [hardware]
 enabled = true
@@ -190,7 +179,7 @@ uv run python -m colibri.cli gateway status
 - `gateway restart`：重启后台 gateway。
 - `gateway status`：查看运行状态、PID、RSS、配置路径、日志路径等。
 - `gateway status` 还会显示 `agent_status=healthy|unhealthy`；进程是否运行与 Agent 是否健康相互独立。
-- 运行中的 Gateway 和 REPL 会在下一轮对话前热加载配置中的 `[model]`、`[vision]`、`[web_search]`。无效修改会被拒绝并继续使用上一份可用配置；其他配置项需要重启后生效。
+- 运行中的 Gateway 和 REPL 会在下一轮对话前热加载配置中的 `[model]` 和 `[vision]`。无效修改会被拒绝并继续使用上一份可用配置；其他配置项需要重启后生效。
 
 后台状态和日志：
 
@@ -234,48 +223,25 @@ weixin:<sender_id>
 
 工具权限确认会通过微信文本发给用户，使用数字回复。
 
-工具执行过程中，同一用户再发一条消息可**改方向**：跳过剩余工具并注入新指令，Colibri 会立即回复简短中文确认（如 `已改方向，跳过剩余 N 个工具`）。权限确认期间不可用。
+工具执行过程中，同一用户再发一条消息可**改方向**：跳过剩余工具并注入新指令，Colibri 会立即回复简短中文确认（如 `已改方向，跳过剩余 N 个工具`）。
 
 ## 内置工具
 
-- `files.list`：列出允许目录下的直接子项。
-- `files.read`：读取允许目录下的 UTF-8 文本文件。
-- `shell.run`：经权限确认后执行 shell 命令。
-- `web.search`：通过配置的搜索引擎搜索网页。
+- `files.list`：有界、排序的目录分页；使用 `next_after` 继续。
+- `files.read`：按行范围或 `offset_chars` 读取 UTF-8 文本；截断时返回准确的字符续读位置，偏移针对脱敏后的文本。
+- `shell.run`：执行 shell 命令；前台长输出返回有限头尾、退出码和脱敏归档路径，可按需回读，无需重复执行命令。
 - `memory.list`：列出 always-on 记忆文件和 topic 文件。
 - `memory.read`：读取 `SOUL.md`、`USER.md`、`MEMORY.md`、`INDEX.md` 或 topic 文件。
 - `memory.search`：搜索 `INDEX.md` 目录行；详细 topic 需要再单独读取。
-- `memory.write`：经权限确认后追加或替换记忆文件。
+- `memory.write`：追加或替换记忆文件。
 - `skill.read`：按 catalog 中的 name 读取完整 `SKILL.md`。
 - `skill.run`：运行本地 skill 中配置的命令。
 
-工具调用受 `session.max_tool_rounds` 限制，工具输出受 `tools.max_result_chars` 限制。
+工具输出受 `tools.max_result_chars` 约束；列表、读取和后台查询另有有界分页窗口。
 
-## 权限
+## 访问模式
 
-默认权限策略：
-
-```toml
-[tools]
-default_permission = "allow_read_confirm_write"
-```
-
-安全边界内的只读非 shell 工具默认允许。Shell 命令和写操作默认询问。
-
-确认选项：
-
-- `1`：只允许本次。
-- `2`：当前 session 允许。
-- `3`：仅 shell，有效于当前 session 的同一可执行文件。
-- `4`：用户级长期允许。
-- `5`：仅 shell，用户级长期允许同一可执行文件。
-- `0`：拒绝。
-
-用户级授权存储在：
-
-```text
-~/.colibri/permissions.toml
-```
+各入口统一使用完全访问模式，不进行工具权限审批或持久授权。系统提示词要求 Agent 在危险操作前向用户确认；Linux 用户和外部服务自身的权限仍然有效。
 
 ## 记忆
 
@@ -372,13 +338,15 @@ max_concurrent_turns = 1
 
 ## Transcript
 
+执行中的新消息通过公共 steering 在安全处理节点补充当前任务。精确发送 `/stop` 会优先取消后续执行，保存已完成步骤与实际执行记录组成的阶段性结论；已发出的远端操作和已经发生的修改不会自动撤销。掌机退出复用此停止路径，菜单、拼音和录音在 Agent 执行期间仍可使用。
+
 当 `session.transcript = true` 时，Colibri 写入 JSONL：
 
 ```text
 ~/.colibri/transcripts/YYYY-MM-DD.jsonl
 ```
 
-CLI 和 gateway session 都会写 transcript。Gateway 事件会额外包含 `channel`、`sender_id`、`session_key` 等 metadata。
+CLI、REPL、gateway 和掌机 App 共用按天日志；每次写入前检查日期，跨北京时间午夜自动切换文件，保留策略由同一公共 writer 执行。App 的 `/clear` 仅隐藏此前的显示记录，不删除日志。Gateway 事件会额外包含 `channel`、`sender_id`、`session_key` 等 metadata。
 
 ## 状态与诊断
 
@@ -409,3 +377,29 @@ deploy/systemd/colibri-gateway.service
 
 Gateway 开机自启用 `colibri-gateway.service`：前台执行 `gateway run`（不要用 `gateway start`）。  
 微信 channel 不监听本地端口，只要设备能出网访问微信 API，且 `channels.weixin` 已配置 token，即可在 systemd 下正常收发。
+
+模型历史恢复与界面历史显示分开：重启时逐行读取保留的 transcript，原样重放当前会话最新模型流中的摘要、消息、工具结果和运行时上下文位置；不再提供 `restore_message_limit`、`restore_char_limit`、`restore_scan_bytes`。界面加载窗口不裁剪模型历史，后续压缩统一按模型上下文预算及可选的 `session.max_context_memory_mib` 控制。掌机聊天历史首屏显示最新一页，滚动到边界时按需加载相邻窗口；Fn+L/Fn+M 直接跳到最早/最新消息，`/clear` 仍只设置显示边界。
+
+### 工具输出与编辑验证
+
+前台 `shell.run`、`skill.run` 的模型可见预览最多 4096 字符（同时受 `tools.max_result_chars` 约束），退出状态和归档元数据另行附带。长输出按 stdout/stderr 分别保存在运行目录的 `artifacts/tool-results/`，小输出无需写盘。归档前移除当前配置中的已知凭据；不保证识别未知秘密。每流最多保存 16 MiB，总预算 64 MiB；空间或 I/O 异常会明确提示无法归档，原命令成功与否仍按真实执行结果报告。`complete=false` 表示保存的输出不完整。第一阶段不会自动删除可能仍被历史引用的归档；预算耗尽时退化到预览。
+
+通过 `files.read` 的 `start_line` / `end_line`，或归档专用的 `offset_chars` / `max_chars` 读取必要片段。字符分页返回 `next_offset_chars` 与 `has_more`，支持普通文本和没有换行的长输出。原始 stdout/stderr 的交错时间顺序不予重建。
+
+`files.patch`、`files.write` 可显式指定 `verify_command`，以及可选 `verify_cwd`、`verify_timeout_seconds`。工具先修改，再执行前台验证；返回 `edit=applied` 和独立的验证状态。验证失败、超时或取消不会撤销已经发生的修改，不应因此重复应用同一补丁。未指定验证命令时保持普通文件操作；不会自动猜测测试脚本。
+
+### 查询与大结果续读
+
+- `files.list` 默认每页 50 项，最多 200 项；按返回的 `next_after` 设置 `after` 继续。目录变动不保证跨页快照一致。
+- `files.read` 短行范围读取仍返回文本；发生截断或指定 `offset_chars` 时返回 JSON，包括 `text`、`next_offset_chars`、`has_more` 和续读参数。字符偏移针对脱敏后的文本；不要与行范围混用。
+- `files.search` 返回命中附近的片段；达到结果上限时用 `continuation.after_path`、`continuation.start_line` 继续。扫描预算、不可读路径或超长行导致不完整时会说明限制，不保证能继续；应缩小范围或使用 Shell 流式搜索。
+- 大型 MCP 结果使用脱敏归档。MCP 返回合法 JSON，保留错误标志和内容类型，不代表非文本内容已经被理解。
+- `shell.poll` 的 `page_has_more` 只表示当前日志页尚未读完；`truncated` 表示采集截断或采集异常。`output_path` 是保留的头部/尾部日志位置，不能当成完整原始输出。命令退出码与日志采集错误分开报告。
+
+### Memory 与硬件工具
+
+`memory.read` 支持行范围、脱敏字符分页和可选 `include_version=true`；返回的 SHA-256 可用于 `memory.write.expected_sha256`，新文件可指定 `missing`。`memory.list` 小列表仍一次返回，大列表使用 `after` 续查；`memory.search` 仅搜索 INDEX.md，返回明确错误、停止原因与续查参数，不会把索引读取失败当成没有记忆。
+
+`memory.write` 在 Memory 根目录加跨进程锁，追加和替换都使用原子文件提交。Topic 可通过 `index_description` 显式一起更新索引；`expected_index_sha256` 可校验索引版本。Topic 与索引是两个原子提交，不是跨文件事务：若 `applied=true` 但索引失败，Topic 已保存，只补索引，不要重复追加。Memory 自动加载规则与 App 菜单只读行为保持不变。
+
+`serial.read` 支持 `encoding=auto|text|hex`，默认根据数据选择文本或十六进制；`bytes_read` 表示实际消费的字节数，已知凭据先脱敏再编码，`redacted` 标记数据是否因此变化。已消费数据从结果或归档回读，不应再读一次设备来恢复。`serial.write` 支持文本与 hex 输入，成功仅表示本地传输接受字节，不能当作物理执行已验证。控制请求超时、取消或响应异常时，`outcome_unknown` 和 `bytes_written` 帮助判断是否可能已经执行；不会自动重发。设备 FD 的 advisory lock 协调 Colibri 的跨进程访问，不能约束不遵循该锁的外部程序。

@@ -7,7 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::config::SkillsConfig;
 use crate::messages::ToolResult;
-use crate::process_output::{run_bounded_command, CommandRunError};
+use crate::process_output::{run_tool_command, CommandRunError};
 use crate::tools::ToolContext;
 use serde::Deserialize;
 
@@ -316,18 +316,23 @@ pub fn run_skill_command(args: &BTreeMap<String, String>, context: &ToolContext)
     let mut child = Command::new(&command.command);
     child.args(&argv).current_dir(&skill.root);
     let timeout = Duration::from_secs_f64(context.config.tools.max_shell_seconds.max(0.0));
-    match run_bounded_command(child, timeout, context.config.tools.max_result_chars) {
+    match run_tool_command(child, timeout, context) {
         Ok(output) => {
             if output.success {
                 let mut result = ToolResult::ok(output.text);
                 result.truncated = output.truncated;
                 result
             } else {
-                let mut result = ToolResult::error("tool_error", output.text);
+                let mut result =
+                    ToolResult::error(output.termination.unwrap_or("tool_error"), output.text);
                 result.truncated = output.truncated;
                 result
             }
         }
+        Err(CommandRunError::Cancelled) => ToolResult::error(
+            "cancelled",
+            "Operation cancelled; previous side effects are not rolled back",
+        ),
         Err(CommandRunError::Timeout) => {
             let mut result = ToolResult::error("timeout", "Skill command timed out");
             result.truncated = false;

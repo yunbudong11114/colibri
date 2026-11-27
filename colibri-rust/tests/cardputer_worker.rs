@@ -57,15 +57,42 @@ fn worker(home: &Path, args: &[&str], lines: &str) -> String {
 }
 
 fn pipe(home: &Path, requests: &[Value]) -> Vec<Value> {
-    let lines = requests
-        .iter()
-        .map(Value::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    worker(home, &[], &(lines + "\n"))
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    let mut child = Command::new(env!("CARGO_BIN_EXE_colibri-worker"))
+        .arg("--home")
+        .arg(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut rows = Vec::new();
+    for request in requests {
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        if request["type"] == "quit" {
+            break;
+        }
+        loop {
+            let mut line = String::new();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+            let row: Value = serde_json::from_str(&line).unwrap();
+            let startup = row["startup"] == true;
+            let transient = startup
+                || matches!(
+                    row["type"].as_str(),
+                    Some("activity" | "status" | "steering_received" | "steering_applied")
+                );
+            rows.push(row);
+            if !transient {
+                break;
+            }
+        }
+    }
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    rows
 }
 
 #[test]
@@ -184,7 +211,7 @@ fn startup_returns_visible_history_without_model_connection() {
         ],
     );
     assert_eq!(
-        rows[0]["history"],
+        display_texts(&rows[0]["history"]),
         json!([
             {"role":"user","text":"之前的问题"},{"role":"assistant","text":"之前的回答"}
         ])
@@ -329,7 +356,7 @@ fn clear_chat_hides_old_turns_across_restarts_without_editing_the_transcript() {
     fs::write(&log, &all).unwrap();
     let rows = pipe(&fixture.0, &[json!({"type":"model_status"})]);
     assert_eq!(
-        rows[0]["history"],
+        display_texts(&rows[0]["history"]),
         json!([{"role":"user","text":"新问题"},{"role":"assistant","text":"新回答"}])
     );
     assert_eq!(fs::read_to_string(&log).unwrap(), all);
@@ -709,4 +736,179 @@ fn memory_menu_reads_agent_updates_and_rejects_save_requests() {
     assert!(!fs::read_to_string(fixture.0.join("memory/USER.md"))
         .unwrap()
         .contains("不应保存"));
+}
+
+#[test]
+fn app_restart_restores_local_turns_by_time_and_excludes_weixin_after_clear() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("config.toml"), "[model]\nprovider='fake'\n").unwrap();
+    let dir = fixture.0.join("transcripts");
+    fs::create_dir(&dir).unwrap();
+    let turn = |hour: &str, source: &str, text: &str| {
+        format!(
+            "{}\n{}\n",
+            json!({"ts":format!("2026-11-26T{hour}:00+08:00"),"type":"user_message","payload":{"session_key":source,"text":text}}),
+            json!({"ts":format!("2026-11-26T{hour}:01+08:00"),"type":"assistant_message","payload":{"session_key":source,"text":format!("回复{text}"),"tool_call_count":0}})
+        )
+    };
+    let newest = dir.join("2026-11-26-100.jsonl");
+    fs::write(&newest, turn("21:00", "local", "本地最新")).unwrap();
+    fs::write(
+        dir.join("2026-11-26-200.jsonl"),
+        turn("20:00", "local", "本地较早"),
+    )
+    .unwrap();
+    let gateway = dir.join("2026-11-26.jsonl");
+    fs::write(&gateway, turn("22:00", "weixin:fixture", "微信消息")).unwrap();
+    let history =
+        || display_texts(&pipe(&fixture.0, &[json!({"type":"model_status"})])[0]["history"]);
+    let expected = json!([
+        {"role":"user","text":"本地较早"},{"role":"assistant","text":"回复本地较早"},
+        {"role":"user","text":"本地最新"},{"role":"assistant","text":"回复本地最新"}
+    ]);
+    assert_eq!(history(), expected);
+    assert_eq!(history(), expected); // another process restart, not cached UI state
+    pipe(&fixture.0, &[json!({"type":"clear_chat"})]);
+    assert_eq!(history(), json!([]));
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&newest)
+        .unwrap()
+        .write_all(turn("23:00", "local", "清屏后本地").as_bytes())
+        .unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&gateway)
+        .unwrap()
+        .write_all(turn("23:30", "weixin:fixture", "清屏后微信").as_bytes())
+        .unwrap();
+    assert_eq!(
+        history(),
+        json!([
+            {"role":"user","text":"清屏后本地"},{"role":"assistant","text":"回复清屏后本地"}
+        ])
+    );
+    assert!(fs::read_to_string(gateway).unwrap().contains("微信消息"));
+}
+
+#[test]
+fn app_processes_share_daily_log_and_clear_hides_only_the_earlier_records() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("config.toml"),
+        "[model]\nprovider='fake'\n[memory]\nenabled=false\n",
+    )
+    .unwrap();
+    pipe(
+        &fixture.0,
+        &[json!({"type":"submit","text":"first local question"})],
+    );
+    let files = || {
+        fs::read_dir(fixture.0.join("transcripts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .collect::<Vec<_>>()
+    };
+    let original = files();
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].file_name().unwrap().to_str().unwrap().len(), 16); // YYYY-MM-DD.jsonl
+    let mut remote = colibri_rust::transcript::TranscriptWriter::new(
+        original[0].clone(),
+        std::collections::BTreeMap::from([("session_key".into(), "weixin:fixture".into())]),
+        0,
+        0,
+    )
+    .unwrap();
+    remote
+        .write("user_message", json!({"text":"remote question"}))
+        .unwrap();
+    remote
+        .write(
+            "assistant_message",
+            json!({"text":"remote answer","tool_call_count":0}),
+        )
+        .unwrap();
+    pipe(&fixture.0, &[json!({"type":"clear_chat"})]);
+    let rows = pipe(
+        &fixture.0,
+        &[json!({"type":"submit","text":"second local question"})],
+    );
+    let answer = rows.iter().find(|r| r["type"] == "reply").unwrap()["text"].clone();
+    let rows = pipe(&fixture.0, &[json!({"type":"model_status"})]);
+    assert_eq!(
+        display_texts(&rows[0]["history"]),
+        json!([
+            {"role":"user","text":"second local question"}, {"role":"assistant","text":answer}
+        ])
+    );
+    assert_eq!(files(), original);
+    let data = fs::read_to_string(&original[0]).unwrap();
+    assert!(data.contains("first local question"));
+    assert!(data.contains("remote answer"));
+}
+
+#[test]
+fn app_with_transcript_disabled_does_not_create_a_log_directory() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("config.toml"),
+        "[model]\nprovider='fake'\n[memory]\nenabled=false\n[session]\ntranscript=false\n",
+    )
+    .unwrap();
+    pipe(
+        &fixture.0,
+        &[json!({"type":"submit","text":"unlogged question"})],
+    );
+    assert!(!fixture.0.join("transcripts").exists());
+}
+
+fn display_texts(history: &Value) -> Value {
+    json!(history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| json!({"role":m["role"],"text":m["text"]}))
+        .collect::<Vec<_>>())
+}
+
+#[test]
+fn history_page_protocol_preserves_request_id_and_clear_boundary() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("transcripts")).unwrap();
+    let mut events = String::new();
+    for n in 0..10 {
+        for (kind, text) in [
+            ("user_message", format!("q{n}")),
+            ("assistant_message", format!("a{n}")),
+        ] {
+            events += &(json!({"ts":format!("2026-11-26T12:{n:02}:00"),"type":kind,"payload":{"text":text,"tool_call_count":0}}).to_string()+"\n");
+        }
+    }
+    fs::write(fixture.0.join("transcripts/2026-11-26.jsonl"), events).unwrap();
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"history_page","direction":"first","request_id":42}),
+            json!({"type":"quit"}),
+        ],
+    );
+    let page = rows.iter().find(|r| r["type"] == "history_page").unwrap();
+    assert_eq!(page["request_id"], 42);
+    assert_eq!(page["history"][0]["text"], "q0");
+    assert_eq!(page["has_after"], true);
+    pipe(
+        &fixture.0,
+        &[json!({"type":"clear_chat"}), json!({"type":"quit"})],
+    );
+    let rows = pipe(
+        &fixture.0,
+        &[
+            json!({"type":"history_page","direction":"last","request_id":43}),
+            json!({"type":"quit"}),
+        ],
+    );
+    let page = rows.iter().find(|r| r["type"] == "history_page").unwrap();
+    assert_eq!(page["total"], 0);
 }

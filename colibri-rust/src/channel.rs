@@ -44,6 +44,11 @@ pub trait OutboundSink: Send + Sync {
 
 pub trait GatewayChannel: Send + Sync {
     fn name(&self) -> &str;
+    /// Expected upper bound of one poll, used only for diagnostics.
+    fn poll_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(300)
+    }
+    fn diagnostic_stage(&self, _stage: &'static str) {}
     fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError>;
     fn resolve_inbound_media(&self, envelope: &mut InboundEnvelope) -> Result<(), String>;
     fn outbound_for(&self, envelope: &InboundEnvelope) -> Result<Arc<dyn OutboundSink>, String>;

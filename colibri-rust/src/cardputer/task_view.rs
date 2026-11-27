@@ -20,6 +20,8 @@ pub(super) fn render(c: &crate::tools::ToolContext) -> String {
                     i + 1,
                     if step.status == "completed" {
                         "完成"
+                    } else if step.status == "cancelled" {
+                        "取消"
                     } else if step.status == "running" {
                         "进行"
                     } else {
@@ -60,6 +62,7 @@ fn status(value: &str) -> &str {
         "completed" => "已完成",
         "blocked" => "等待处理",
         "failed" => "失败",
+        "cancelled" => "已取消",
         "timed_out" => "超时",
         "killed" => "已取消",
         "interrupted" => "已中断",

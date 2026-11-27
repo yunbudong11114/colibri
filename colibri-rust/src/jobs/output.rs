@@ -13,6 +13,7 @@ pub(super) struct Output {
     pub(super) bytes: usize,
     pub(super) total: usize,
     pub(super) last_flush: Instant,
+    pub(super) error: Option<String>,
 }
 impl Output {
     pub(super) fn append(&mut self, data: &[u8], dir: &Path) {
@@ -20,14 +21,18 @@ impl Output {
         let room = LOG_CAP.saturating_sub(self.bytes);
         let n = room.min(data.len());
         if self.head.write_all(&data[..n]).is_ok() {
-            self.bytes += n
+            self.bytes += n;
+        } else {
+            self.error = Some("output_write_failed: saved log is incomplete".into());
         }
         self.tail.extend_from_slice(data);
         if self.tail.len() > TAIL_CAP {
             self.tail.drain(..self.tail.len() - TAIL_CAP);
         }
         if self.total > LOG_CAP && self.last_flush.elapsed() > Duration::from_millis(500) {
-            let _ = crate::config_io::atomic_write(&dir.join("tail.log"), &self.tail);
+            if crate::config_io::atomic_write(&dir.join("tail.log"), &self.tail).is_err() {
+                self.error = Some("tail_write_failed: saved log is incomplete".into());
+            }
             self.last_flush = Instant::now();
         }
     }
@@ -39,36 +44,19 @@ pub(super) fn reader<R: Read + Send + 'static>(
     secrets: Vec<String>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let guard = secrets.iter().map(String::len).max().unwrap_or(1).max(1) - 1;
-        let mut pending = Vec::new();
+        let mut redactor = crate::secrets::StreamRedactor::new(secrets);
         let mut chunk = [0u8; 8192];
-        let mut output = Vec::with_capacity(8192);
         loop {
             let n = match pipe.read(&mut chunk) {
                 Ok(n) => n,
-                Err(_) => 0,
-            };
-            pending.extend_from_slice(&chunk[..n]);
-            let emit = if n == 0 {
-                pending.len()
-            } else {
-                pending.len().saturating_sub(guard)
-            };
-            output.clear();
-            let mut pos = 0;
-            while pos < emit {
-                if let Some(secret) = secrets
-                    .iter()
-                    .find(|s| !s.is_empty() && pending[pos..].starts_with(s.as_bytes()))
-                {
-                    output.extend_from_slice(b"<redacted>");
-                    pos += secret.len()
-                } else {
-                    output.push(pending[pos]);
-                    pos += 1
+                Err(_) => {
+                    if let Ok(mut s) = state.lock() {
+                        s.error = Some("output_read_failed: saved log is incomplete".into());
+                    }
+                    0
                 }
-            }
-            pending.drain(..pos);
+            };
+            let output = redactor.feed(&chunk[..n], n == 0);
             if let Ok(mut s) = state.lock() {
                 s.append(&output, &dir)
             }
@@ -77,4 +65,47 @@ pub(super) fn reader<R: Read + Send + 'static>(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn capture_errors_are_explicit_instead_of_claiming_complete_output() {
+        let dir = crate::config_io::Scratch::new(&std::env::temp_dir()).unwrap();
+        let p = dir.0.join("readonly");
+        fs::write(&p, "").unwrap();
+        let mut state = Output {
+            head: fs::File::open(&p).unwrap(),
+            tail: Vec::new(),
+            bytes: 0,
+            total: 0,
+            last_flush: Instant::now(),
+            error: None,
+        };
+        state.append(b"command output", &dir.0);
+        assert!(state
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("output_write_failed"));
+        assert_eq!(state.bytes, 0);
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken pipe"))
+            }
+        }
+        let state = Arc::new(Mutex::new(state));
+        reader(Broken, state.clone(), dir.0.clone(), vec![])
+            .join()
+            .unwrap();
+        assert!(state
+            .lock()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("output_read_failed"));
+    }
 }

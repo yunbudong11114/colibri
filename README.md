@@ -12,11 +12,11 @@ Colibri is designed to run as a small, headless agent on a Linux card server. It
 - Standard-library runtime: third-party packages are only needed for development tests.
 - OpenAI-compatible model adapter plus a deterministic fake model for tests.
 - Bounded tool loop with dynamic permissions.
-- Built-in tools for files, shell, memory, web search, local skills, and opt-in read-only hardware discovery.
+- Built-in tools for files, shell, memory, local skills, and opt-in read-only hardware discovery.
 - Markdown-backed persistent memory with bounded recall injection.
 - Local skills with progressive disclosure.
 - Context compacting with model summaries and deterministic fallback.
-- JSONL transcripts for CLI and gateway sessions.
+- Shared JSONL transcripts for CLI, REPL, gateway, and Cardputer App sessions.
 - Weixin gateway channel through Tencent iLink.
 - Gateway process management: `run`, `start`, `stop`, `restart`, `status`.
 
@@ -37,7 +37,7 @@ flowchart TD
     Model --> Fake["Fake model"]
     Model --> OpenAI["OpenAI-compatible API"]
     Session --> Registry["ToolRegistry"]
-    Registry --> Tools["files / shell / web / memory / skill"]
+    Registry --> Tools["files / shell / memory / skill"]
     Session --> Permissions["PermissionPolicy"]
     Permissions --> UserPerms["~/.colibri/permissions.toml"]
     Session --> Memory["MemoryContext"]
@@ -74,7 +74,7 @@ cargo build --release --manifest-path colibri-rust/Cargo.toml
 
 User configuration is `~/.colibri/config.toml` (or `$COLIBRI_HOME/config.toml`); `--config PATH` selects another file. Missing model configuration produces setup guidance rather than silently selecting a fake model. Run `colibri configure`, or `colibri --config PATH configure`, for step-by-step setup. Secret input is hidden; changes are saved only after confirmation. An explicitly configured `model.provider="fake"` remains available for tests.
 
-The core includes OpenAI-compatible models, memory, transcript recovery and compaction, persistent task evidence, managed background shell jobs, bounded file reads/search/patches, skills, general MCP discovery and calls, search, vision, file/media sending, and Weixin authentication and gateway channels. Runtime access is unrestricted at the application layer; the system prompt asks the agent to confirm dangerous operations. There is no tool grant or permission approval layer. Operating-system and service credentials still apply.
+The core includes OpenAI-compatible models, memory, transcript recovery and compaction, persistent task evidence, managed background shell jobs, bounded file reads/search/patches, skills, general MCP discovery and calls, vision, file/media sending, and Weixin authentication and gateway channels. Runtime access is unrestricted at the application layer; the system prompt asks the agent to confirm dangerous operations. There is no tool grant or permission approval layer. Operating-system and service credentials still apply.
 
 Rust tests cover shared behavior and entry-point workflows. The Python reference suite supplies coverage mappings and deterministic comparisons; new requirements such as model setup and full application access are validated directly in Rust.
 
@@ -120,18 +120,7 @@ api_key = ""
 
 ## Web Search
 
-The default `web.search` backend remains Baidu. To use Aliyun Bailian's hosted WebSearch MCP instead:
-
-```toml
-[web_search]
-engine = "aliyun_mcp"
-endpoint = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
-api_key = ""
-max_results = 10
-timeout_seconds = 10
-```
-
-`web_search.api_key` takes precedence. If it is empty, Colibri reads `DASHSCOPE_API_KEY`. This is a hosted Streamable HTTP MCP endpoint: Colibri performs the MCP lifecycle over HTTPS for each search and does not start a local MCP process. The existing `[web_search]` hot reload behavior applies.
+Web search can be added through a separately installed local skill.
 
 ## CLI
 
@@ -150,7 +139,7 @@ To expose hardware tools to the model, enable both gates and configure an explic
 
 ```toml
 [tools]
-enabled = ["shell", "files", "web", "image", "memory", "skills", "hardware"]
+enabled = ["shell", "files", "image", "memory", "skills", "hardware"]
 
 [hardware]
 enabled = true
@@ -191,7 +180,7 @@ uv run python -m colibri.cli gateway status
 - `gateway restart`: stop then start.
 - `gateway status`: prints process status, PID, RSS when available, config path, state path, and log path.
 - `gateway status` also prints `agent_status=healthy|unhealthy`. Process state and Agent health are independent.
-- Running Gateway and REPL processes reload `[model]`, `[vision]`, and `[web_search]` from the active config before the next turn. Invalid edits are rejected and the last-known-good runtime remains active. Other sections require a restart.
+- Running Gateway and REPL processes reload `[model]` and `[vision]` from the active config before the next turn. Invalid edits are rejected and the last-known-good runtime remains active. Other sections require a restart.
 
 Background state and logs:
 
@@ -239,7 +228,6 @@ When the model returns tool calls, Colibri can execute:
 - `files.read`: read UTF-8 text files under allowed roots.
 - `files.write`: write UTF-8 text files under allowed roots; generated artifacts should use this instead of shell redirection.
 - `shell.run`: run commands after permission approval; do not use it to create or edit files.
-- `web.search`: search the web through the configured provider.
 - `memory.list`: list always-on memory files and topic files.
 - `memory.read`: read `SOUL.md`, `USER.md`, `MEMORY.md`, `INDEX.md`, or a topic file.
 - `memory.search`: search `INDEX.md` manifest lines; read matching topic files separately.
@@ -381,13 +369,15 @@ The shared Rust runtime manages compaction using the resolved model window, effe
 
 ## Transcripts
 
+Messages received during execution use shared steering at execution boundaries. Send `/stop` to cancel further execution and save a partial conclusion based on recorded steps and tool outcomes. Already sent remote operations and earlier side effects cannot be rolled back automatically. App exit uses the same stop path; menus, typing, and recording stay responsive while the agent runs.
+
 When `session.transcript = true`, Colibri writes compact JSONL events to:
 
 ```text
 ~/.colibri/transcripts/YYYY-MM-DD.jsonl
 ```
 
-CLI and gateway sessions both use transcript logging. Gateway transcript payloads include channel metadata such as `channel`, `sender_id`, and `session_key`.
+CLI, REPL, gateway, and the Cardputer App share daily transcript files. The common writer rotates before the first event after Beijing midnight and applies the same retention policy. App `/clear` only hides earlier messages from display. Gateway transcript payloads include channel metadata such as `channel`, `sender_id`, and `session_key`.
 
 ## Console Status And Diagnostics
 
@@ -425,4 +415,4 @@ Model capacity is resolved from the configured service’s model metadata on fir
 
 Memory and skill-catalog changes append bounded runtime-context snapshots at model-request boundaries. Unchanged context reuses the existing snapshot. Snapshot positions are retained alongside chat messages so later requests preserve the previous prefix. Snapshot bytes participate in context accounting.
 
-Agent recovery restores recorded tool calls, results, original user-message timestamps, summaries, and runtime-context positions. It reads a bounded transcript tail and keeps complete recent turns. Missing tool results after interruption are marked as execution unknown for verification before retrying. Earlier logs retain the information they recorded. App display history continues to show conversation text.
+Agent recovery restores recorded tool calls, results, original user-message timestamps, summaries, and runtime-context positions. It streams retained transcripts and restores the latest model stream for the conversation without display-history limits or restart-only trimming. The normal model context budget and optional context-memory budget control subsequent compaction. Missing tool results after interruption are marked as execution unknown for verification before retrying. Earlier logs retain the information they recorded. The App loads the latest page of conversation text and fetches overlapping windows at scroll boundaries. Fn+L/Fn+M jump to the earliest/latest messages; `/clear` remains a display boundary.

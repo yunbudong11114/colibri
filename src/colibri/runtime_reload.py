@@ -50,7 +50,6 @@ class PartialRuntimeReloader:
                 self.config,
                 model=candidate.model,
                 vision=candidate.vision,
-                web_search=candidate.web_search,
             )
             model = self.model_builder(config.model)
         except Exception as error:

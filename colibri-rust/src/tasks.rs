@@ -103,6 +103,41 @@ pub(crate) fn summary(c: &ToolContext) -> String {
     match read(c){Ok(Some(t))=>{let done=t.steps.iter().filter(|s|s.status=="completed").count();format!("Current task {}: {} ({done}/{} steps, {}). Next: {}. Blocker: {}. Use task.inspect for recorded steps/evidence. A new user goal may explicitly replace this task.",t.id,t.objective,t.steps.len(),t.status,t.next_action,t.blocker)},Ok(None)=>String::new(),Err(e)=>format!("Task state could not be recovered: {e}. Inspect and report the problem; do not assume completion.")}
 }
 
+pub(crate) fn cancel(c: &ToolContext) -> Result<String, String> {
+    let Some(old) = read(c)? else {
+        return Ok("尚未创建任务计划。".into());
+    };
+    if old.status == "completed" || old.status == "cancelled" {
+        return Ok(format!("最近任务：{}（{}）", old.objective, old.status));
+    }
+    let t = edit(c, |old| {
+        let mut t = old.ok_or("No task")?;
+        t.status = "cancelled".into();
+        for step in &mut t.steps {
+            if step.status == "running" {
+                step.status = "cancelled".into();
+            }
+        }
+        Ok(t)
+    })?;
+    let mut lines = vec![format!("任务：{}", t.objective)];
+    for step in t.steps {
+        lines.push(format!(
+            "{}：{}",
+            if step.status == "completed" {
+                "已完成"
+            } else {
+                "未完成"
+            },
+            step.text
+        ));
+    }
+    if !t.next_action.is_empty() {
+        lines.push(format!("原下一步：{}", t.next_action));
+    }
+    Ok(lines.join("\n"))
+}
+
 pub(crate) fn run(name: &str, v: &Value, c: &ToolContext) -> ToolResult {
     let mut sanitized = v.clone();
     fn scrub(v: &mut Value, config: &crate::config::AgentConfig) {

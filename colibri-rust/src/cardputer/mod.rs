@@ -1,17 +1,18 @@
 //! Cardputer protocol adapter for the shared Rust runtime.
+mod protocol;
 mod task_view;
 use crate::mcp;
+use protocol::pipe;
 mod pinyin;
 mod settings;
 mod voice;
 
 use crate::config::{colibri_home, expand_user_path, AgentConfig};
-use crate::messages::Message;
 use crate::runtime_reload::{config_fingerprint, ConfigFingerprint};
 use crate::session::AgentSession;
 use crate::session_history::TranscriptHistoryLoader;
 use crate::skills::SkillIndex;
-use crate::transcript::{beijing_timestamp_now, TranscriptWriter};
+use crate::transcript::TranscriptWriter;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -19,7 +20,6 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use self::settings::{device_model, Settings};
 use self::voice::Recording;
@@ -37,7 +37,9 @@ struct App {
     restore: bool,
     settings_changed: bool,
     loaded_config: Option<ConfigFingerprint>,
-    transcript_path: Option<PathBuf>,
+    loaded_mcp: Option<ConfigFingerprint>,
+    control: Option<Arc<Mutex<Option<crate::steering::SteerHandle>>>>,
+    execution_epoch: Option<(Arc<std::sync::atomic::AtomicU64>, u64)>,
 }
 
 impl App {
@@ -51,7 +53,9 @@ impl App {
             restore: true,
             settings_changed: false,
             loaded_config: None,
-            transcript_path: None,
+            loaded_mcp: None,
+            control: None,
+            execution_epoch: None,
         }
     }
 
@@ -64,27 +68,19 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn history_loader(&self, config: &AgentConfig) -> TranscriptHistoryLoader {
-        let session = &config.session;
-        TranscriptHistoryLoader::new(
-            self.settings.home.clone(),
-            session.restore_message_limit,
-            session.restore_char_limit,
-            session.restore_scan_bytes,
-        )
+    fn history_loader(&self, _config: &AgentConfig) -> TranscriptHistoryLoader {
+        TranscriptHistoryLoader::for_home(self.settings.home.clone())
     }
 
-    fn startup_history(&self) -> Result<Vec<Message>, String> {
+    fn history_page(&self, direction: &str, start: usize) -> Result<Value, String> {
         let config = self.settings.config()?;
         if !(config.session.transcript && config.session.restore_transcript) {
-            return Ok(Vec::new());
+            return Ok(
+                json!({"history":[],"start":0,"total":0,"has_before":false,"has_after":false}),
+            );
         }
-        let offsets = match fs::read(self.settings.home.join("chat-display-cursor.json")) {
-            Ok(data) => serde_json::from_slice(&data).map_err(|error| error.to_string())?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => return Err(error.to_string()),
-        };
-        Ok(self.history_loader(&config).load_after(&offsets))
+        crate::display_history::DisplayHistory::new(self.settings.home.clone(), "local")
+            .page(direction, start)
     }
 
     fn clear_chat(&self) -> Result<(), String> {
@@ -113,41 +109,21 @@ impl App {
         atomic_write(&path, &data).map_err(|error| error.to_string())
     }
 
-    fn open_transcript(
-        &mut self,
-        config: &AgentConfig,
-    ) -> Result<Option<Arc<Mutex<TranscriptWriter>>>, String> {
-        if !config.session.transcript {
-            self.transcript_path = None;
-            return Ok(None);
-        }
-        let date = beijing_timestamp_now();
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = self
-            .settings
-            .home
-            .join("transcripts")
-            .join(format!("{}-{stamp}.jsonl", &date[..10]));
-        let writer = TranscriptWriter::new(
-            path.clone(),
-            Default::default(),
-            config.session.transcript_retention_days,
-            config.session.transcript_max_total_bytes,
-        )?;
-        self.transcript_path = Some(path);
-        Ok(Some(Arc::new(Mutex::new(writer))))
-    }
-
     fn ask(&mut self, prompt: &str) -> Result<String, String> {
         let fingerprint = config_fingerprint(&self.settings.home.join("config.toml"));
-        if self.session.is_none() || self.settings_changed || fingerprint != self.loaded_config {
+        let mcp_changed = self.session.as_ref().is_some_and(|session| {
+            config_fingerprint(&session.config.mcp_config_path) != self.loaded_mcp
+        });
+        if self.session.is_none()
+            || self.settings_changed
+            || fingerprint != self.loaded_config
+            || mcp_changed
+        {
             let config = self.settings.config()?;
             crate::memory::initialize(&config)?;
             let model = device_model(&config, &self.settings.home)?;
-            let transcript = self.open_transcript(&config)?;
+            let transcript = TranscriptWriter::for_session(&self.settings.home, &config.session)?
+                .map(|writer| Arc::new(Mutex::new(writer)));
             let mut session = AgentSession::from_shared(
                 Arc::new(config),
                 Arc::new(Mutex::new(model)),
@@ -172,26 +148,56 @@ impl App {
             }
             self.restore = false;
             self.settings_changed = false;
-            self.loaded_config = fingerprint;
+            self.loaded_config = config_fingerprint(&self.settings.home.join("config.toml"));
+            self.loaded_mcp = config_fingerprint(&session.config.mcp_config_path);
             self.session = Some(session);
         }
-        let response = self.session.as_mut().unwrap().submit(prompt)?;
-        let config = Arc::clone(&self.session.as_ref().unwrap().config);
-        if self.transcript_path.as_ref().is_some_and(|path| {
-            let cap = config.session.transcript_max_total_bytes;
-            let today = beijing_timestamp_now();
-            !path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(&today[..10]))
-                || (cap != 0
-                    && fs::metadata(path).map_or(true, |metadata| {
-                        metadata.len() >= cap.min(1024 * 1024) as u64
-                    }))
-        }) {
-            let writer = self.open_transcript(&config)?;
-            self.session.as_mut().unwrap().replace_transcript(writer);
+        if self.control.is_some() {
+            self.session
+                .as_mut()
+                .unwrap()
+                .set_steer_notifier(Some(Arc::new(|text| {
+                    let _ = send(&event("steering_applied", json!({"text":text})));
+                })));
         }
-        Ok(response.text)
+        if let Some(slot) = &self.control {
+            *slot.lock().map_err(|_| "control lock poisoned")? =
+                Some(self.session.as_ref().unwrap().steer_handle());
+        }
+        let superseded = self
+            .execution_epoch
+            .as_ref()
+            .is_some_and(|(epoch, generation)| {
+                epoch.load(std::sync::atomic::Ordering::SeqCst) != *generation
+            });
+        let terminal =
+            self.control.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump = if terminal {
+            self.session
+                .as_mut()
+                .unwrap()
+                .set_steer_notifier(Some(Arc::new(|text| println!("{text}"))));
+            let handle = self.session.as_ref().unwrap().steer_handle();
+            let flag = Arc::clone(&stop);
+            Some(std::thread::spawn(move || {
+                crate::cli::run_steering_pump(&handle, &flag, |timeout| {
+                    crate::repl_input::try_read_line(timeout, None)
+                })
+            }))
+        } else {
+            None
+        };
+        let response =
+            self.session
+                .as_mut()
+                .unwrap()
+                .submit(if superseded { "/stop" } else { prompt });
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = pump {
+            let _ = thread.join();
+        }
+        Ok(response?.text)
     }
 
     fn reload(&mut self) -> Result<(), String> {
@@ -215,8 +221,7 @@ impl App {
         target: &str,
         arguments: Value,
     ) -> Result<Value, String> {
-        let values = self.settings.values()?;
-        let server = mcp::servers(&values["mcp.servers"])?
+        let server = mcp::servers(&self.settings.config()?.mcp_servers)?
             .into_iter()
             .find(|server| server.name == name)
             .ok_or("未找到 MCP 服务器")?;
@@ -230,7 +235,7 @@ impl App {
                 .iter()
                 .map(|skill| json!({"name":skill.name,"description":skill.description}))
                 .collect()),
-            "mcp" => Ok(mcp::servers(&self.settings.values()?["mcp.servers"])?
+            "mcp" => Ok(mcp::servers(&self.settings.config()?.mcp_servers)?
                 .into_iter()
                 .map(|server| {
                     let description = if !server.description.is_empty() {
@@ -286,7 +291,7 @@ pub(crate) fn memory_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let symlink =
         |path: &Path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
     if symlink(&path) || (is_topic && symlink(&root.join("topics"))) {
-        return Err("记忆编辑器无法打开符号链接".into());
+        return Err("记忆阅读器无法打开符号链接".into());
     }
     Ok(path)
 }
@@ -357,17 +362,11 @@ fn handle(app: &mut App, request: Value) -> Result<Option<Value>, String> {
             event("task_status", json!({"text":task_view::render(&context)}))
         }
         "model_status" => {
-            let history = app
-                .startup_history()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|message| json!({"role":message.role,"text":message.content}))
-                .collect::<Vec<_>>();
-            event(
-                "model_status",
-                json!({"text":app.model_hint(),"history":history}),
-            )
+            let mut page = app.history_page("last", 0)?;
+            page["text"] = json!(app.model_hint());
+            event("model_status", page)
         }
+
         "clear_chat" => {
             app.clear_chat()?;
             event("chat_cleared", json!({}))
@@ -437,53 +436,6 @@ fn handle(app: &mut App, request: Value) -> Result<Option<Value>, String> {
     Ok(Some(result))
 }
 
-fn pipe(home: PathBuf) -> Result<(), String> {
-    let mut app = App::new(
-        home,
-        Arc::new(|message| {
-            let _ = send(&event("status", json!({"text":message})));
-        }),
-    );
-    if let Err(error) = app
-        .settings
-        .config()
-        .and_then(|config| crate::memory::initialize(&config))
-    {
-        send(&event("error", json!({"text":error}))).map_err(|e| e.to_string())?;
-    }
-    app.activity = Some(Arc::new(|stage| {
-        let text = match stage {
-            "thinking" => "思考中",
-            "compacting" => "压缩上下文",
-            "running_command" => "执行命令",
-            "waiting_command" => "等待命令",
-            "planning_task" => "整理任务",
-            "working_files" => "处理文件",
-            "calling_tool" => "调用工具",
-            _ => stage,
-        };
-        let _ = send(&event("activity", json!({"text":text})));
-    }));
-    for line in io::stdin().lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let result = serde_json::from_str(&line)
-            .map_err(|_| "请求格式错误".into())
-            .and_then(|request| handle(&mut app, request));
-        let value = match result {
-            Ok(Some(value)) => value,
-            Ok(None) => break,
-            Err(error) => event("error", json!({"text":app_model_guidance(error)})),
-        };
-        if let Err(error) = send(&value) {
-            if error.kind() == io::ErrorKind::BrokenPipe {
-                break;
-            }
-            return Err(error.to_string());
-        }
-    }
-    Ok(())
-}
-
 fn repl(home: PathBuf) -> Result<(), String> {
     let mut app = App::new(home, Arc::new(|message| println!("{message}")));
     let config = app.settings.config()?;
@@ -491,16 +443,15 @@ fn repl(home: PathBuf) -> Result<(), String> {
     device_model(&config, &app.settings.home)?;
     let terminal = io::stdin().is_terminal();
     println!(
-        "Colibri REPL  /compact  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit"
+        "Colibri REPL  /stop  /compact  /new  /voice  /set KEY VALUE  /mcp SERVER OP [NAME] [JSON]  /quit"
     );
     let stdin = io::stdin();
-    let mut input = stdin.lock();
     let mut line = String::new();
     loop {
         print!("› ");
         io::stdout().flush().map_err(|e| e.to_string())?;
         line.clear();
-        if input.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+        if stdin.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
             break;
         }
         let command = line.trim();
@@ -514,12 +465,12 @@ fn repl(home: PathBuf) -> Result<(), String> {
                 app.start_voice()?;
                 println!("录音中，最多 60 秒。Enter 结束，输入 /cancel 取消");
                 let mut choice = String::new();
-                let eof = input.read_line(&mut choice).map_err(|e| e.to_string())? == 0;
+                let eof = stdin.read_line(&mut choice).map_err(|e| e.to_string())? == 0;
                 let draft = app.finish_voice(eof || choice.trim() == "/cancel")?;
                 if !draft.is_empty() && terminal {
                     println!("语音草稿：{draft}\nEnter 发送，输入新文字替换，/cancel 取消。");
                     choice.clear();
-                    let eof = input.read_line(&mut choice).map_err(|e| e.to_string())? == 0;
+                    let eof = stdin.read_line(&mut choice).map_err(|e| e.to_string())? == 0;
                     if !eof && choice.trim() != "/cancel" {
                         let value = if choice.trim().is_empty() {
                             &draft

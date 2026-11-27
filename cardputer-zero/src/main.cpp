@@ -245,6 +245,28 @@ public:
         chat_thread_ = column(panel_, 8, 4, 8);
         chat_hint_ = label(chat_thread_, 0, 0, ChatWidth, LV_LABEL_LONG_WRAP);
         lv_obj_add_flag(chat_hint_, LV_OBJ_FLAG_HIDDEN);
+        activity_message_ = column(chat_thread_, 0, 0, 0);
+        auto* activity_sender = label(activity_message_, 0, 0, LV_SIZE_CONTENT);
+        lv_label_set_text(activity_sender, "Colibri");
+        lv_obj_set_style_text_font(activity_sender, sender_font_, 0);
+        lv_obj_set_style_text_color(activity_sender, lv_color_hex(0xa3efbe), 0);
+        auto* activity_line = lv_obj_create(activity_message_);
+        lv_obj_remove_style_all(activity_line);
+        lv_obj_remove_flag(activity_line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(activity_line, ChatWidth, chat_font_->line_height + 2);
+        activity_label_ = label(activity_line, 0, 0, ChatWidth - 25);
+        lv_obj_set_style_text_font(activity_label_, chat_font_, 0);
+        lv_obj_set_style_text_color(activity_label_, lv_color_hex(0x9cb6ad), 0);
+        for (auto& dot : activity_dots_) {
+            dot = lv_obj_create(activity_line);
+            lv_obj_remove_style_all(dot);
+            lv_obj_add_flag(dot, LV_OBJ_FLAG_IGNORE_LAYOUT);
+            lv_obj_set_size(dot, 3, 3);
+            lv_obj_set_style_radius(dot, 2, 0);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(0x91cdb4), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        }
+        lv_obj_add_flag(activity_message_, LV_OBJ_FLAG_HIDDEN);
         for (std::size_t i = 0; i < menu_rows_.size(); ++i) {
             auto* row = label(panel_, 8, 3 + 22 * i, ChatWidth, LV_LABEL_LONG_DOT);
             lv_obj_set_height(row, 21);
@@ -329,12 +351,36 @@ public:
 
     bool running = true;
     bool restoring_history() const { return starting_; }
+    void request_exit() {
+        if (closing_) return;
+        closing_ = true;
+        if (agent_busy_) set_agent_activity("正在停止");
+        try { worker_.send({{"type", "shutdown"}}); }
+        catch (const std::exception&) { running = false; }
+    }
+    void set_agent_activity(const std::string& text) {
+        agent_busy_ = true;
+        agent_status_ = text;
+        lv_label_set_text(activity_label_, text.c_str());
+        lv_obj_remove_flag(activity_message_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_to_index(activity_message_, -1);
+    }
+
 
     ComposerActivity activity() const {
-        return composer_activity(screen_ == Screen::Chat, busy_, recording_, status_text_);
+        return composer_activity(screen_ == Screen::Chat, transcribing_, recording_, transcribing_ ? "正在转写" : "");
     }
 
     void update_composer_animation() {
+        if (agent_busy_ && screen_ == Screen::Chat) {
+            lv_point_t measured{};
+            lv_text_get_size(&measured, agent_status_.c_str(), chat_font_, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            const int start = std::min<int>(ChatWidth - 30, measured.x + 12);
+            for (unsigned i=0; i<3; ++i) {
+                const auto dot=activity_dot(ComposerActivity::Thinking,lv_tick_get(),i);
+                lv_obj_set_pos(activity_dots_[i],start+5*i,static_cast<int>(chat_font_->line_height)/2-1+dot.offset_y);
+            }
+        }
         const auto state = activity();
         if (has_activity_dots(state)) {
             lv_point_t measured{};
@@ -403,9 +449,62 @@ public:
             refresh();
             return;
         }
-        if (type == "activity") {
-            busy_ = true;
-            status_text_ = text;
+        if (type == "history_page") {
+            if (event.value("request_id", std::uint64_t(0)) != history_request_) return;
+            history_loading_ = false;
+            if (!history_pending_.empty()) {
+                auto next = history_pending_;
+                history_pending_.clear();
+                request_history(next);
+                return;
+            }
+            if (event.contains("error")) { append("系统", "历史加载失败，请重试"); refresh(); return; }
+            std::string anchor;
+            int anchor_y = 0;
+            if (!chat_.empty()) lv_obj_update_layout(panel_);
+            const auto incoming = event.value("history", json::array());
+            for (const auto& item : chat_) {
+                if (!item.history_id.empty() && std::any_of(incoming.begin(), incoming.end(), [&](const json& m) {
+                    return m.value("id", "") == item.history_id;
+                })) { anchor = item.history_id; anchor_y = lv_obj_get_y(item.block); break; }
+            }
+            const int old_scroll = lv_obj_get_scroll_y(panel_);
+            for (const auto& item : chat_) lv_obj_delete(item.block);
+            chat_.clear(); chat_bytes_ = 0;
+            history_installing_ = true;
+            for (const auto& m : incoming) {
+                append(m.value("role", "") == "user" ? "我" : "Colibri", m.value("text", ""));
+                chat_.back().history_id = m.value("id", "");
+            }
+            if (history_direction_ == "last" && agent_busy_ && !active_question_.empty() &&
+                std::none_of(incoming.begin(), incoming.end(), [&](const json& m) {
+                    return m.value("role", "") == "user" && m.value("text", "") == active_question_;
+                })) append("我", active_question_);
+            if (agent_busy_) lv_obj_move_to_index(activity_message_, -1);
+            history_installing_ = false;
+            lv_obj_move_to_index(chat_hint_, -1);
+            if (agent_busy_) lv_obj_move_to_index(activity_message_, -1);
+            history_start_ = event.value("start", std::size_t(0));
+            history_before_ = event.value("has_before", false);
+            history_after_ = event.value("has_after", false);
+            refresh();
+            lv_obj_update_layout(panel_);
+            if (history_direction_ == "last") {
+                lv_obj_scroll_by_bounded(panel_, 0, -lv_obj_get_scroll_bottom(panel_), LV_ANIM_OFF);
+            } else if (history_direction_ == "first") lv_obj_scroll_to_y(panel_, 0, LV_ANIM_OFF);
+            else {
+                bool restored = false;
+                for (const auto& item : chat_) if (item.history_id == anchor && !anchor.empty()) {
+                    lv_obj_scroll_to_y(panel_, old_scroll + lv_obj_get_y(item.block) - anchor_y, LV_ANIM_OFF);
+                    restored = true; break;
+                }
+                if (!restored) lv_obj_scroll_to_y(panel_, 0, LV_ANIM_OFF);
+            }
+            return;
+        }
+        if (type == "shutdown") { running = false; return; }
+        if (type == "activity" || type == "steering_received" || type == "steering_applied") {
+            set_agent_activity(type == "steering_applied" ? "已接收补充指令" : text);
             refresh();
             return;
         }
@@ -420,7 +519,8 @@ public:
             recording_start_ = lv_tick_get();
             recording_seconds_ = 0;
         }
-        recording_ = type == "recording";
+        if (type == "recording") recording_ = true;
+        else if (type == "draft" || type == "recording_cancelled") recording_ = false;
 
         if (type == "task_status") {
             task_text_ = text;
@@ -428,9 +528,12 @@ public:
         } else if (type == "model_status") {
             starting_ = false;
             model_hint_ = text;
-            for (const auto& message : event.value("history", json::array())) {
-                append(message.value("role", "") == "user" ? "我" : "Colibri", message.value("text", ""));
-            }
+            history_direction_ = "last";
+            auto page = event;
+            page["type"] = "history_page";
+            page["request_id"] = history_request_;
+            receive(page);
+            return;
         } else if (type == "settings") {
             fields_ = event.at("fields");
             model_hint_ = event.value("model_hint", "");
@@ -457,8 +560,10 @@ public:
             model_key_ = nullptr;
             error_ = "已保存";
         } else if (type == "draft") {
+            transcribing_ = false;
             if (!insert_draft(text)) append("系统", "草稿已满，语音未插入");
         } else if (type == "chat_cleared") {
+            ++history_request_; history_loading_ = history_before_ = history_after_ = false; history_start_ = 0; history_pending_.clear();
             for (const auto& message : chat_) lv_obj_delete(message.block);
             chat_.clear();
             chat_bytes_ = 0;
@@ -467,9 +572,13 @@ public:
             lv_obj_scroll_to_y(panel_, 0, LV_ANIM_OFF);
             return;
         } else if (type == "reply") {
+            agent_busy_ = false;
+            lv_obj_add_flag(activity_message_, LV_OBJ_FLAG_HIDDEN);
             receive_chat_reply(text);
             return;
         } else if (type == "error") {
+            if (event.value("voice", false)) transcribing_ = false;
+            if (event.value("agent", false)) {agent_busy_=false;lv_obj_add_flag(activity_message_,LV_OBJ_FLAG_HIDDEN);}
             starting_ = false;
             if (screen_ == Screen::Edit || screen_ == Screen::ModelForm ||
                 screen_ == Screen::MemoryFiles || screen_ == Screen::MemoryTopics || screen_ == Screen::MemoryView || screen_ == Screen::CatalogList || (screen_ == Screen::Fields && category_ == MemoryCategory))
@@ -481,20 +590,18 @@ public:
 
     void key(Key key) {
         if (key == Key::ChatTop) {
-            if (screen_ == Screen::Chat) lv_obj_scroll_to_y(panel_, 0, LV_ANIM_OFF);
+            if (screen_ == Screen::Chat) request_history("first");
             return;
         }
         if (key == Key::ChatBottom) {
-            if (screen_ == Screen::Chat) refresh(true);
+            if (screen_ == Screen::Chat) request_history("last");
             return;
         }
-        if (busy_) {
-            if (key == Key::Up || key == Key::Down) scroll(key);
-            return;
-        }
+        if (closing_) return;
         if (recording_) {
             if (key == Key::Voice || key == Key::Enter || key == Key::Escape) {
                 recording_ = false;
+                transcribing_ = key != Key::Escape;
                 send({{"type", key == Key::Escape ? "voice_cancel" : "voice_stop"}},
                      key == Key::Escape ? "取消录音" : "正在转写");
                 refresh();
@@ -579,12 +686,23 @@ public:
             } else if (draft_ == ClearCommand) {
                 draft_.clear();
                 draft_cursor_ = draft_view_start_ = 0;
+                ++history_request_; history_loading_ = false; history_pending_.clear();
                 send({{"type", "clear_chat"}}, "清理屏幕");
                 refresh();
                 return;
             } else if (draft_.find_first_not_of(" \t\n") != std::string::npos) {
+                ++history_request_; history_loading_ = false; history_pending_.clear();
+                if (history_after_) {
+                    for (const auto& item : chat_) lv_obj_delete(item.block);
+                    chat_.clear(); chat_bytes_ = 0;
+                    history_after_ = false;
+                    request_history("last");
+                }
+                active_question_ = draft_;
                 append("我", draft_);
-                send({{"type", "submit"}, {"text", draft_}}, "思考中");
+                const bool stop = draft_ == "/stop";
+                send({{"type", "submit"}, {"text", draft_}}, "");
+                set_agent_activity(stop ? "正在停止" : (agent_busy_ ? "已收到补充，等待处理" : "思考中"));
                 draft_.clear();
                 draft_cursor_ = draft_view_start_ = 0;
                 refresh(true);
@@ -614,12 +732,11 @@ public:
             else if (text == "c" || text == "C") key(Key::Right);
             return;
         }
-        if (recording_ || busy_) return;
+        if (recording_ || closing_) return;
         if (screen_ == Screen::Edit) {
             if (edited_.size() + text.size() <= 4096) edited_ += text;
         } else if (screen_ == Screen::Chat && spelling_.empty() && text.size() == 1 &&
-                   draft_cursor_ == draft_.size() && draft_.size() < ClearCommand.size() &&
-                   draft_ == ClearCommand.substr(0, draft_.size()) && text[0] == ClearCommand[draft_.size()]) {
+                   !draft_.empty() && draft_.front() == '/') {
             insert_draft(text);
         } else if (chinese_ && text.size() == 1 &&
                    ((text[0] >= 'a' && text[0] <= 'z') ||
@@ -643,6 +760,14 @@ private:
     Screen screen_ = Screen::Chat, edit_parent_ = Screen::Fields, model_parent_ = Screen::ModelMode;
     lv_obj_t *title_, *status_, *panel_, *body_, *composer_, *candidates_;
     lv_obj_t *chat_thread_, *chat_hint_;
+    lv_obj_t *activity_message_ = nullptr, *activity_label_ = nullptr;
+    std::array<lv_obj_t*,3> activity_dots_{};
+    bool agent_busy_ = false, closing_ = false, transcribing_ = false;
+    std::string agent_status_;
+    std::uint64_t history_request_ = 0;
+    std::size_t history_start_ = 0;
+    bool history_loading_ = false, history_before_ = false, history_after_ = false;
+    std::string history_direction_, history_pending_, active_question_;
     std::string task_text_;
     std::array<lv_obj_t*, 6> menu_rows_{};
     const lv_font_t *bold_, *italic_, *heading_, *code_;
@@ -653,8 +778,10 @@ private:
         lv_obj_t* body;
         Speaker speaker;
         std::size_t bytes;
+        std::string history_id;
     };
     std::deque<ChatMessage> chat_;
+    bool history_installing_ = false;
     std::size_t chat_bytes_ = 0;
     Screen memory_parent_ = Screen::Fields;
     std::size_t memory_selection_ = 0;
@@ -831,6 +958,15 @@ private:
                 lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
                 continue;
             }
+            if (block.kind == BlockKind::Text && std::all_of(block.runs.begin(),block.runs.end(),[](const auto& run){return run.style==0;})) {
+                std::string text;
+                for (const auto& run:block.runs) text+=run.text;
+                auto* line=label(body,0,0,ChatWidth,LV_LABEL_LONG_WRAP);
+                lv_obj_set_style_margin_top(line,gap,0);
+                lv_obj_set_style_text_line_space(line,2,0);
+                lv_label_set_text(line,text.c_str());
+                continue;
+            }
             auto* group = lv_spangroup_create(body);
             lv_obj_set_style_margin_top(group, gap, 0);
             lv_obj_set_size(group, ChatWidth, LV_SIZE_CONTENT);
@@ -889,29 +1025,22 @@ private:
         chat_.push_back({block, tag, body, role, bytes});
         color_chat_message(chat_.back());
         chat_bytes_ += bytes;
-        while (chat_bytes_ > 16000 && chat_.size() > 1) {
-            const bool removed_question = chat_.front().speaker == Speaker::User;
-            if (removed_question && std::none_of(chat_.begin() + 1, chat_.end(),
-                    [](const ChatMessage& item) { return item.speaker == Speaker::User; })) {
-                if (chat_.size() == 2) break;
-                const auto oldest_detail = chat_.begin() + 1;
-                chat_bytes_ -= oldest_detail->bytes;
-                lv_obj_delete(oldest_detail->block);
-                chat_.erase(oldest_detail);
-                continue;
-            }
-            do {
-                chat_bytes_ -= chat_.front().bytes;
-                lv_obj_delete(chat_.front().block);
-                chat_.pop_front();
-            } while (removed_question && chat_.front().speaker != Speaker::User);
+        while (!history_installing_ && chat_.size() > 8) {
+            chat_bytes_ -= chat_.front().bytes;
+            lv_obj_delete(chat_.front().block);
+            chat_.pop_front();
+            ++history_start_;
+            history_before_ = true;
         }
-        lv_obj_move_to_index(chat_hint_, -1);
+        if (!history_installing_) lv_obj_move_to_index(chat_hint_, -1);
     }
 
     void receive_chat_reply(const std::string& text) {
         lv_obj_update_layout(panel_);
         const bool follow = screen_ == Screen::Chat && lv_obj_get_scroll_bottom(panel_) <= 2;
+        ++history_request_; history_loading_ = false; history_pending_.clear();
+        active_question_.clear();
+        if (history_after_) { refresh(); return; }
         append("Colibri", text);
         refresh();
         if (!follow) return;
@@ -994,7 +1123,21 @@ private:
         }
     }
 
+    void request_history(const std::string& direction) {
+        if (closing_) return;
+        if (history_loading_) { history_pending_ = direction; return; }
+        history_loading_ = true;
+        history_direction_ = direction;
+        try { worker_.send({{"type", "history_page"}, {"request_id", ++history_request_},
+                           {"direction", direction}, {"start", history_start_}}); }
+        catch (const std::exception&) { history_loading_ = false; }
+    }
+
     void scroll(Key key) {
+        if (screen_ == Screen::Chat && !history_loading_) {
+            if (key == Key::Up && lv_obj_get_scroll_y(panel_) <= 0 && history_before_) request_history("before");
+            else if (key == Key::Down && lv_obj_get_scroll_bottom(panel_) <= 2 && history_after_) request_history("after");
+        }
         lv_obj_scroll_by_bounded(panel_, 0, key == Key::Up ? 25 : -25, LV_ANIM_OFF);
     }
 
@@ -1107,7 +1250,7 @@ private:
 
     void go_back() {
         switch (screen_) {
-        case Screen::Menu: screen_ = Screen::Chat; break;
+        case Screen::Menu: screen_ = Screen::Chat; request_history("last"); break;
         case Screen::HelpMenu: screen_ = Screen::Menu; selection_ = HelpMenuIndex; break;
         case Screen::Settings: screen_ = Screen::Menu; selection_ = SettingsMenuIndex; break;
         case Screen::CatalogMenu: screen_ = Screen::Menu; selection_ = CatalogMenuIndex; break;
@@ -1150,7 +1293,7 @@ private:
                 send({{"type", "settings"}}, "读取设置");
                 break;
             case MenuAction::Help: screen_ = Screen::HelpMenu; selection_ = 0; break;
-            case MenuAction::Quit: running = false; break;
+            case MenuAction::Quit: request_exit(); break;
             }
             break;
         case Screen::HelpMenu:
@@ -1306,7 +1449,7 @@ private:
             lv_obj_set_style_text_color(item, accent, 0);
 
         std::string title = "对话";
-        const bool show_chat = screen_ == Screen::Chat && !chat_.empty();
+        const bool show_chat = screen_ == Screen::Chat && (!chat_.empty() || agent_busy_);
         bool show_menu_rows = false;
         for (auto* row : menu_rows_) lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
         std::string content;
@@ -1404,13 +1547,10 @@ private:
             hint = "F/X 滚动  C/Enter 刷新  Z/Esc 返回";
         }
         lv_label_set_text(title_, title.c_str());
-        const bool show_mode = screen_ == Screen::Chat && !starting_ && !recording_ && !busy_;
+        const bool show_mode = screen_ == Screen::Chat && !starting_ && !recording_ && !transcribing_;
         lv_obj_set_flag(status_, LV_OBJ_FLAG_HIDDEN, !show_mode);
         if (show_mode) lv_label_set_text(status_, chinese_ ? "拼音" : "ABC");
-        if (!starting_ && busy_ && !status_text_.empty()) {
-            if (screen_ == Screen::Chat) composer = status_text_;
-            else hint = status_text_;
-        }
+        if (transcribing_ && screen_ == Screen::Chat) composer = "正在转写";
         const bool reserve_composer = screen_ == Screen::Chat || screen_ == Screen::Edit || !composer.empty();
         lv_obj_set_height(panel_, reserve_composer ? 96 : 124);
         if (show_chat) {
@@ -1452,7 +1592,7 @@ private:
         update_composer_animation();
         lv_obj_set_style_image_recolor(bird_, accent, 0);
         lv_obj_set_style_image_recolor_opa(bird_, LV_OPA_COVER, 0);
-        const bool keycaps = spelling_.empty() && !(busy_ && screen_ != Screen::Chat);
+        const bool keycaps = spelling_.empty();
         lv_obj_set_flag(candidates_, LV_OBJ_FLAG_HIDDEN, starting_ || keycaps);
         lv_obj_set_flag(footer_, LV_OBJ_FLAG_HIDDEN, starting_ || !keycaps);
         if (keycaps) {
@@ -1520,17 +1660,20 @@ int main(int argc, char** argv) {
         if (argc == 3 && std::string(argv[1]) == "--screenshot")
             return save_screenshot(argv[2]) ? 0 : 1;
 #endif
-        const auto first_frame_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-        while (view.running && poll_input([&](Key key) { view.key(key); },
+        const auto first_frame_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (view.running) {
+            const bool input_open = poll_input([&](Key key) { view.key(key); },
                                           [&](const std::string& text) { view.text(text); },
                                           [&](unsigned code, int value) {
                                               const bool was_sleeping = idle.sleeping();
                                               const bool consumed = idle.input(code, value, ticks());
                                               if (was_sleeping && !idle.sleeping()) lv_obj_invalidate(lv_screen_active());
                                               return consumed;
-                                          })) {
+                                          });
+            if (!input_open) view.request_exit();
             if (!view.running) break;
             for (const auto& event : worker.receive()) view.receive(event);
+            if (!view.running) break;
             idle.update(ticks());
             view.update_device_status();
             if (!idle.sleeping()) view.update_composer_animation();

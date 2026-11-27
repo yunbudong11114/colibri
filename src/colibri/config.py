@@ -24,7 +24,6 @@ _ALLOWED_TOP_LEVEL = frozenset(
         "skills",
         "console",
         "memory",
-        "web_search",
         "hardware",
         "gateway",
         "channels",
@@ -85,15 +84,6 @@ _ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "skills": frozenset({"dir", "max_catalog", "max_catalog_chars", "max_instruction_chars"}),
     "console": frozenset({"status", "plain_answer"}),
     "memory": frozenset({"root", "max_search_results", "enabled", "max_recall_chars"}),
-    "web_search": frozenset(
-        {
-            "engine",
-            "api_key",
-            "endpoint",
-            "max_results",
-            "timeout_seconds",
-        }
-    ),
     "hardware": frozenset(
         {
             "enabled",
@@ -201,7 +191,7 @@ class SessionConfig:
 @dataclass(frozen=True)
 class ToolsConfig:
     # 启用的工具类别列表。
-    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "web", "image", "memory", "skills"])
+    enabled: list[str] = field(default_factory=lambda: ["shell", "files", "image", "memory", "skills"])
     # 默认权限策略；allow_read_confirm_write 表示只读默认允许、写入/执行需要确认。
     default_permission: str = "allow_read_confirm_write"
     # 单次工具结果写入上下文前的最大字符数。
@@ -252,20 +242,6 @@ class MemoryConfig:
     enabled: bool = True
     # SOUL.md、USER.md 和 MEMORY.md 作为 always-on 记忆注入上下文前的总字符数。
     max_recall_chars: int = 6000
-
-
-@dataclass(frozen=True)
-class WebSearchConfig:
-    # Web 搜索引擎名称。
-    engine: str = "baidu"
-    # Web 搜索 API Key。
-    api_key: str = ""
-    # Web 搜索 API endpoint。
-    endpoint: str = "https://qianfan.baidubce.com/v2/ai_search/web_search"
-    # 单次搜索默认返回结果数。
-    max_results: int = 10
-    # Web 搜索请求超时时间，单位秒。
-    timeout_seconds: int = 10
 
 
 @dataclass(frozen=True)
@@ -355,7 +331,6 @@ class AgentConfig:
     # 长期记忆配置。
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # Web 搜索工具配置。
-    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     # 硬件探测和后续硬件工具配置。
     hardware: HardwareConfig = field(default_factory=HardwareConfig)
     # gateway 运行配置。
@@ -391,7 +366,6 @@ class AgentConfig:
             skills=_replace_dataclass(self.skills, _path_overrides(dict(data.get("skills", {})), "dir")),
             console=_replace_dataclass(self.console, data.get("console", {})),
             memory=_replace_dataclass(self.memory, _path_overrides(dict(data.get("memory", {})), "root")),
-            web_search=_replace_dataclass(self.web_search, data.get("web_search", {})),
             hardware=_replace_hardware(self.hardware, data.get("hardware", {})),
             gateway=_replace_dataclass(self.gateway, data.get("gateway", {})),
             channels=_replace_channels(self.channels, data.get("channels", {})),

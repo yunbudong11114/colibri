@@ -229,6 +229,24 @@ fn finish(slot: &Slot, record: Record) {
     slot.ready.notify_all();
 }
 
+fn wait_for_metadata<'a>(
+    slot: &'a Slot,
+    mut state: std::sync::MutexGuard<'a, State>,
+) -> std::sync::MutexGuard<'a, State> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state.inflight
+        && !crate::cancellation::cancelled()
+        && std::time::Instant::now() < deadline
+    {
+        let (next, _) = slot
+            .ready
+            .wait_timeout(state, Duration::from_millis(25))
+            .unwrap_or_else(|e| e.into_inner());
+        state = next;
+    }
+    state
+}
+
 /// First use waits at most the metadata timeout. Stale success is returned while refreshing.
 pub fn resolve_online(config: &ModelConfig, home: &Path) -> ModelCapabilities {
     let Some((url, path)) = location(config, home) else {
@@ -268,10 +286,7 @@ pub fn resolve_online(config: &ModelConfig, home: &Path) -> ModelCapabilities {
         if state.record.is_some() {
             return cached_caps(config, state.record.as_ref(), "stale_cache");
         }
-        let (state, _) = slot
-            .ready
-            .wait_timeout_while(state, Duration::from_secs(5), |state| state.inflight)
-            .unwrap_or_else(|error| error.into_inner());
+        let state = wait_for_metadata(&slot, state);
         return cached_caps(config, state.record.as_ref(), "cache");
     }
     let Some(permit) = Permit::acquire() else {
@@ -301,10 +316,7 @@ pub fn resolve_online(config: &ModelConfig, home: &Path) -> ModelCapabilities {
         return stale;
     }
     let state = slot.state.lock().unwrap_or_else(|error| error.into_inner());
-    let (state, _) = slot
-        .ready
-        .wait_timeout_while(state, Duration::from_secs(5), |state| state.inflight)
-        .unwrap_or_else(|error| error.into_inner());
+    let state = wait_for_metadata(&slot, state);
     cached_caps(config, state.record.as_ref(), "network")
 }
 

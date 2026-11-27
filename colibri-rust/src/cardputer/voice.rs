@@ -102,6 +102,7 @@ impl Backend {
         let output =
             run_bounded_command(command, Duration::from_secs(90), 32000).map_err(|error| {
                 match error {
+                    CommandRunError::Cancelled => "转写已取消。",
                     CommandRunError::Timeout => "离线转写超过 90 秒，请尝试更短的录音。",
                     CommandRunError::Io(_) => "无法启动离线语音引擎，请检查安装包。",
                 }

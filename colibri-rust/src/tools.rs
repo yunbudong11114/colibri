@@ -6,21 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{expand_user_path, AgentConfig};
-use crate::hardware::{
-    configured_hardware_devices, probe_hardware, resolve_hardware_device, serial_json_request,
-    serial_read, serial_write, HardwareError,
+use crate::hardware_tools::{
+    hardware_controller_tool, hardware_devices, hardware_probe, hardware_serial_read,
+    hardware_serial_write, is_hardware_tool,
 };
-use crate::http::request_json;
 use crate::memory::truncate;
 use crate::messages::{MediaPart, ToolResult};
-use crate::process_output::{run_bounded_command, CommandRunError};
+use crate::process_output::{run_tool_command, CommandRunError};
 use crate::skills::run_skill_command;
 
 static TOOL_SPECS_CACHE: Mutex<Option<(Vec<String>, Vec<serde_json::Value>)>> = Mutex::new(None);
-const BAIDU_DEFAULT_SEARCH_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_search";
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const ALIYUN_MCP_TOOL_NAME: &str = "bailian_web_search";
-
 #[derive(Clone)]
 pub struct ToolContext {
     pub config: Arc<AgentConfig>,
@@ -121,24 +116,8 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     if has("shell") {
         specs.push(openai_tool(
             "shell.run",
-            "Run a non-interactive shell command as the current user. For builds/downloads/long commands set background=true, then shell.poll until terminal status. Starting a job is not completion. Set timeout_seconds to cover expected work; cwd optionally overrides the current directory.",
+            "Run a non-interactive shell command as the current user. For builds/downloads/long commands set background=true, then shell.poll until terminal status. Starting a job is not completion. Set timeout_seconds to cover expected work; cwd optionally overrides the current directory. Combine already-known related checks in one command; do not repeat successful reads. Large foreground output is a bounded preview with redacted archive paths; use files.read ranges/offset_chars or files.search instead of rerunning the command.",
             serde_json::json!({"type":"object","properties":{"command":{"type":"string"},"background":{"type":"boolean"},"cwd":{"type":"string"},"timeout_seconds":{"type":"number","minimum":0.001,"maximum":86400}},"required":["command"]}),
-        ));
-    }
-    if has("web") {
-        specs.push(openai_tool(
-            "web.search",
-            "Search the web using the configured search engine.",
-            serde_json::json!({
-                "type":"object",
-                "properties":{
-                    "query":{"type":"string","description":"Search query."},
-                    "count":{"type":"integer","description":"Maximum number of web results. Defaults to config.web_search.max_results."},
-                    "freshness":{"type":"string","description":"Optional freshness filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD."}
-                },
-                "required":["query"],
-                "additionalProperties":false
-            }),
         ));
     }
     if has("hardware") {
@@ -166,7 +145,7 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
     #[cfg(unix)]
     {
         if has("shell") {
-            specs.push(openai_tool("shell.poll", "Read incremental background output and status. Continue from next_offset. Use tail=true if truncated. Completed with exit_code=0 is success; running is not success.", serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":5000},"tail":{"type":"boolean"}},"required":["job_id"]})));
+            specs.push(openai_tool("shell.poll", "Read incremental background output and status. Continue from next_offset while page_has_more. truncated means capture loss, not merely another page. Use tail=true if capture was truncated; output_path references only the indicated head/tail log, not a complete missing middle. Completed with exit_code=0 is success; running is not success.", serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"wait_ms":{"type":"integer","minimum":0,"maximum":5000},"tail":{"type":"boolean"}},"required":["job_id"]})));
             specs.push(openai_tool("shell.cancel", "Request cancellation of a background job; poll afterwards to confirm settlement.", serde_json::json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})));
         }
         if has("shell") || has("files") {
@@ -179,19 +158,19 @@ fn build_tool_specs(enabled: &[String]) -> Vec<serde_json::Value> {
 }
 
 fn files_tool_specs() -> Vec<serde_json::Value> {
-    vec![
-        openai_tool("files.search", "Bounded literal text search with file paths and line numbers. Reports truncation explicitly; use shell tools for regex or larger scans.", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query"]})),
+    let mut specs = vec![
+        openai_tool("files.search", "Bounded literal text search with file paths and line numbers. Returns match-centered snippets and explicit stop_reason. Continue with continuation.after_path/start_line; when no continuation is available, narrow the scope or use streaming shell search.", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"after_path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query"]})),
         #[cfg(unix)]
         openai_tool("files.patch", "Replace exactly one unique old_text occurrence atomically, preserving permissions. Include enough unique context; optionally pass expected_sha256 to detect a stale read. Files above 1 MiB require streaming system tools.", serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"expected_sha256":{"type":"string"}},"required":["path","old_text","new_text"]})),
         openai_tool(
             "files.list",
-            "List direct children of a directory.",
-            serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            "List a sorted bounded page of direct children. Continue with after=next_after; limit defaults to 50, maximum 200. Directory changes can affect pagination.",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200},"after":{"type":"string"}},"required":["path"]}),
         ),
         openai_tool(
             "files.read",
-            "Read a UTF-8 text file. Prefer start_line/end_line ranges for large files. Optional max_chars caps this read result and is itself capped by tools.max_result_chars.",
-            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"max_chars":{"type":"integer","minimum":1}},"required":["path"]}),
+            "Read a UTF-8 text file. Prefer start_line/end_line ranges for large files. offset_chars (0-based, mutually exclusive with line ranges) pages any UTF-8 file, including long single lines; offsets refer to redacted text. Continue truncated reads using next_offset_chars. Optional max_chars caps this read result and is itself capped by tools.max_result_chars.",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"max_chars":{"type":"integer","minimum":1},"offset_chars":{"type":"integer","minimum":0}},"required":["path"]}),
         ),
         openai_tool(
             "files.write",
@@ -203,26 +182,41 @@ fn files_tool_specs() -> Vec<serde_json::Value> {
             "Send a local file to the current chat channel. This can expose host files outside Colibri, so use it only when the user asked to send a file.",
             serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"}},"required":["path"]}),
         ),
-    ]
+    ];
+    for spec in &mut specs {
+        let f = &mut spec["function"];
+        if matches!(f["name"].as_str(), Some("files.patch" | "files.write")) {
+            let description = f["description"].as_str().unwrap_or_default().to_string();
+            f["description"] = format!("{description} Optionally provide verify_command to edit then check in one call. Verification failure leaves the edit applied; inspect verification output rather than repeating the edit.").into();
+            let properties = f["parameters"]["properties"].as_object_mut().unwrap();
+            properties.insert("verify_command".into(), serde_json::json!({"type":"string","description":"Explicit foreground shell check after a successful edit; no automatic test guessing."}));
+            properties.insert("verify_cwd".into(), serde_json::json!({"type":"string"}));
+            properties.insert(
+                "verify_timeout_seconds".into(),
+                serde_json::json!({"type":"number","exclusiveMinimum":0,"maximum":86400}),
+            );
+        }
+    }
+    specs
 }
 
 fn memory_tool_specs() -> Vec<serde_json::Value> {
     vec![
-        openai_tool("memory.list", "List available memory files.", serde_json::json!({"type":"object","properties":{}})),
+        openai_tool("memory.list", "List memory files in builtin order then sorted topics. Small results stay plain text. Continue paged results with after=next_after; default limit 50, maximum 200.", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"after":{"type":"string"}}})),
         openai_tool(
             "memory.read",
-            "Read SOUL.md, USER.md, MEMORY.md, INDEX.md, or a topic memory file.",
-            serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"}}}),
+            "Read SOUL.md, USER.md, MEMORY.md, INDEX.md, or a topic memory file. Small files return once; larger results include continuation for memory.read. offset_chars refers to redacted text and cannot be combined with line ranges. Set include_version=true before an edit that needs expected_sha256.",
+            serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},"offset_chars":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":1},"include_version":{"type":"boolean"}}}),
         ),
         openai_tool(
             "memory.search",
-            "Search INDEX.md memory manifest lines by keyword.",
-            serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            "Search INDEX.md manifest only, not topic bodies. Missing/unreadable index is an error, not no matches. Returns match-centered snippets and continuation when more matches remain.",
+            serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query"]}),
         ),
         openai_tool(
             "memory.write",
-            "Append to or replace an allowed memory file: SOUL.md, USER.md, MEMORY.md, INDEX.md, or topics/<name>.md. Memory files must use frontmatter:\n---\ntype: soul|user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---",
-            serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"},"content":{"type":"string"},"mode":{"type":"string","enum":["append","replace"]}},"required":["content"]}),
+            "Atomically append to or replace a memory file; concurrent writers are serialized. Optional expected_sha256 (or missing for a new file) rejects stale edits. For topics, index_description explicitly updates its INDEX.md entry in the same call; optional expected_index_sha256 checks the index version. If applied=true but index_updated=false with an error, update only INDEX.md; do not append the topic again. Targets: SOUL.md, USER.md, MEMORY.md, INDEX.md, or topics/<name>.md. Memory files must use frontmatter:\n---\ntype: soul|user|feedback|project|reference|system\ndescription: one-line description\nupdated: YYYY-MM-DD\n---",
+            serde_json::json!({"type":"object","properties":{"file":{"type":"string"},"topic":{"type":"string"},"content":{"type":"string"},"mode":{"type":"string","enum":["append","replace"]},"expected_sha256":{"type":"string"},"index_description":{"type":"string","description":"Single-line topic index description, maximum 400 characters."},"expected_index_sha256":{"type":"string"}},"required":["content"]}),
         ),
     ]
 }
@@ -236,18 +230,18 @@ fn hardware_tool_specs() -> Vec<serde_json::Value> {
         ),
         openai_tool(
             "hardware.devices",
-            "List configured hardware device aliases, capabilities, and write availability.",
+            "List configured hardware device aliases, transports and capabilities.",
             serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
         ),
         openai_tool(
             "serial.read",
-            "Read currently available text from a configured serial device alias.",
-            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"max_bytes":{"type":"integer","minimum":1}},"required":["device"],"additionalProperties":false}),
+            "Consume available serial bytes once. encoding=auto returns readable text or hex; text/hex can be requested. Large results have a saved JSON archive. Recover consumed data from that archive, not by rereading the device.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"max_bytes":{"type":"integer","minimum":1},"encoding":{"type":"string","enum":["auto","text","hex"]}},"required":["device"],"additionalProperties":false}),
         ),
         openai_tool(
             "serial.write",
-            "Write UTF-8 text to a configured serial device alias.",
-            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"data":{"type":"string"}},"required":["device","data"],"additionalProperties":false}),
+            "Write text or hex bytes. Success confirms only bytes accepted by the local transport, not remote execution. Verify unknown/partial outcomes before retrying.",
+            serde_json::json!({"type":"object","properties":{"device":{"type":"string"},"data":{"type":"string"},"encoding":{"type":"string","enum":["text","hex"]}},"required":["device","data"],"additionalProperties":false}),
         ),
         openai_tool(
             "gpio.read",
@@ -322,8 +316,13 @@ pub fn run_tool_map(
             format!("Unknown tool: {}", name),
         ));
     }
+    if matches!(name, "files.patch" | "files.write") {
+        if let Err(error) = crate::tool_verification::validate(args, context) {
+            return Ok(error);
+        }
+    }
     let result = match name {
-        "files.list" => files_list(args, context),
+        "files.list" => crate::file_ops::list(args, context),
         "files.read" => crate::file_ops::read(args, context),
         "files.search" => crate::file_ops::search(args, context),
         #[cfg(unix)]
@@ -357,13 +356,12 @@ pub fn run_tool_map(
         "files.write" => files_write(args, context),
         "files.send" => files_send(args, context),
         "shell.run" => shell_run(args, context),
-        "memory.list" => memory_list(context),
-        "memory.read" => memory_read(args, context),
-        "memory.search" => memory_search(args, context),
-        "memory.write" => memory_write(args, context),
+        "memory.list" => crate::memory_tools::list(args, context),
+        "memory.read" => crate::memory_tools::read(args, context),
+        "memory.search" => crate::memory_tools::search(args, context),
+        "memory.write" => crate::memory_tools::write(args, context),
         "skill.read" => crate::skills::read_skill(args, context),
         "skill.run" => run_skill_command(args, context),
-        "web.search" => web_search(args, context),
         "image.understand" => image_understand(args, context),
         "hardware.probe" => hardware_probe(context),
         "hardware.devices" => hardware_devices(context),
@@ -377,278 +375,11 @@ pub fn run_tool_map(
         "spi.transfer" => hardware_controller_tool(args, context, "spi", "spi_transfer"),
         _ => ToolResult::error("unknown_tool", format!("Unknown tool: {}", name)),
     };
-    Ok(result)
-}
-
-fn hardware_probe(context: &ToolContext) -> ToolResult {
-    let text = serde_json::to_string_pretty(&probe_hardware()).unwrap_or_else(|_| "{}".to_string());
-    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
-}
-
-fn hardware_devices(context: &ToolContext) -> ToolResult {
-    hardware_json_result(
-        configured_hardware_devices(&context.config.hardware),
-        context,
-    )
-}
-
-fn hardware_serial_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let device_name = match required_hardware_string(args, "device") {
-        Ok(value) => value,
-        Err(result) => return result,
-    };
-    let max_bytes = match args.get("max_bytes") {
-        Some(value) => match hardware_integer(
-            value,
-            "max_bytes",
-            1,
-            context.config.hardware.max_transfer_bytes as u64,
-        ) {
-            Ok(value) => value as usize,
-            Err(result) => return result,
-        },
-        None => context.config.hardware.max_transfer_bytes,
-    };
-    let device = match resolve_hardware_device(&context.config.hardware, device_name, "serial") {
-        Ok(device) => device,
-        Err(error) => return hardware_error_result(error),
-    };
-    match serial_read(&context.config.hardware, device, max_bytes) {
-        Ok(data) => {
-            let text = String::from_utf8_lossy(&data).into_owned();
-            let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-            let mut result = ToolResult::ok(text);
-            result.truncated = truncated;
-            result
-        }
-        Err(error) => hardware_error_result(error),
-    }
-}
-
-fn hardware_serial_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let device_name = match required_hardware_string(args, "device") {
-        Ok(value) => value,
-        Err(result) => return result,
-    };
-    let data = match required_hardware_string(args, "data") {
-        Ok(value) => value,
-        Err(result) => return result,
-    };
-    let device = match resolve_hardware_device(&context.config.hardware, device_name, "serial") {
-        Ok(device) => device,
-        Err(error) => return hardware_error_result(error),
-    };
-    match serial_write(&context.config.hardware, device, data.as_bytes()) {
-        Ok(written) => hardware_json_result(
-            serde_json::json!({"device":device_name,"bytes_written":written}),
-            context,
-        ),
-        Err(error) => hardware_error_result(error),
-    }
-}
-
-fn hardware_controller_tool(
-    args: &BTreeMap<String, String>,
-    context: &ToolContext,
-    capability: &str,
-    command: &str,
-) -> ToolResult {
-    let device_name = match required_hardware_string(args, "device") {
-        Ok(value) => value,
-        Err(result) => return result,
-    };
-    let arguments = match hardware_controller_arguments(args, context, command) {
-        Ok(value) => value,
-        Err(result) => return result,
-    };
-    let device = match resolve_hardware_device(&context.config.hardware, device_name, capability) {
-        Ok(device) => device,
-        Err(error) => return hardware_error_result(error),
-    };
-    match serial_json_request(&context.config.hardware, device, command, arguments) {
-        Ok(result) => hardware_json_result(
-            serde_json::json!({"device":device_name,"result":result}),
-            context,
-        ),
-        Err(error) => hardware_error_result(error),
-    }
-}
-
-fn hardware_controller_arguments(
-    args: &BTreeMap<String, String>,
-    context: &ToolContext,
-    command: &str,
-) -> Result<serde_json::Value, ToolResult> {
-    let mut result = serde_json::Map::new();
-    match command {
-        "gpio_read" => insert_hardware_integer(&mut result, args, "pin", 0, 65535)?,
-        "gpio_write" => {
-            insert_hardware_integer(&mut result, args, "pin", 0, 65535)?;
-            insert_hardware_integer(&mut result, args, "value", 0, 1)?;
-        }
-        "i2c_scan" => {}
-        "i2c_read" => {
-            insert_hardware_integer(&mut result, args, "address", 0, 127)?;
-            if let Some(value) = args.get("register") {
-                let value = hardware_integer(value, "register", 0, 255)?;
-                result.insert("register".to_string(), serde_json::Value::from(value));
-            }
-            insert_hardware_integer(
-                &mut result,
-                args,
-                "length",
-                1,
-                context.config.hardware.max_transfer_bytes as u64,
-            )?;
-        }
-        "i2c_write" => {
-            insert_hardware_integer(&mut result, args, "address", 0, 127)?;
-            if let Some(value) = args.get("register") {
-                let value = hardware_integer(value, "register", 0, 255)?;
-                result.insert("register".to_string(), serde_json::Value::from(value));
-            }
-            let data = required_hardware_hex(args, context)?;
-            result.insert("data".to_string(), serde_json::Value::String(data));
-        }
-        "spi_transfer" => {
-            let data = required_hardware_hex(args, context)?;
-            result.insert("data".to_string(), serde_json::Value::String(data));
-        }
-        _ => {
-            return Err(ToolResult::error(
-                "invalid_arguments",
-                "Unsupported hardware controller command",
-            ))
-        }
-    }
-    Ok(serde_json::Value::Object(result))
-}
-
-fn required_hardware_string<'a>(
-    args: &'a BTreeMap<String, String>,
-    name: &str,
-) -> Result<&'a str, ToolResult> {
-    args.get(name)
-        .filter(|value| !value.is_empty())
-        .map(String::as_str)
-        .ok_or_else(|| {
-            ToolResult::error(
-                "invalid_arguments",
-                format!("{} must be a non-empty string", name),
-            )
-        })
-}
-
-fn hardware_integer(
-    value: &str,
-    name: &str,
-    minimum: u64,
-    maximum: u64,
-) -> Result<u64, ToolResult> {
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|value| (minimum..=maximum).contains(value))
-        .ok_or_else(|| {
-            ToolResult::error(
-                "invalid_arguments",
-                format!(
-                    "{} must be an integer between {} and {}",
-                    name, minimum, maximum
-                ),
-            )
-        })
-}
-
-fn insert_hardware_integer(
-    result: &mut serde_json::Map<String, serde_json::Value>,
-    args: &BTreeMap<String, String>,
-    name: &str,
-    minimum: u64,
-    maximum: u64,
-) -> Result<(), ToolResult> {
-    let Some(value) = args.get(name) else {
-        return Err(ToolResult::error(
-            "invalid_arguments",
-            format!(
-                "{} must be an integer between {} and {}",
-                name, minimum, maximum
-            ),
-        ));
-    };
-    let value = hardware_integer(value, name, minimum, maximum)?;
-    result.insert(name.to_string(), serde_json::Value::from(value));
-    Ok(())
-}
-
-fn required_hardware_hex(
-    args: &BTreeMap<String, String>,
-    context: &ToolContext,
-) -> Result<String, ToolResult> {
-    let value = required_hardware_string(args, "data")?;
-    if value.len() % 2 != 0
-        || value.len() / 2 > context.config.hardware.max_transfer_bytes
-        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(ToolResult::error(
-            "invalid_arguments",
-            if value.len() / 2 > context.config.hardware.max_transfer_bytes {
-                "data exceeds the configured transfer limit"
-            } else {
-                "data must be a non-empty even-length hexadecimal string"
-            },
-        ));
-    }
-    Ok(value.to_ascii_lowercase())
-}
-
-fn hardware_json_result(value: serde_json::Value, context: &ToolContext) -> ToolResult {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
-    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
-}
-
-fn hardware_error_result(error: HardwareError) -> ToolResult {
-    ToolResult::error(&error.error_type, error.message)
-}
-
-fn is_hardware_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "hardware.probe"
-            | "hardware.devices"
-            | "serial.read"
-            | "serial.write"
-            | "gpio.read"
-            | "gpio.write"
-            | "i2c.scan"
-            | "i2c.read"
-            | "i2c.write"
-            | "spi.transfer"
-    )
-}
-
-fn files_list(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let path = resolve_arg_path(args.get("path").map(String::as_str).unwrap_or("."), context);
-    let entries = match fs::read_dir(&path) {
-        Ok(entries) => entries,
-        Err(error) => return ToolResult::error("io_error", error.to_string()),
-    };
-    let mut names = Vec::new();
-    for entry in entries.flatten() {
-        let mut name = entry.file_name().to_string_lossy().to_string();
-        if entry.path().is_dir() {
-            name.push('/');
-        }
-        names.push(name);
-    }
-    names.sort();
-    ToolResult::ok(names.join("\n"))
+    Ok(if matches!(name, "files.patch" | "files.write") {
+        crate::tool_verification::after_edit(result, args, context)
+    } else {
+        result
+    })
 }
 
 fn files_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
@@ -704,7 +435,7 @@ fn files_send(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolRes
     ToolResult::ok(format!("Sent file to channel: {}", filename)).with_media(media)
 }
 
-fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
+pub(crate) fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
     let command = args.get("command").cloned().unwrap_or_default();
     if command.trim().is_empty() {
         return ToolResult::error("invalid_arguments", "Missing command");
@@ -732,14 +463,18 @@ fn shell_run(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResu
         None => context.config.tools.max_shell_seconds.max(0.0),
     };
     let timeout = Duration::from_secs_f64(seconds);
-    match run_bounded_command(process, timeout, context.config.tools.max_result_chars) {
+    match run_tool_command(process, timeout, context) {
+        Err(CommandRunError::Cancelled) => ToolResult::error(
+            "cancelled",
+            "Operation cancelled; previous side effects are not rolled back",
+        ),
         Err(CommandRunError::Timeout) => ToolResult::error("timeout", "Command timed out"),
         Err(CommandRunError::Io(error)) => ToolResult::error("execution_error", error),
         Ok(output) => {
             let mut result = if output.success {
                 ToolResult::ok(output.text)
             } else {
-                ToolResult::error("nonzero_exit", output.text)
+                ToolResult::error(output.termination.unwrap_or("nonzero_exit"), output.text)
             };
             result.truncated = output.truncated;
             result
@@ -759,165 +494,6 @@ fn platform_shell_command(command: &str) -> Command {
         let mut process = Command::new("sh");
         process.arg("-c").arg(command);
         process
-    }
-}
-
-fn memory_list(context: &ToolContext) -> ToolResult {
-    let mut names = Vec::new();
-    for name in ["SOUL.md", "USER.md", "MEMORY.md", "INDEX.md"] {
-        if context.config.memory.root.join(name).is_file() {
-            names.push(name.to_string());
-        }
-    }
-    let topics = context.config.memory.root.join("topics");
-    if let Ok(entries) = fs::read_dir(topics) {
-        let mut topic_names = Vec::new();
-        for entry in entries.flatten() {
-            if entry.path().is_file()
-                && entry.path().extension().and_then(|value| value.to_str()) == Some("md")
-            {
-                topic_names.push(format!("topics/{}", entry.file_name().to_string_lossy()));
-            }
-        }
-        topic_names.sort();
-        names.extend(topic_names);
-    }
-    let (text, truncated) = truncate(names.join("\n"), context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
-}
-
-fn memory_read(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let Some((path, _)) = memory_target(args, context) else {
-        return ToolResult::error("invalid_arguments", "Invalid memory file");
-    };
-    if !path.exists() {
-        return ToolResult::error("not_found", "Memory file does not exist");
-    }
-    if !path.is_file() {
-        return ToolResult::error("not_file", "Memory path is not a file");
-    }
-    match fs::read_to_string(path) {
-        Ok(text) => {
-            let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-            let mut result = ToolResult::ok(text);
-            result.truncated = truncated;
-            result
-        }
-        Err(error) => ToolResult::error("io_error", error.to_string()),
-    }
-}
-
-fn memory_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let Some(query) = args
-        .get("query")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    else {
-        return ToolResult::error("invalid_arguments", "Missing query");
-    };
-    let query = query.to_lowercase();
-    let index = context.config.memory.root.join("INDEX.md");
-    let text = fs::read_to_string(index).unwrap_or_default();
-    let mut matches = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        if line.to_lowercase().contains(&query) {
-            matches.push(format!("INDEX.md:{}: {}", index + 1, line));
-        }
-        if matches.len() >= context.config.memory.max_search_results {
-            break;
-        }
-    }
-    let (text, truncated) = truncate(matches.join("\n"), context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
-}
-
-fn memory_write(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    let Some((path, label)) = memory_target(args, context) else {
-        return ToolResult::error("invalid_arguments", "Invalid memory file");
-    };
-    let symlink = |path: &Path| fs::symlink_metadata(path).is_ok_and(|info| info.is_symlink());
-    if symlink(&path)
-        || (label.starts_with("topics/") && symlink(&context.config.memory.root.join("topics")))
-    {
-        return ToolResult::error(
-            "invalid_arguments",
-            "Memory writes do not support symbolic links",
-        );
-    }
-    let Some(content) = args
-        .get("content")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    else {
-        return ToolResult::error("invalid_arguments", "Missing content");
-    };
-    let mode = args.get("mode").map(String::as_str).unwrap_or("append");
-    if !matches!(mode, "append" | "replace") {
-        return ToolResult::error("invalid_arguments", "Invalid write mode");
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return ToolResult::error("io_error", error.to_string());
-        }
-    }
-    let write_result = if mode == "replace" {
-        fs::write(
-            &path,
-            format!(
-                "{}{}",
-                content,
-                if content.ends_with('\n') { "" } else { "\n" }
-            ),
-        )
-    } else {
-        use std::io::Write;
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| {
-                file.write_all(content.as_bytes())?;
-                if !content.ends_with('\n') {
-                    file.write_all(b"\n")?;
-                }
-                Ok(())
-            })
-    };
-    match write_result {
-        Ok(()) => {
-            let mut message = format!("Updated memory file: {}", label);
-            if label.starts_with("topics/") {
-                message.push_str(
-                    "\nRemember to update INDEX.md so this topic can be found by memory.search.",
-                );
-            }
-            let limit = match label.as_str() {
-                "SOUL.md" => Some(1000usize),
-                "USER.md" => Some(1000usize),
-                "MEMORY.md" => Some(2000usize),
-                _ => None,
-            };
-            if let Some(limit) = limit {
-                let size = fs::read_to_string(&path)
-                    .map(|text| text.chars().count())
-                    .unwrap_or(0);
-                if size > limit {
-                    message.push_str(&format!(
-                        "\n{} exceeds {} characters. Summarize or consolidate it, then call memory.write with file=\"{}\", mode=\"replace\" to keep it within the limit.",
-                        label, limit, label
-                    ));
-                }
-            }
-            let (text, truncated) = truncate(message, context.config.tools.max_result_chars);
-            let mut result = ToolResult::ok(text);
-            result.truncated = truncated;
-            result
-        }
-        Err(error) => ToolResult::error("io_error", error.to_string()),
     }
 }
 
@@ -947,115 +523,6 @@ fn valid_topic_name(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-}
-
-fn web_search(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
-    if !matches!(
-        context.config.web_search.engine.as_str(),
-        "baidu" | "aliyun_mcp"
-    ) {
-        return ToolResult::error(
-            "invalid_config",
-            format!(
-                "Unsupported web search engine: {}",
-                context.config.web_search.engine
-            ),
-        );
-    }
-    let query = args.get("query").cloned().unwrap_or_default();
-    if query.trim().is_empty() {
-        return ToolResult::error(
-            "invalid_arguments",
-            "web.search requires a non-empty string query",
-        );
-    }
-    let count = match args.get("count") {
-        None => context.config.web_search.max_results,
-        Some(value) => match value.parse::<isize>() {
-            Ok(value) => value.clamp(1, 50) as usize,
-            Err(_) => {
-                return ToolResult::error(
-                    "invalid_arguments",
-                    "web.search count must be an integer",
-                )
-            }
-        },
-    };
-    let search_filter = match web_search_filter(args.get("freshness").map(String::as_str)) {
-        Ok(value) => value,
-        Err(error) => return ToolResult::error("invalid_arguments", error),
-    };
-    let text = if context.config.web_search.engine == "baidu" {
-        match baidu_web_search(&query, count, search_filter, context) {
-            Ok(text) => text,
-            Err((kind, text)) => return ToolResult::error(kind, text),
-        }
-    } else {
-        match aliyun_mcp_web_search(
-            query.trim(),
-            count,
-            args.get("freshness")
-                .map(String::as_str)
-                .filter(|value| !value.is_empty()),
-            context,
-        ) {
-            Ok(text) => text,
-            Err((kind, text)) => return ToolResult::error(kind, text),
-        }
-    };
-    let (text, truncated) = truncate(text, context.config.tools.max_result_chars);
-    let mut result = ToolResult::ok(text);
-    result.truncated = truncated;
-    result
-}
-
-fn baidu_web_search(
-    query: &str,
-    count: usize,
-    search_filter: serde_json::Value,
-    context: &ToolContext,
-) -> Result<String, (&'static str, String)> {
-    let body = serde_json::to_string(&serde_json::json!({
-        "messages":[{"content":query.trim(),"role":"user"}],
-        "search_source":"baidu_search_v2",
-        "resource_type_filter":[{"type":"web","top_k":count}],
-        "search_filter":search_filter
-    }))
-    .unwrap_or_else(|_| "{}".to_string());
-    let (url, headers) = match baidu_url_and_headers(context) {
-        Ok(value) => value,
-        Err(error) => return Err(("invalid_config", error)),
-    };
-    let response = match request_json(
-        "POST",
-        &url,
-        &headers
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.clone()))
-            .collect::<Vec<_>>(),
-        Some(&body),
-        context.config.web_search.timeout_seconds,
-    ) {
-        Ok(response) => response,
-        Err(error) if error.contains("(28)") || error.to_lowercase().contains("timed out") => {
-            return Err(("timeout", "web.search request timed out".to_string()))
-        }
-        Err(error) => {
-            return Err((
-                "network_error",
-                format!("web.search request failed: {}", error),
-            ))
-        }
-    };
-    if let Some(status) = response.status {
-        if status >= 400 {
-            return Err((
-                "http_error",
-                format!("web.search failed with HTTP {}: {}", status, response.body),
-            ));
-        }
-    }
-    format_baidu_references(&response.body)
 }
 
 fn image_understand(args: &BTreeMap<String, String>, context: &ToolContext) -> ToolResult {
@@ -1090,528 +557,6 @@ fn image_understand(args: &BTreeMap<String, String>, context: &ToolContext) -> T
         ),
         Err(error) => ToolResult::error("model_error", error),
     }
-}
-
-fn web_search_filter(freshness: Option<&str>) -> Result<serde_json::Value, String> {
-    match freshness {
-        None | Some("") => Ok(serde_json::json!({})),
-        Some(value) => {
-            let today = local_date();
-            let end = add_date_days(&today, 1).unwrap_or_else(|| today.clone());
-            let start = match value {
-                "pd" => add_date_days(&today, -1),
-                "pw" => add_date_days(&today, -6),
-                "pm" => add_date_days(&today, -30),
-                "py" => add_date_days(&today, -364),
-                _ if valid_date_range(value) => {
-                    let (start, end) = value.split_once("to").unwrap();
-                    return Ok(serde_json::json!({"range":{"page_time":{"gte":start,"lt":end}}}));
-                }
-                _ => None,
-            }
-            .ok_or_else(|| {
-                "web.search freshness must be pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD".to_string()
-            })?;
-            Ok(serde_json::json!({"range":{"page_time":{"gte":start,"lt":end}}}))
-        }
-    }
-}
-
-fn format_baidu_references(body: &str) -> Result<String, (&'static str, String)> {
-    let data: serde_json::Value = serde_json::from_str(body).map_err(|_| {
-        (
-            "invalid_response",
-            "web.search response was not valid JSON".to_string(),
-        )
-    })?;
-    if data.get("code").is_some() {
-        let message = data
-            .get("message")
-            .or_else(|| data.get("msg"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("Baidu web search API error");
-        return Err(("api_error", message.to_string()));
-    }
-    let references = data
-        .get("references")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| {
-            (
-                "invalid_response",
-                "Baidu web search response missing references".to_string(),
-            )
-        })?;
-    let cleaned = references
-        .iter()
-        .map(|item| {
-            let mut item = item.clone();
-            if let Some(object) = item.as_object_mut() {
-                object.remove("snippet");
-            }
-            item
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&cleaned).map_err(|error| ("invalid_response", error.to_string()))
-}
-
-fn baidu_url_and_headers(context: &ToolContext) -> Result<(String, Vec<(String, String)>), String> {
-    let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-    if let (Ok(session_id), Ok(scheduler_url)) = (
-        std::env::var("DUMATE_SESSION_ID"),
-        std::env::var("DUMATE_SCHEDULER_URL"),
-    ) {
-        let endpoint = &context.config.web_search.endpoint;
-        let without_scheme = endpoint
-            .split_once("://")
-            .map(|(_, value)| value)
-            .unwrap_or(endpoint);
-        let (host, path) = without_scheme
-            .split_once('/')
-            .unwrap_or((without_scheme, ""));
-        headers.push(("Host".to_string(), host.to_string()));
-        headers.push(("X-Dumate-Session-Id".to_string(), session_id));
-        headers.push(("X-Appbuilder-From".to_string(), "desktop".to_string()));
-        return Ok((
-            format!(
-                "{}/api/qianfanproxy/{}",
-                scheduler_url.trim_end_matches('/'),
-                path
-            ),
-            headers,
-        ));
-    }
-    if context.config.web_search.api_key.is_empty() {
-        return Err("Missing Baidu web search API key: set web_search.api_key".to_string());
-    }
-    headers.push((
-        "Authorization".to_string(),
-        format!("Bearer {}", context.config.web_search.api_key),
-    ));
-    headers.push(("X-Appbuilder-From".to_string(), "openclaw".to_string()));
-    Ok((context.config.web_search.endpoint.clone(), headers))
-}
-
-fn aliyun_mcp_web_search(
-    query: &str,
-    count: usize,
-    freshness: Option<&str>,
-    context: &ToolContext,
-) -> Result<String, (&'static str, String)> {
-    let endpoint = context.config.web_search.endpoint.trim();
-    if endpoint.is_empty() || endpoint == BAIDU_DEFAULT_SEARCH_ENDPOINT {
-        return Err((
-            "invalid_config",
-            "Missing Aliyun WebSearch MCP endpoint: set web_search.endpoint".to_string(),
-        ));
-    }
-    let api_key = if context.config.web_search.api_key.is_empty() {
-        std::env::var("DASHSCOPE_API_KEY").unwrap_or_default()
-    } else {
-        context.config.web_search.api_key.clone()
-    };
-    if api_key.is_empty() {
-        return Err((
-            "invalid_config",
-            "Missing Aliyun WebSearch MCP API key: set web_search.api_key or DASHSCOPE_API_KEY"
-                .to_string(),
-        ));
-    }
-
-    let mut session_id = None;
-    let result = (|| {
-        let initialize = serde_json::json!({
-            "jsonrpc":"2.0",
-            "id":1,
-            "method":"initialize",
-            "params":{
-                "protocolVersion":MCP_PROTOCOL_VERSION,
-                "capabilities":{},
-                "clientInfo":{"name":"colibri","version":"0.1.0"}
-            }
-        });
-        let (messages, initialized_session) =
-            mcp_post(endpoint, &api_key, &initialize, None, false, context)?;
-        session_id = initialized_session;
-        mcp_result(&messages, 1)?;
-
-        mcp_post(
-            endpoint,
-            &api_key,
-            &serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            session_id.as_deref(),
-            true,
-            context,
-        )?;
-        let (messages, _) = mcp_post(
-            endpoint,
-            &api_key,
-            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
-            session_id.as_deref(),
-            false,
-            context,
-        )?;
-        let listed = mcp_result(&messages, 2)?;
-        let tool = select_mcp_search_tool(&listed)?;
-        let tool_name = tool
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                (
-                    "invalid_response",
-                    "web.search MCP tool was missing name".to_string(),
-                )
-            })?;
-        let properties = tool
-            .get("inputSchema")
-            .and_then(|value| value.get("properties"))
-            .and_then(|value| value.as_object());
-        let mut arguments = serde_json::Map::new();
-        arguments.insert(
-            "query".to_string(),
-            serde_json::Value::String(query.to_string()),
-        );
-        if properties.is_some_and(|properties| properties.contains_key("count")) {
-            arguments.insert(
-                "count".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(count.min(20))),
-            );
-        }
-        if let Some(freshness) = freshness {
-            if properties.is_some_and(|properties| properties.contains_key("freshness")) {
-                arguments.insert(
-                    "freshness".to_string(),
-                    serde_json::Value::String(freshness.to_string()),
-                );
-            }
-        }
-        let (messages, _) = mcp_post(
-            endpoint,
-            &api_key,
-            &serde_json::json!({
-                "jsonrpc":"2.0",
-                "id":3,
-                "method":"tools/call",
-                "params":{"name":tool_name,"arguments":arguments}
-            }),
-            session_id.as_deref(),
-            false,
-            context,
-        )?;
-        mcp_tool_text(&mcp_result(&messages, 3)?)
-    })();
-
-    if let Some(session_id) = session_id {
-        mcp_delete(endpoint, &api_key, &session_id, context);
-    }
-    result
-}
-
-fn mcp_post(
-    endpoint: &str,
-    api_key: &str,
-    payload: &serde_json::Value,
-    session_id: Option<&str>,
-    allow_empty: bool,
-    context: &ToolContext,
-) -> Result<(Vec<serde_json::Value>, Option<String>), (&'static str, String)> {
-    let mut headers = vec![
-        ("Authorization".to_string(), format!("Bearer {}", api_key)),
-        (
-            "Accept".to_string(),
-            "application/json, text/event-stream".to_string(),
-        ),
-        (
-            "MCP-Protocol-Version".to_string(),
-            MCP_PROTOCOL_VERSION.to_string(),
-        ),
-    ];
-    if let Some(session_id) = session_id {
-        headers.push(("Mcp-Session-Id".to_string(), session_id.to_string()));
-    }
-    let body = serde_json::to_string(payload).map_err(|error| {
-        (
-            "invalid_arguments",
-            format!("web.search MCP request was not valid JSON: {}", error),
-        )
-    })?;
-    let response = request_json(
-        "POST",
-        endpoint,
-        &headers
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.clone()))
-            .collect::<Vec<_>>(),
-        Some(&body),
-        context.config.web_search.timeout_seconds,
-    )
-    .map_err(mcp_transport_error)?;
-    if response.status.is_some_and(|status| status >= 400) {
-        return Err((
-            "http_error",
-            format!(
-                "web.search MCP failed with HTTP {}: {}",
-                response.status.unwrap_or_default(),
-                response.body
-            ),
-        ));
-    }
-    let response_session = response
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Mcp-Session-Id"))
-        .map(|(_, value)| value.clone())
-        .or_else(|| session_id.map(ToString::to_string));
-    if response.body.trim().is_empty() {
-        if allow_empty {
-            return Ok((Vec::new(), response_session));
-        }
-        return Err((
-            "invalid_response",
-            "web.search MCP response was empty".to_string(),
-        ));
-    }
-    let content_type = response
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("Content-Type"))
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("");
-    Ok((
-        mcp_messages(&response.body, content_type)?,
-        response_session,
-    ))
-}
-
-fn mcp_delete(endpoint: &str, api_key: &str, session_id: &str, context: &ToolContext) {
-    let headers = [
-        ("Authorization", format!("Bearer {}", api_key)),
-        ("Accept", "application/json, text/event-stream".to_string()),
-        ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION.to_string()),
-        ("Mcp-Session-Id", session_id.to_string()),
-    ];
-    let _ = request_json(
-        "DELETE",
-        endpoint,
-        &headers,
-        None,
-        context.config.web_search.timeout_seconds,
-    );
-}
-
-fn mcp_transport_error(error: String) -> (&'static str, String) {
-    if error.contains("(28)") || error.to_ascii_lowercase().contains("timed out") {
-        ("timeout", "web.search MCP request timed out".to_string())
-    } else {
-        (
-            "network_error",
-            format!("web.search MCP request failed: {}", error),
-        )
-    }
-}
-
-fn mcp_messages(
-    body: &str,
-    content_type: &str,
-) -> Result<Vec<serde_json::Value>, (&'static str, String)> {
-    let is_sse = content_type
-        .to_ascii_lowercase()
-        .contains("text/event-stream")
-        || body.trim_start().starts_with("data:")
-        || body.trim_start().starts_with("event:");
-    if !is_sse {
-        let parsed = serde_json::from_str::<serde_json::Value>(body).map_err(|_| {
-            (
-                "invalid_response",
-                "web.search MCP response was not valid JSON or SSE".to_string(),
-            )
-        })?;
-        return match parsed {
-            serde_json::Value::Array(values) if values.iter().all(serde_json::Value::is_object) => {
-                Ok(values)
-            }
-            value if value.is_object() => Ok(vec![value]),
-            _ => Err((
-                "invalid_response",
-                "web.search MCP response was not valid JSON or SSE".to_string(),
-            )),
-        };
-    }
-
-    let normalized = body.replace("\r\n", "\n");
-    let mut messages = Vec::new();
-    for event in normalized.split("\n\n") {
-        let data = event
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(&data).map_err(|_| {
-            (
-                "invalid_response",
-                "web.search MCP response was not valid JSON or SSE".to_string(),
-            )
-        })?;
-        if value.is_object() {
-            messages.push(value);
-        }
-    }
-    if messages.is_empty() {
-        return Err((
-            "invalid_response",
-            "web.search MCP response contained no JSON-RPC message".to_string(),
-        ));
-    }
-    Ok(messages)
-}
-
-fn mcp_result(
-    messages: &[serde_json::Value],
-    request_id: i64,
-) -> Result<serde_json::Value, (&'static str, String)> {
-    let response = messages
-        .iter()
-        .find(|message| message.get("id").and_then(|value| value.as_i64()) == Some(request_id))
-        .ok_or_else(|| {
-            (
-                "invalid_response",
-                "web.search MCP response was missing the requested result".to_string(),
-            )
-        })?;
-    if let Some(error) = response.get("error") {
-        let message = error
-            .get("message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("MCP request failed");
-        return Err(("api_error", message.to_string()));
-    }
-    response.get("result").cloned().ok_or_else(|| {
-        (
-            "invalid_response",
-            "web.search MCP response was missing result".to_string(),
-        )
-    })
-}
-
-fn select_mcp_search_tool(
-    result: &serde_json::Value,
-) -> Result<serde_json::Value, (&'static str, String)> {
-    let tools = result
-        .get("tools")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| {
-            (
-                "invalid_response",
-                "web.search MCP tools/list response was invalid".to_string(),
-            )
-        })?;
-    let candidates = tools
-        .iter()
-        .filter(|tool| tool.get("name").and_then(|value| value.as_str()).is_some())
-        .collect::<Vec<_>>();
-    if let Some(tool) = candidates.iter().find(|tool| {
-        tool.get("name").and_then(|value| value.as_str()) == Some(ALIYUN_MCP_TOOL_NAME)
-    }) {
-        return Ok((*tool).clone());
-    }
-    if candidates.len() == 1 {
-        return Ok(candidates[0].clone());
-    }
-    Err((
-        "invalid_response",
-        "web.search MCP did not advertise a unique search tool".to_string(),
-    ))
-}
-
-fn mcp_tool_text(result: &serde_json::Value) -> Result<String, (&'static str, String)> {
-    if result.get("isError").and_then(|value| value.as_bool()) == Some(true) {
-        return Err((
-            "api_error",
-            "Aliyun WebSearch MCP tool returned an error".to_string(),
-        ));
-    }
-    if let Some(content) = result.get("content").and_then(|value| value.as_array()) {
-        let text = content
-            .iter()
-            .filter(|block| block.get("type").and_then(|value| value.as_str()) == Some("text"))
-            .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !text.trim().is_empty() {
-            return Ok(text);
-        }
-    }
-    if let Some(structured) = result.get("structuredContent") {
-        return serde_json::to_string_pretty(structured)
-            .map_err(|error| ("invalid_response", error.to_string()));
-    }
-    Err((
-        "invalid_response",
-        "Aliyun WebSearch MCP result contained no usable content".to_string(),
-    ))
-}
-
-fn valid_date_range(value: &str) -> bool {
-    let Some((start, end)) = value.split_once("to") else {
-        return false;
-    };
-    valid_date(start) && valid_date(end) && value.matches("to").count() == 1
-}
-
-fn valid_date(value: &str) -> bool {
-    value.len() == 10
-        && value.as_bytes()[4] == b'-'
-        && value.as_bytes()[7] == b'-'
-        && value
-            .chars()
-            .enumerate()
-            .all(|(index, ch)| matches!(index, 4 | 7) || ch.is_ascii_digit())
-}
-
-fn local_date() -> String {
-    Command::new("date")
-        .arg("+%Y-%m-%d")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| valid_date(value))
-        .unwrap_or_else(|| "1970-01-01".to_string())
-}
-
-fn add_date_days(value: &str, offset: i64) -> Option<String> {
-    let year = value.get(0..4)?.parse::<i64>().ok()?;
-    let month = value.get(5..7)?.parse::<i64>().ok()?;
-    let day = value.get(8..10)?.parse::<i64>().ok()?;
-    let days = days_from_civil(year, month, day) + offset;
-    let (year, month, day) = civil_from_days(days);
-    Some(format!("{:04}-{:02}-{:02}", year, month, day))
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let yoe = year - era * 400;
-    let shifted_month = month + if month > 2 { -3 } else { 9 };
-    let doy = (153 * shifted_month + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let days = days + 719468;
-    let era = days.div_euclid(146097);
-    let doe = days - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
 }
 
 fn resolve_arg_path(value: &str, context: &ToolContext) -> PathBuf {

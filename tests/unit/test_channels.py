@@ -1005,7 +1005,7 @@ def test_gateway_runner_keeps_session_after_model_error(tmp_path):
     assert recovered == "recovered"
 
 
-def test_gateway_hot_reload_applies_only_model_vision_and_web_search(monkeypatch, tmp_path):
+def test_gateway_hot_reload_applies_only_model_and_vision(monkeypatch, tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[model]\nprovider = "fake"\nmodel = "before"\n[session]\nmax_tool_rounds = 7\n',
@@ -1021,7 +1021,6 @@ def test_gateway_hot_reload_applies_only_model_vision_and_web_search(monkeypatch
     config_path.write_text(
         '[model]\nprovider = "fake"\nmodel = "after-longer"\n'
         '[vision]\nmodel = "vision-after"\n'
-        '[web_search]\napi_key = "search-after"\n'
         '[session]\nmax_tool_rounds = 99\n',
         encoding="utf-8",
     )
@@ -1035,7 +1034,6 @@ def test_gateway_hot_reload_applies_only_model_vision_and_web_search(monkeypatch
 
     assert runner.config.model.model == "after-longer"
     assert runner.config.vision.model == "vision-after"
-    assert runner.config.web_search.api_key == "search-after"
     assert runner.config.session.max_tool_rounds == 7
 
 

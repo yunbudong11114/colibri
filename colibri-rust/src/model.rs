@@ -127,12 +127,18 @@ impl OpenAiCompatibleModel {
         timeout_seconds: u64,
     ) -> Result<String, String> {
         for attempt in 0..=self.config.max_retries {
+            if crate::cancellation::cancelled() {
+                return Err("operation_cancelled".into());
+            }
             let headers = if self.config.api_key.is_empty() {
                 Vec::new()
             } else {
                 vec![("Authorization", format!("Bearer {}", self.config.api_key))]
             };
             let result = request_json("POST", url, &headers, Some(payload), timeout_seconds);
+            if crate::cancellation::cancelled() {
+                return Err("operation_cancelled".into());
+            }
             let failure = match result {
                 Ok(response) if response.status.is_none_or(|status| status < 400) => {
                     return Ok(response.body);
@@ -151,7 +157,17 @@ impl OpenAiCompatibleModel {
             }
             let delay_ms = retry_delay_ms(self.config.retry_backoff_ms, attempt);
             if delay_ms > 0 {
-                thread::sleep(Duration::from_millis(delay_ms));
+                let until = std::time::Instant::now() + Duration::from_millis(delay_ms);
+                while std::time::Instant::now() < until {
+                    if crate::cancellation::cancelled() {
+                        return Err("operation_cancelled".into());
+                    }
+                    thread::sleep(
+                        until
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(Duration::from_millis(25)),
+                    );
+                }
             }
         }
         Err("model_error:invalid_response:unreachable".to_string())

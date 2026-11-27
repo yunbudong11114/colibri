@@ -67,6 +67,15 @@ impl GatewayChannel for WeixinGatewayChannel {
         "weixin"
     }
 
+    fn poll_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.config
+                .channels_weixin
+                .poll_timeout_seconds
+                .saturating_add(5),
+        )
+    }
+
     fn poll_once(&self) -> Result<Vec<InboundEnvelope>, ChannelPollError> {
         let mut cursor = self
             .get_updates_buf

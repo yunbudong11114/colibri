@@ -1,5 +1,5 @@
 use crate::messages::{ToolCall, ToolResult};
-use crate::session::{bound_text, SessionToolExtension};
+use crate::session::SessionToolExtension;
 use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -512,24 +512,13 @@ impl SessionToolExtension for Extensions {
             Ok(result) => result,
             Err(error) => return Some(ToolResult::error("mcp_error", error)),
         };
-        let value = if result["structuredContent"].is_null() {
-            json!(result["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>())
-        } else {
-            result["structuredContent"].clone()
-        };
-        let raw = value.to_string();
-        let text = bound_text(&raw, context.config.tools.max_result_chars);
+        let (text, projected) = crate::tool_archive::project_mcp(&result, context);
         let mut output = if result["isError"] == true {
             ToolResult::error("mcp_error", text.clone())
         } else {
             ToolResult::ok(text.clone())
         };
-        output.truncated = text != raw;
+        output.truncated = projected;
         Some(output)
     }
 }

@@ -130,6 +130,7 @@ Commands:
   repl                           Start interactive chat
   configure                      Configure the model step by step
   auth weixin                    Log in to Weixin with a QR code
+  /stop  Stop the current turn and report partial progress (REPL/channel chat)
   gateway <start|stop|restart|status|run>
                                  Manage the background gateway
   diagnostics                    Show runtime diagnostics
@@ -251,7 +252,6 @@ Default config: ~/.colibri/config.toml (or $COLIBRI_HOME/config.toml)"#
             status.write("ready", &[("model", config.model.model.as_str())]);
             status.write("thinking", &[]);
             let restore = config.session.restore_transcript;
-            let session_config = config.session.clone();
             let status_stderr = Arc::clone(&stderr);
             let mut session = AgentSession::new(config, model).with_status_callback(
                 status_enabled,
@@ -263,7 +263,7 @@ Default config: ~/.colibri/config.toml (or $COLIBRI_HOME/config.toml)"#
             );
             if restore {
                 session = session.with_model_history_loader(Box::new(move || {
-                    TranscriptHistoryLoader::default(&session_config).load_model("local")
+                    TranscriptHistoryLoader::default().load_model("local")
                 }));
             }
             let result = (|| -> Result<i32, String> {
@@ -388,7 +388,9 @@ pub fn run_steering_pump(
 ) {
     while !stop.load(Ordering::SeqCst) {
         if let Some(line) = read_line(0.2) {
-            handle.steer(line.trim());
+            if handle.steer(line.trim()) {
+                eprintln!("{}", crate::steering::format_received(line.trim()));
+            }
         }
     }
 }
@@ -432,9 +434,8 @@ fn repl<R: Read, W: Write + Send + 'static, E: Write + Send + 'static>(
         }),
     );
     if config.session.restore_transcript {
-        let session_config = config.session.clone();
         session = session.with_model_history_loader(Box::new(move || {
-            TranscriptHistoryLoader::default(&session_config).load_model("local")
+            TranscriptHistoryLoader::default().load_model("local")
         }));
     }
     let result = repl_loop(

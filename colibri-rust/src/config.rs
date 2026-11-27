@@ -31,9 +31,6 @@ pub struct SessionConfig {
     pub idle_exit_seconds: u64,
     pub transcript: bool,
     pub restore_transcript: bool,
-    pub restore_message_limit: usize,
-    pub restore_char_limit: usize,
-    pub restore_scan_bytes: usize,
     pub transcript_retention_days: u64,
     pub transcript_max_total_bytes: usize,
 }
@@ -65,15 +62,6 @@ pub struct MemoryConfig {
     pub max_search_results: usize,
     pub enabled: bool,
     pub max_recall_chars: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct WebSearchConfig {
-    pub engine: String,
-    pub api_key: String,
-    pub endpoint: String,
-    pub max_results: usize,
-    pub timeout_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,11 +118,11 @@ pub struct AgentConfig {
     pub skills: SkillsConfig,
     pub console: ConsoleConfig,
     pub memory: MemoryConfig,
-    pub web_search: WebSearchConfig,
     pub hardware: HardwareConfig,
     pub gateway: GatewayConfig,
     pub channels_weixin: WeixinChannelConfig,
     pub speech: SpeechConfig,
+    pub mcp_config_path: PathBuf,
     pub mcp_servers: serde_json::Value,
 }
 
@@ -165,9 +153,6 @@ impl Default for AgentConfig {
                 idle_exit_seconds: 300,
                 transcript: true,
                 restore_transcript: true,
-                restore_message_limit: 24,
-                restore_char_limit: 24000,
-                restore_scan_bytes: 2 * 1024 * 1024,
                 transcript_retention_days: 30,
                 transcript_max_total_bytes: 128 * 1024 * 1024,
             },
@@ -175,7 +160,6 @@ impl Default for AgentConfig {
                 enabled: vec![
                     "shell".to_string(),
                     "files".to_string(),
-                    "web".to_string(),
                     "image".to_string(),
                     "memory".to_string(),
                     "skills".to_string(),
@@ -199,13 +183,6 @@ impl Default for AgentConfig {
                 enabled: true,
                 max_recall_chars: 6000,
             },
-            web_search: WebSearchConfig {
-                engine: "baidu".to_string(),
-                api_key: String::new(),
-                endpoint: "https://qianfan.baidubce.com/v2/ai_search/web_search".to_string(),
-                max_results: 10,
-                timeout_seconds: 10,
-            },
             hardware: HardwareConfig {
                 enabled: false,
                 discovery: "on_demand".to_string(),
@@ -226,6 +203,7 @@ impl Default for AgentConfig {
                 model: "whisper-1".into(),
                 api_key: String::new(),
             },
+            mcp_config_path: PathBuf::new(),
             mcp_servers: serde_json::json!([]),
             channels_weixin: WeixinChannelConfig {
                 enabled: false,
@@ -248,23 +226,15 @@ impl AgentConfig {
     }
 
     pub fn load(path: Option<&Path>) -> Result<Self, String> {
-        let active = match path {
-            Some(path) => Some(path.to_path_buf()),
-            None => {
-                let default = default_config_path();
-                default.exists().then_some(default)
-            }
-        };
-        let Some(path) = active else {
-            let mut config = Self::user_defaults();
-            config.enable_application_access();
-            return Ok(config);
-        };
+        let path = path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_config_path);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut config = Self::user_defaults();
                 config.enable_application_access();
+                config.load_mcp(&path, &toml::Value::Table(Default::default()))?;
                 return Ok(config);
             }
             Err(error) => {
@@ -280,8 +250,39 @@ impl AgentConfig {
             .parse::<toml::Value>()
             .map_err(|error| format!("failed to parse config {}: {}", path.display(), error))?;
         apply_toml_value(&mut config, &value)?;
+        config.load_mcp(&path, &value)?;
         Ok(config)
     }
+    pub(crate) fn load_mcp(
+        &mut self,
+        config_path: &Path,
+        document: &toml::Value,
+    ) -> Result<(), String> {
+        let parent = config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mcp = document.get("mcp");
+        let path = resolve_mcp_path(
+            parent,
+            mcp.and_then(|table| table.get("config_path"))
+                .map(toml::Value::as_str),
+        )?;
+        if mcp.and_then(|table| table.get("servers")).is_some() {
+            migrate_mcp(config_path, parent)?;
+        }
+        self.mcp_servers = match std::fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|_| "invalid MCP JSON configuration")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!([]),
+            Err(error) => return Err(format!("failed to read MCP config: {error}")),
+        };
+        crate::mcp::servers(&self.mcp_servers)?;
+        self.mcp_config_path = path;
+        Ok(())
+    }
+
     fn enable_application_access(&mut self) {
         if self.hardware.enabled && !self.tools.enabled.iter().any(|tool| tool == "hardware") {
             self.tools.enabled.push("hardware".into());
@@ -290,6 +291,50 @@ impl AgentConfig {
             self.tools.enabled.retain(|tool| tool != "memory");
         }
     }
+}
+
+fn resolve_mcp_path(parent: &Path, setting: Option<Option<&str>>) -> Result<PathBuf, String> {
+    match setting {
+        None => Ok(parent.join("mcp.json")),
+        Some(Some(path)) if !path.trim().is_empty() => Ok(parent.join(expand_user_path(path))),
+        _ => Err("invalid mcp.config_path".into()),
+    }
+}
+
+fn migrate_mcp(config_path: &Path, parent: &Path) -> Result<(), String> {
+    use crate::config_io::{atomic_write, lock};
+    use std::fs;
+    let _lock = lock(&parent.join("settings.lock")).map_err(|e| e.to_string())?;
+    let text = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|_| "invalid config.toml")?;
+    let Some(table) = document
+        .get_mut("mcp")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return Ok(());
+    };
+    if !table.contains_key("servers") {
+        return Ok(());
+    }
+    let path = resolve_mcp_path(parent, table.get("config_path").map(|item| item.as_str()))?;
+    let entries = match fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|_| "invalid MCP JSON configuration")?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let value: toml::Value = text.parse().map_err(|_| "invalid config.toml")?;
+            let entries =
+                serde_json::to_value(&value["mcp"]["servers"]).map_err(|e| e.to_string())?;
+            crate::mcp::servers(&entries)?;
+            let bytes = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
+            atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
+            entries
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    crate::mcp::servers(&entries)?;
+    table.remove("servers");
+    atomic_write(config_path, document.to_string().as_bytes()).map_err(|e| e.to_string())
 }
 
 pub fn expand_user_path(value: &str) -> PathBuf {
@@ -419,15 +464,6 @@ pub(crate) fn apply_toml_value(
         if let Some(value) = get_bool(table, "restore_transcript") {
             config.session.restore_transcript = value;
         }
-        if let Some(value) = get_usize(table, "restore_message_limit") {
-            config.session.restore_message_limit = value;
-        }
-        if let Some(value) = get_usize(table, "restore_char_limit") {
-            config.session.restore_char_limit = value;
-        }
-        if let Some(value) = get_usize(table, "restore_scan_bytes") {
-            config.session.restore_scan_bytes = value;
-        }
         if let Some(value) = get_u64(table, "transcript_retention_days") {
             config.session.transcript_retention_days = value;
         }
@@ -451,12 +487,6 @@ pub(crate) fn apply_toml_value(
         if let Some(value) = get_string(table, "api_key") {
             config.speech.api_key = value;
         }
-    }
-    if let Some(servers) = value.get("mcp").and_then(|table| table.get("servers")) {
-        if !servers.is_array() {
-            return Err("invalid mcp.servers".into());
-        }
-        config.mcp_servers = serde_json::to_value(servers).map_err(|error| error.to_string())?;
     }
     if let Some(table) = value.get("tools") {
         if let Some(value) = get_string_list(table, "enabled") {
@@ -503,23 +533,6 @@ pub(crate) fn apply_toml_value(
         }
         if let Some(value) = get_usize(table, "max_recall_chars") {
             config.memory.max_recall_chars = value;
-        }
-    }
-    if let Some(table) = value.get("web_search") {
-        if let Some(value) = get_string(table, "engine") {
-            config.web_search.engine = value;
-        }
-        if let Some(value) = get_string(table, "api_key") {
-            config.web_search.api_key = value;
-        }
-        if let Some(value) = get_string(table, "endpoint") {
-            config.web_search.endpoint = value;
-        }
-        if let Some(value) = get_usize(table, "max_results") {
-            config.web_search.max_results = value;
-        }
-        if let Some(value) = get_u64(table, "timeout_seconds") {
-            config.web_search.timeout_seconds = value;
         }
     }
     if let Some(table) = value.get("hardware") {
@@ -724,9 +737,6 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
             "idle_exit_seconds",
             "transcript",
             "restore_transcript",
-            "restore_message_limit",
-            "restore_char_limit",
-            "restore_scan_bytes",
             "transcript_retention_days",
             "transcript_max_total_bytes",
         ],
@@ -769,18 +779,6 @@ fn validate_config_fields(value: &toml::Value) -> Result<(), String> {
         "memory",
         &["root", "max_search_results", "enabled", "max_recall_chars"],
         &["max_recall_topics"],
-    )?;
-    validate_table(
-        value,
-        "web_search",
-        &[
-            "engine",
-            "api_key",
-            "endpoint",
-            "max_results",
-            "timeout_seconds",
-        ],
-        &[],
     )?;
     validate_table(
         value,

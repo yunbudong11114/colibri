@@ -1,3 +1,4 @@
+mod diagnostics;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,17 +159,10 @@ impl GatewaySessionCache {
                 model: Arc::clone(&model),
             },
         );
-        let transcript = if config.session.transcript {
-            TranscriptWriter::default_with_metadata_and_limits(
-                BTreeMap::new(),
-                config.session.transcript_retention_days,
-                config.session.transcript_max_total_bytes,
-            )
+        let transcript = TranscriptWriter::for_session(&colibri_home(), &config.session)
             .ok()
-            .map(|writer| Arc::new(Mutex::new(writer)))
-        } else {
-            None
-        };
+            .flatten()
+            .map(|writer| Arc::new(Mutex::new(writer)));
         Ok(Self {
             max_sessions: config.gateway.max_sessions.max(1),
             idle_seconds: config.gateway.session_idle_seconds,
@@ -246,10 +240,9 @@ impl GatewaySessionCache {
             metadata,
         );
         if self.config.session.restore_transcript {
-            let policy = self.config.session.clone();
             let source = key.to_string();
             session = session.with_model_history_loader(Box::new(move || {
-                TranscriptHistoryLoader::default(&policy).load_model(&source)
+                TranscriptHistoryLoader::default().load_model(&source)
             }));
         }
         self.steer_handles
@@ -319,10 +312,9 @@ impl GatewaySessionCache {
             metadata,
         );
         if self.config.session.restore_transcript {
-            let policy = self.config.session.clone();
             let source = key.to_string();
             session = session.with_model_history_loader(Box::new(move || {
-                TranscriptHistoryLoader::default(&policy).load_model(&source)
+                TranscriptHistoryLoader::default().load_model(&source)
             }));
         }
         session.set_media_sender(media_sender);
@@ -531,16 +523,13 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
     }
     let deadline = Instant::now() + Duration::from_millis(250);
     loop {
-        if process
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
+        if let Some(exit) = process.try_wait().map_err(|error| error.to_string())? {
             let mut status = GatewayStatus::from_paths(state_path, log_path);
             status.running = false;
             status.agent_status = "unhealthy".to_string();
             status.rss_kb = None;
             status.reason = "startup_exited".to_string();
+            diagnostics::capture(&status, &format!("startup_exited status={exit}"));
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -553,6 +542,7 @@ pub fn start_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, Stri
 
 pub fn stop_gateway() -> Result<GatewayStatus, String> {
     let status = GatewayStatus::current();
+    diagnostics::capture(&status, "stop");
     let Some(pid) = status
         .pid
         .as_deref()
@@ -570,6 +560,14 @@ pub fn stop_gateway() -> Result<GatewayStatus, String> {
             failure = "unverified_pid";
             break;
         }
+        diagnostics::capture(
+            &status,
+            if signal == "-TERM" {
+                "signal_TERM"
+            } else {
+                "signal_KILL"
+            },
+        );
         let sent = Command::new("kill")
             .arg(signal)
             .arg(pid.to_string())
@@ -593,10 +591,12 @@ pub fn stop_gateway() -> Result<GatewayStatus, String> {
         }
         .to_string();
     }
+    diagnostics::capture(&status, "stop_result");
     Ok(status)
 }
 
 pub fn restart_gateway(config_path: Option<PathBuf>) -> Result<GatewayStatus, String> {
+    diagnostics::capture(&GatewayStatus::current(), "restart");
     let stopped = stop_gateway()?;
     if stopped.running {
         return Ok(stopped);
@@ -624,6 +624,13 @@ pub fn format_gateway_status(status: &GatewayStatus) -> Vec<String> {
     ];
     if !status.started_at.is_empty() {
         lines.push(format!("started_at={}", status.started_at));
+    }
+    if status.running {
+        if let Some(live) = diagnostics::query(&status.state_path, status.pid.as_deref()) {
+            lines.push(format!("diagnostics={live}"));
+        } else {
+            lines.push("diagnostics=unavailable".into());
+        }
     }
     for (name, mode) in &status.channel_status {
         lines.push(format!("channel.{name}={mode}"));
@@ -908,7 +915,20 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
         std::process::id(),
         config.model.model
     ));
-    let channels = Arc::new(build_enabled_channels(&config)?);
+    let diagnostics = Arc::new(diagnostics::Diagnostics::default());
+    diagnostics::install_exit_observers();
+    #[cfg(unix)]
+    let diagnostic_server = match diagnostics::Server::bind(&colibri_home()) {
+        Ok(server) => Some(server),
+        Err(_) => {
+            gateway_log("diagnostic_socket_unavailable");
+            None
+        }
+    };
+    let channels = Arc::new(diagnostics::observe(
+        build_enabled_channels(&config)?,
+        &diagnostics,
+    ));
     if channels.is_empty() {
         return Err("No gateway channels are enabled".to_string());
     }
@@ -954,18 +974,37 @@ pub fn run_gateway(config: AgentConfig, config_path: Option<PathBuf>) -> Result<
             }
         }));
     }
+    let mut diagnostic_snapshot = diagnostics.snapshot(0, 0);
+    let mut diagnostic_tick = Instant::now();
     let result = (|| -> Result<i32, String> {
         loop {
             if let Ok(error) = error_rx.try_recv() {
                 return Err(error);
             }
             thread::sleep(Duration::from_millis(50));
+            if diagnostic_tick.elapsed() >= Duration::from_secs(1) {
+                diagnostic_snapshot =
+                    diagnostics.snapshot(router.pending_len(), router.active_len());
+                diagnostic_tick = Instant::now();
+            }
+            #[cfg(unix)]
+            if let Some(server) = &diagnostic_server {
+                server.serve(&diagnostic_snapshot);
+            }
+            if workers.iter().any(|worker| worker.is_finished()) {
+                return Err("gateway turn worker exited unexpectedly".into());
+            }
             if pollers.iter().all(|poller| poller.is_finished()) {
                 let error = "gateway channel poller stopped".to_string();
                 return Err(error);
             }
         }
     })();
+    gateway_log(if result.is_ok() {
+        "shutdown_begin reason=completed"
+    } else {
+        "shutdown_begin reason=runtime_error"
+    });
     router.close();
     for worker in workers {
         let _ = worker.join();
@@ -1027,6 +1066,9 @@ fn run_channel_poll_loop(
                     .map_err(|_| "gateway session cache lock poisoned".to_string())?
                     .try_steer(&key, &envelope.text);
                 if steered {
+                    if let Ok(outbound) = channel.outbound_for(&envelope) {
+                        outbound.send_ack(crate::steering::format_received(&envelope.text));
+                    }
                     continue;
                 }
             }
@@ -1045,11 +1087,13 @@ fn run_turn_worker(
     health: Arc<GatewayAgentHealth>,
 ) -> Result<(), String> {
     while let Some((key, mut envelope)) = router.acquire() {
+        let diagnostic_channel = envelope.channel.clone();
         let turn_result = (|| -> Result<(), String> {
             let channel = channels
                 .get(&envelope.channel)
                 .cloned()
                 .ok_or_else(|| format!("unknown gateway channel: {}", envelope.channel))?;
+            channel.diagnostic_stage("resolve_media");
             channel.resolve_inbound_media(&mut envelope)?;
             let outbound = channel.outbound_for(&envelope)?;
             let media_outbound = Arc::clone(&outbound);
@@ -1069,10 +1113,23 @@ fn run_turn_worker(
                     Some(media_sender),
                 )?
             };
+            let diagnostic_target = Arc::clone(&channel);
+            session = session.with_activity_callback(Arc::new(move |stage| {
+                diagnostic_target.diagnostic_stage(match stage {
+                    "thinking" => "model_request",
+                    "compacting" => "compacting",
+                    "running_command" => "running_command",
+                    "waiting_command" => "waiting_command",
+                    "understanding_image" => "understanding_image",
+                    "calling_mcp" => "calling_mcp",
+                    _ => "tool",
+                });
+            }));
             let ack_outbound = Arc::clone(&outbound);
             session.set_steer_notifier(Some(Arc::new(move |ack| {
                 ack_outbound.send_ack(&ack);
             })));
+            channel.diagnostic_stage("model_or_tool");
             let response_result = session.submit_with_media(&envelope.text, envelope.media);
             {
                 let mut guard = sessions
@@ -1094,10 +1151,14 @@ fn run_turn_worker(
                 "healthy"
             });
             if !response.text.trim().is_empty() {
+                channel.diagnostic_stage("send_reply");
                 outbound.send_text(&response.text)?;
             }
             Ok(())
         })();
+        if let Some(channel) = channels.get(&diagnostic_channel) {
+            channel.diagnostic_stage("idle");
+        }
         router.release(&key);
         turn_result?;
     }

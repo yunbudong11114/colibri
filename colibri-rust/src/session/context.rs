@@ -71,19 +71,7 @@ impl AgentSession {
         if self.transcript.is_none() {
             return;
         }
-        let limit = self.config.session.restore_scan_bytes.saturating_sub(4096);
-        let approximate = estimate_model_input_tokens(&self.messages)
-            .saturating_mul(4)
-            .saturating_add(self.summary.len())
-            .saturating_add(crate::model_history::context_bytes(&self.context_updates));
-        if approximate > limit {
-            self.write_transcript(name, payload);
-            return;
-        }
-        let snapshot = self.history_snapshot();
-        if snapshot.encoded_len() <= limit {
-            payload["history"] = serde_json::to_value(snapshot).unwrap_or_default();
-        }
+        payload["history"] = serde_json::to_value(self.history_snapshot()).unwrap_or_default();
         self.write_transcript(name, payload);
     }
 

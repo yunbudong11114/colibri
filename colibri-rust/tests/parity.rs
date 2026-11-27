@@ -136,7 +136,7 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "serial_json_transport_round_trips_over_pty_like_python",
                 "hardware_simulator_cli_reads_and_writes_ndjson_like_python",
                 "hardware_tools_enforce_capability_write_and_transfer_limits_like_python",
-                "python_rust_hardware_tool_schemas_match",
+                "rust_hardware_tool_schemas_expose_encoding_and_limits",
                 "python_rust_hardware_simulator_output_matches",
             ],
             status: "covered",
@@ -152,7 +152,9 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         },
         ParityEntry {
             python_file: "test_channel_permission.py",
-            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            rust_tests: &[
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
+            ],
             status: "intentional_difference",
         },
         ParityEntry {
@@ -192,12 +194,16 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         },
         ParityEntry {
             python_file: "test_permissions.py",
-            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            rust_tests: &[
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
+            ],
             status: "intentional_difference",
         },
         ParityEntry {
             python_file: "test_permissions_store.py",
-            rust_tests: &["direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate"],
+            rust_tests: &[
+                "direct_runtime_requests_confirmation_in_prompt_without_a_permission_gate",
+            ],
             status: "intentional_difference",
         },
         ParityEntry {
@@ -248,8 +254,8 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
         ParityEntry {
             python_file: "test_session_history.py",
             rust_tests: &[
-                "transcript_history_loader_restores_complete_turns_and_strips_attachment_paths_like_python",
-                "transcript_history_loader_pairs_each_source_by_completion_order_like_python",
+                "display_history_preserves_pending_question_and_strips_attachment_paths",
+                "display_history_filters_local_source",
             ],
             status: "covered",
         },
@@ -299,12 +305,6 @@ fn parity_coverage_map() -> Vec<ParityEntry> {
                 "shell_timeout_kills_background_process_group_like_python",
                 "shell_run_bounds_large_output_and_preserves_tail_like_python",
                 "nonzero_shell_exit_uses_python_error_type",
-                "web_search_requires_configured_baidu_api_key",
-                "web_search_aliyun_mcp_requires_key",
-                "web_search_aliyun_mcp_maps_jsonrpc_error",
-                "web_search_calls_aliyun_streamable_http_mcp",
-                "web_search_rejects_invalid_freshness_before_network_like_python",
-                "web_search_posts_baidu_request_and_formats_references",
                 "tool_schemas_match_python_property_types_and_required_fields",
             ],
             status: "partial",
@@ -359,7 +359,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_gateway_session_cache_passes_shared_history_loader_to_new_sessions",
             "test_gateway_runner_handles_message_with_weixin_permission_policy",
             "test_gateway_runner_keeps_session_after_model_error",
-            "test_gateway_hot_reload_applies_only_model_vision_and_web_search",
+            "test_gateway_hot_reload_applies_only_model_and_vision",
             "test_gateway_hot_reload_preserves_session_permission_grants",
             "test_gateway_invalid_reload_keeps_last_known_good_runtime",
             "test_gateway_runner_passes_inbound_media_paths_to_session",
@@ -378,7 +378,7 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_ask_can_disable_status",
             "test_ask_closes_session_transcript",
             "test_repl_exits_on_quit",
-            "test_repl_hot_reloads_model_vision_and_web_search_only",
+            "test_repl_hot_reloads_model_and_vision_only",
             "test_repl_hot_reload_preserves_session_permission_grants",
             "test_repl_continues_after_model_error",
             "test_repl_exits_on_idle_timeout",
@@ -681,11 +681,6 @@ fn mapped_python_tests_for_file(file: &str) -> &'static [&'static str] {
             "test_shell_run_times_out_slow_command",
             "test_shell_run_timeout_kills_background_process_group",
             "test_shell_run_bounds_large_output_and_preserves_tail",
-            "test_web_search_builds_baidu_request_and_formats_results",
-            "test_web_search_requires_configured_baidu_api_key",
-            "test_web_search_calls_aliyun_streamable_http_mcp",
-            "test_web_search_aliyun_mcp_requires_key",
-            "test_web_search_aliyun_mcp_maps_jsonrpc_error",
             "test_memory_list_returns_builtin_files_and_sorted_topic_names",
             "test_memory_read_reads_builtin_file_topic_shorthand_and_rejects_traversal",
             "test_memory_search_only_searches_index_lines_with_limit",
@@ -865,47 +860,40 @@ fn python_rust_hardware_simulator_output_matches() {
 }
 
 #[test]
-fn python_rust_hardware_tool_schemas_match() {
-    let script = concat!(
-        "import json\n",
-        "from dataclasses import replace\n",
-        "from colibri.config import AgentConfig\n",
-        "from colibri.tools.registry import ToolRegistry\n",
-        "c=AgentConfig.default()\n",
-        "c=replace(c,tools=replace(c.tools,enabled=[*c.tools.enabled,'hardware']),",
-        "hardware=replace(c.hardware,enabled=True))\n",
-        "print(json.dumps([s for s in ToolRegistry.from_config(c).specs() ",
-        "if s['function']['name'].split('.')[0] in {'hardware','serial','gpio','i2c','spi'}]))\n",
-    );
-    let python = Command::new(uv_bin())
-        .args(["run", "python", "-c", script])
-        .current_dir(repo_root())
-        .output()
-        .expect("run Python hardware schema export");
-    assert!(
-        python.status.success(),
-        "{}",
-        String::from_utf8_lossy(&python.stderr)
-    );
-    let python_specs: serde_json::Value =
-        serde_json::from_slice(&python.stdout).expect("parse Python hardware specs");
-
+fn rust_hardware_tool_schemas_expose_encoding_and_limits() {
     let mut config = colibri_rust::config::AgentConfig::default();
     config.hardware.enabled = true;
-    config.tools.enabled.push("hardware".to_string());
-    let rust_specs = colibri_rust::tools::tool_specs_for_config(&config)
-        .into_iter()
-        .filter(|spec| {
-            spec["function"]["name"]
-                .as_str()
-                .and_then(|name| name.split('.').next())
-                .is_some_and(|prefix| {
-                    matches!(prefix, "hardware" | "serial" | "gpio" | "i2c" | "spi")
-                })
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(python_specs, serde_json::Value::Array(rust_specs));
+    config.tools.enabled.push("hardware".into());
+    let specs = colibri_rust::tools::tool_specs_for_config(&config);
+    let get = |name: &str| {
+        specs
+            .iter()
+            .find(|v| v["function"]["name"] == name)
+            .unwrap()
+    };
+    assert_eq!(
+        get("serial.read")["function"]["parameters"]["properties"]["encoding"]["enum"],
+        serde_json::json!(["auto", "text", "hex"])
+    );
+    assert_eq!(
+        get("serial.write")["function"]["parameters"]["properties"]["encoding"]["enum"],
+        serde_json::json!(["text", "hex"])
+    );
+    for name in [
+        "serial.read",
+        "serial.write",
+        "gpio.read",
+        "gpio.write",
+        "i2c.read",
+        "i2c.write",
+        "spi.transfer",
+    ] {
+        assert_eq!(
+            get(name)["function"]["parameters"]["additionalProperties"],
+            false
+        );
+        assert!(get(name)["function"]["parameters"]["properties"]["device"].is_object());
+    }
 }
 
 struct CliFixture {

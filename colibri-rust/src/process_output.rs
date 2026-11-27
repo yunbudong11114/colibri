@@ -12,10 +12,13 @@ pub struct BoundedCommandOutput {
     pub success: bool,
     pub text: String,
     pub truncated: bool,
+    pub exit_code: Option<i32>,
+    pub termination: Option<&'static str>,
 }
 
 pub enum CommandRunError {
     Timeout,
+    Cancelled,
     Io(String),
 }
 
@@ -80,10 +83,35 @@ impl BoundedBytes {
 }
 
 pub fn run_bounded_command(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
     max_result_chars: usize,
 ) -> Result<BoundedCommandOutput, CommandRunError> {
+    run_command(command, timeout, max_result_chars, None)
+}
+
+pub(crate) fn run_tool_command(
+    command: Command,
+    timeout: Duration,
+    context: &crate::tools::ToolContext,
+) -> Result<BoundedCommandOutput, CommandRunError> {
+    run_command(
+        command,
+        timeout,
+        context.config.tools.max_result_chars.min(4096),
+        Some(context),
+    )
+}
+
+fn run_command(
+    mut command: Command,
+    timeout: Duration,
+    max_result_chars: usize,
+    context: Option<&crate::tools::ToolContext>,
+) -> Result<BoundedCommandOutput, CommandRunError> {
+    if crate::cancellation::cancelled() {
+        return Err(CommandRunError::Cancelled);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     command.process_group(0);
@@ -92,31 +120,45 @@ pub fn run_bounded_command(
         .map_err(|error| CommandRunError::Io(error.to_string()))?;
     let raw_capacity = max_result_chars.saturating_mul(4).max(64);
     let stream_capacity = (raw_capacity / 2).max(32);
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_reader(stdout, stream_capacity));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| spawn_reader(stderr, stream_capacity));
+    let stdout_reader = child.stdout.take().map(|stdout| {
+        spawn_reader(
+            stdout,
+            stream_capacity,
+            context.map(|c| crate::tool_archive::Archive::new(c, max_result_chars / 2)),
+        )
+    });
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        spawn_reader(
+            stderr,
+            stream_capacity,
+            context.map(|c| crate::tool_archive::Archive::new(c, max_result_chars / 2)),
+        )
+    });
     let started = Instant::now();
+    let mut termination = None;
     let status = loop {
+        if crate::cancellation::cancelled() {
+            kill_process_tree(&mut child);
+            termination = Some("cancelled");
+            break child
+                .wait()
+                .map_err(|e| CommandRunError::Io(e.to_string()))?;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 kill_process_tree(&mut child);
-                let _ = child.wait();
-                let _ = join_reader(stdout_reader);
-                let _ = join_reader(stderr_reader);
-                return Err(CommandRunError::Timeout);
+                termination = Some("timeout");
+                break child
+                    .wait()
+                    .map_err(|e| CommandRunError::Io(e.to_string()))?;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(error) => return Err(CommandRunError::Io(error.to_string())),
         }
     };
-    let stdout = join_reader(stdout_reader)?;
-    let stderr = join_reader(stderr_reader)?;
+    let (stdout, stdout_archive) = join_reader(stdout_reader)?;
+    let (stderr, stderr_archive) = join_reader(stderr_reader)?;
     let (mut sampled, stdout_truncated) = stdout.sampled();
     let (stderr_sampled, stderr_truncated) = stderr.sampled();
     sampled.extend(stderr_sampled);
@@ -126,8 +168,30 @@ pub fn run_bounded_command(
         max_result_chars,
         stdout_truncated || stderr_truncated,
     );
+    let mut text = text;
+    if context.is_some() {
+        text += &format!(
+            "\nexit_code={} termination={}\n",
+            status.code().map_or("signal".into(), |v| v.to_string()),
+            termination.unwrap_or("completed")
+        );
+        if !stdout_archive.is_empty() {
+            text += &format!("stdout {stdout_archive}\n");
+        }
+        if !stderr_archive.is_empty() {
+            text += &format!("stderr {stderr_archive}\n");
+        }
+    } else if let Some(reason) = termination {
+        return Err(if reason == "cancelled" {
+            CommandRunError::Cancelled
+        } else {
+            CommandRunError::Timeout
+        });
+    }
     Ok(BoundedCommandOutput {
-        success: status.success(),
+        success: status.success() && termination.is_none(),
+        exit_code: status.code(),
+        termination,
         text,
         truncated,
     })
@@ -136,25 +200,33 @@ pub fn run_bounded_command(
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     capacity: usize,
-) -> JoinHandle<Result<BoundedBytes, String>> {
+    mut archive: Option<crate::tool_archive::Archive>,
+) -> JoinHandle<Result<(BoundedBytes, String), String>> {
     std::thread::spawn(move || {
         let mut bounded = BoundedBytes::new(capacity);
         let mut chunk = [0u8; 8192];
         loop {
             let read = reader.read(&mut chunk).map_err(|error| error.to_string())?;
             if read == 0 {
-                return Ok(bounded);
+                if let Some(a) = &mut archive {
+                    bounded.feed(&a.drain(true));
+                }
+                return Ok((bounded, archive.map(|a| a.finish()).unwrap_or_default()));
             }
-            bounded.feed(&chunk[..read]);
+            if let Some(a) = &mut archive {
+                bounded.feed(&a.feed(&chunk[..read]));
+            } else {
+                bounded.feed(&chunk[..read]);
+            }
         }
     })
 }
 
 fn join_reader(
-    reader: Option<JoinHandle<Result<BoundedBytes, String>>>,
-) -> Result<BoundedBytes, CommandRunError> {
+    reader: Option<JoinHandle<Result<(BoundedBytes, String), String>>>,
+) -> Result<(BoundedBytes, String), CommandRunError> {
     let Some(reader) = reader else {
-        return Ok(BoundedBytes::new(1));
+        return Ok((BoundedBytes::new(1), String::new()));
     };
     reader
         .join()

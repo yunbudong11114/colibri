@@ -69,45 +69,6 @@ fn recovery_keeps_real_results_and_marks_only_missing_calls_unknown() {
 }
 
 #[test]
-fn budget_retains_complete_latest_turn_and_active_snapshot() {
-    let mut assistant = Message::new("assistant", "");
-    assistant.tool_calls = vec![call("a")];
-    let history = ModelHistory {
-        messages: vec![
-            Message::new("user", "old"),
-            Message::new("assistant", "old answer"),
-            Message::new("user", "latest"),
-            assistant,
-            Message::tool("result", "a"),
-            Message::new("assistant", "complete"),
-        ],
-        summary: "summary".into(),
-        context_updates: vec![
-            ContextUpdate {
-                before_message: 0,
-                text: "old context".into(),
-            },
-            ContextUpdate {
-                before_message: 2,
-                text: "new context".into(),
-            },
-        ],
-    };
-    let restored = history.clone().bounded(2, 1, 10000).unwrap();
-    assert_eq!(restored.messages.len(), 4);
-    assert_eq!(restored.messages[0].content, "latest");
-    assert_eq!(
-        restored.context_updates,
-        vec![ContextUpdate {
-            before_message: 0,
-            text: "new context".into()
-        }]
-    );
-    assert_eq!(restored.summary, "summary");
-    assert!(history.bounded(2, 1, 1).is_none());
-}
-
-#[test]
 fn transcript_recovery_isolates_sources_and_replays_compacted_tool_history() {
     let home = std::env::temp_dir().join(format!(
         "colibri-history-maintenance-{}",
@@ -128,12 +89,111 @@ fn transcript_recovery_isolates_sources_and_replays_compacted_tool_history() {
         .map(|event| event.to_string() + "\n")
         .collect::<String>();
     fs::write(home.join("transcripts/2026-11-25-test.jsonl"), text).unwrap();
-    let loaded = TranscriptHistoryLoader::new(home.clone(), 20, 10000, 100000).load_model("local");
+    let loaded = TranscriptHistoryLoader::for_home(home.clone()).load_model("local");
     assert_eq!(loaded.summary, "retained summary");
     assert_eq!(loaded.messages.len(), 4);
     assert_eq!(loaded.messages[0].content, "question\nfixed-time");
     assert_eq!(loaded.messages[1].tool_calls[0].id, "a");
     assert_eq!(loaded.messages[2].content, "full result");
     assert_eq!(loaded.context_updates[0].text, "snapshot");
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn recovery_preserves_wire_prefix_beyond_all_display_limits() {
+    let home = std::env::temp_dir().join(format!("colibri-full-recovery-{}", std::process::id()));
+    fs::create_dir_all(home.join("transcripts")).unwrap();
+    let mut messages = Vec::new();
+    for i in 0..20 {
+        messages.push(Message::new("user", format!("question {i}")));
+        messages.push(Message::new("assistant", "中文".repeat(20000)));
+    }
+    let history = ModelHistory {
+        messages,
+        summary: "retained summary".into(),
+        context_updates: vec![ContextUpdate {
+            before_message: 17,
+            text: "immutable context".into(),
+        }],
+    };
+    let checkpoint = json!({"ts":"2026-11-25T23:59:00", "type":"model_seed", "payload":{
+        "model_stream":"1-100-0", "history":history
+    }});
+    assert!(checkpoint.to_string().len() > 2 * 1024 * 1024);
+    fs::write(
+        home.join("transcripts/2026-11-25.jsonl"),
+        checkpoint.to_string() + "\n",
+    )
+    .unwrap();
+    let mut events = json!({"ts":"2026-11-26T00:01:00", "type":"user_message", "payload":{
+        "model_stream":"1-100-0", "text":"next", "model_text":"next\nfixed time"
+    }})
+    .to_string()
+        + "\n";
+    // A newer stream in another source must never replace local history.
+    events += &(json!({"ts":"2026-11-26T00:02:00", "type":"user_message", "payload":{
+        "model_stream":"1-200-0", "session_key":"weixin:other", "text":"private"
+    }})
+    .to_string()
+        + "\n{broken partial line");
+    fs::write(home.join("transcripts/2026-11-26.jsonl"), events).unwrap();
+    let restored = TranscriptHistoryLoader::for_home(home.clone()).load_model("local");
+    assert_eq!(restored.messages.len(), 41);
+    assert_eq!(&restored.messages[..40], history.messages);
+    assert_eq!(restored.context_updates, history.context_updates);
+    assert_eq!(restored.summary, history.summary);
+    let before = assemble(
+        &history.messages,
+        &history.summary,
+        &history.context_updates,
+    );
+    let after = assemble(
+        &restored.messages,
+        &restored.summary,
+        &restored.context_updates,
+    );
+    assert_eq!(&after[..before.len()], before);
+    assert_eq!(
+        restored.messages.last().unwrap().content,
+        "next\nfixed time"
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn latest_stream_restores_checkpoint_and_repairs_interrupted_tool_call() {
+    let home = std::env::temp_dir().join(format!(
+        "colibri-interrupted-recovery-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(home.join("transcripts")).unwrap();
+    let mut assistant = Message::new("assistant", "");
+    assistant.tool_calls = vec![call("unfinished")];
+    let history = ModelHistory {
+        messages: vec![Message::new("user", "current task"), assistant],
+        ..Default::default()
+    };
+    let events = [
+        json!({"ts":"2026-11-26T00:01:00", "type":"user_message", "payload":{"model_stream":"1-100-0", "text":"old"}}),
+        json!({"ts":"2026-11-26T00:02:00", "type":"model_seed", "payload":{"model_stream":"1-200-0", "history":history}}),
+    ];
+    fs::write(
+        home.join("transcripts/2026-11-26.jsonl"),
+        events
+            .iter()
+            .map(|e| e.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let restored = TranscriptHistoryLoader::for_home(home.clone()).load_model("local");
+    assert_eq!(restored.messages[0].content, "current task");
+    assert_eq!(restored.messages.len(), 3);
+    assert!(restored.messages[2]
+        .content
+        .starts_with("execution_unknown:"));
+    assert_eq!(
+        restored.messages[2].tool_call_id.as_deref(),
+        Some("unfinished")
+    );
     fs::remove_dir_all(home).unwrap();
 }

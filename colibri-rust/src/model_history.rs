@@ -168,49 +168,4 @@ impl ModelHistory {
         }
         self.messages = output;
     }
-
-    pub fn bounded(
-        mut self,
-        message_limit: usize,
-        char_limit: usize,
-        byte_limit: usize,
-    ) -> Option<Self> {
-        if message_limit == 0 || char_limit == 0 || byte_limit == 0 {
-            return None;
-        }
-        self.repair_tool_results();
-        let starts = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| (message.role == "user").then_some(index))
-            .collect::<Vec<_>>();
-        let latest = *starts.last()?;
-        let mut start = latest;
-        for &candidate in starts.iter().rev().skip(1) {
-            let tail = &self.messages[candidate..];
-            let chars = tail
-                .iter()
-                .map(|message| {
-                    message.content.chars().count()
-                        + serde_json::to_vec(&message.tool_calls).map_or(0, |bytes| bytes.len())
-                })
-                .sum::<usize>();
-            if tail.len() > message_limit || chars > char_limit {
-                break;
-            }
-            start = candidate;
-        }
-        self.retain_from(start);
-        while self.encoded_len() > byte_limit {
-            let next = self
-                .messages
-                .iter()
-                .enumerate()
-                .skip(1)
-                .find_map(|(index, message)| (message.role == "user").then_some(index))?;
-            self.retain_from(next);
-        }
-        Some(self)
-    }
 }

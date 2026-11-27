@@ -52,3 +52,31 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     fs::rename(temporary, path)
 }
+
+/// Same advisory lock as `lock`, but lets an agent stop while another writer holds it.
+pub(crate) fn lock_interruptible(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    loop {
+        if crate::cancellation::cancelled() {
+            return Err(io::Error::other(
+                "cancelled while waiting for Memory write lock",
+            ));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let e = io::Error::last_os_error();
+        if !matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
+            return Err(e);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

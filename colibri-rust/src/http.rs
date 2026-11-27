@@ -92,6 +92,38 @@ fn request_bytes(
     content_type: Option<&str>,
     timeout_seconds: u64,
 ) -> Result<BinaryHttpResponse, String> {
+    let method = method.to_owned();
+    let url = url.to_owned();
+    let headers = headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect::<Vec<_>>();
+    let body = body.map(<[u8]>::to_vec);
+    let content_type = content_type.map(str::to_owned);
+    crate::cancellation::wait(move || {
+        let headers = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect::<Vec<_>>();
+        request_bytes_inner(
+            &method,
+            &url,
+            &headers,
+            body.as_deref(),
+            content_type.as_deref(),
+            timeout_seconds,
+        )
+    })
+}
+
+fn request_bytes_inner(
+    method: &str,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+    timeout_seconds: u64,
+) -> Result<BinaryHttpResponse, String> {
     let mut request = shared_agent()
         .request(method, url)
         .timeout(Duration::from_secs(timeout_seconds.max(1)));

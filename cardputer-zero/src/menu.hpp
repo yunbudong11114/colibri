@@ -10,14 +10,11 @@ inline const nlohmann::json SettingLabels{
     {"vision.model", "视觉模型名称"}, {"vision.base_url", "视觉 API 地址"},
     {"vision.api_key", "视觉 API 密钥"}, {"vision.timeout_seconds", "超时（秒）"},
     {"vision.max_image_bytes", "图片上限（字节）"},
-    {"web_search.engine", "搜索 · 引擎"},
-    {"web_search.endpoint", "搜索 · API 地址"}, {"web_search.api_key", "搜索 · API 密钥"},
     {"session.max_context_memory_mib", "上下文内存上限（MiB）"},
     {"session.transcript", "历史 · 保存记录"}, {"session.restore_transcript", "历史 · 启动恢复"},
     {"session.transcript_retention_days", "历史 · 保留天数"},
     {"session.transcript_max_total_bytes", "历史 · 容量（字节）"},
     {"memory.enabled", "启用长期记忆"}, {"memory.root", "记忆目录"},
-    {"mcp.servers", "MCP · 服务器 JSON"},
 };
 inline const std::vector<std::string> CatalogKinds{"MCP", "技能"};
 enum class MenuAction { Settings, Help, Catalog, Task, Memory, Quit };
@@ -43,10 +40,11 @@ inline constexpr const char* HelpTexts[]{
     "设置 F/X 选择，Z 返回，C 打开",
     "/clear   清理屏幕，保留历史和上下文\n"
     "/compact   压缩 Agent 上下文\n"
+    "/stop   停止当前任务并报告阶段性结论\n"
     "以上命令在聊天输入框发送。"
 };
-inline const std::vector<std::string> CategoryNames{"模型", "图片理解", "搜索", "历史与上下文", "长期记忆", "MCP 配置"};
-inline const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "web_search.", "session.", "memory.", "mcp."};
+inline const std::vector<std::string> CategoryNames{"模型", "图片理解", "历史与上下文", "长期记忆"};
+inline const std::vector<std::string> CategoryPrefixes{"model.", "vision.", "session.", "memory."};
 inline constexpr std::size_t MemoryCategory = 4;
 inline constexpr std::size_t TaskMenuIndex = 0;
 inline constexpr std::size_t MemoryMenuIndex = 1;
